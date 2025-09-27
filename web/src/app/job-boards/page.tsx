@@ -1,3 +1,5 @@
+import React from "react";
+
 export default function Placeholder() {
   return (
     <main className="mx-auto max-w-3xl p-6">

@@ -1,3 +1,4 @@
+import React from "react";
 type Props = { label: string; value: string | number; hint?: string };
 export default function KpiCard({ label, value, hint }: Props) {
   return (

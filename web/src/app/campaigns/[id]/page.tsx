@@ -1,4 +1,5 @@
 // web/src/app/campaigns/[id]/page.tsx
+import React from "react";
 import { supabaseServer } from "@/lib/supabaseServer";
 import Link from "next/link";
 

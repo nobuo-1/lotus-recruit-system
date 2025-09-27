@@ -1,5 +1,6 @@
 // web/src/components/WheelDatePicker.tsx
 "use client";
+import React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 type Props = {

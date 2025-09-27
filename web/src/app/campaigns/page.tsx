@@ -1,4 +1,5 @@
 // web/src/app/campaigns/page.tsx
+import React from "react";
 export const dynamic = "force-dynamic";
 
 import Link from "next/link";

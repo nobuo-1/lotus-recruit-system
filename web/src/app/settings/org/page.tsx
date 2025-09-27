@@ -1,5 +1,6 @@
 // web/src/app/settings/org/page.tsx
 "use client";
+import React from "react";
 import { useEffect, useState } from "react";
 
 type Brand = {
