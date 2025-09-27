@@ -1,52 +1,54 @@
 // web/src/app/api/recipients/search/route.ts
+export const dynamic = "force-dynamic";
+
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
 
+/**
+ * GET /api/recipients/search?active=0|1
+ * - active=1 のときだけ is_active=true を絞り込み
+ * - active=0 または未指定は全件（テナント内）
+ * 返却列：UIで使う全項目（phone/consent を含む）
+ */
 export async function GET(req: Request) {
   try {
     const supabase = await supabaseServer();
 
     // 認証
     const { data: u } = await supabase.auth.getUser();
-    if (!u?.user)
-      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    if (!u?.user) return NextResponse.json({ rows: [] });
 
     // テナント
-    const { data: prof, error: pe } = await supabase
+    const { data: prof } = await supabase
       .from("profiles")
       .select("tenant_id")
       .eq("id", u.user.id)
       .maybeSingle();
-    if (pe) return NextResponse.json({ error: pe.message }, { status: 400 });
+
     const tenantId = prof?.tenant_id as string | undefined;
-    if (!tenantId)
-      return NextResponse.json({ error: "no tenant" }, { status: 400 });
+    if (!tenantId) return NextResponse.json({ rows: [] });
 
-    // クエリパラメータ
     const url = new URL(req.url);
-    const active = url.searchParams.get("active");
+    const active = url.searchParams.get("active"); // "1" のときだけ active を絞る
 
-    // 取得
-    let qb = supabase
+    let q = supabase
       .from("recipients")
       .select(
-        "id, name, email, gender, region, birthday, job_category_large, job_category_small, is_active"
+        // ← 電話/consent を入れる
+        "id,name,email,phone,gender,region,birthday,job_category_large,job_category_small,job_type,is_active,consent"
       )
       .eq("tenant_id", tenantId);
 
     if (active === "1") {
-      qb = qb.eq("is_active", true);
+      q = q.eq("is_active", true);
     }
 
-    const { data, error } = await qb;
-    if (error)
-      return NextResponse.json({ error: error.message }, { status: 400 });
+    // 並び順は任意（created_at が無ければ名前）
+    const { data, error } = await q;
+    if (error) return NextResponse.json({ rows: [] });
 
     return NextResponse.json({ rows: data ?? [] });
-  } catch (e: any) {
-    return NextResponse.json(
-      { error: e?.message ?? "internal error" },
-      { status: 500 }
-    );
+  } catch {
+    return NextResponse.json({ rows: [] });
   }
 }

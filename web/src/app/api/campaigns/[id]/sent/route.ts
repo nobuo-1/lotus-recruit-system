@@ -6,11 +6,10 @@ import { supabaseServer } from "@/lib/supabaseServer";
 
 export async function GET(
   _req: Request,
-  ctx: { params: Promise<{ id: string }> } // ← params は Promise。必ず await する
+  ctx: { params: Promise<{ id: string }> } // ★ Next.js 15: params は Promise
 ) {
   try {
-    const { id } = await ctx.params;
-
+    const { id } = await ctx.params; // ★ await で取り出し
     const supabase = await supabaseServer();
 
     // 認証

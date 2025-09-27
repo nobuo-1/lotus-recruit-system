@@ -1,8 +1,12 @@
+// web/src/app/recipients/page.tsx
 "use client";
-import React from "react";
-import { useEffect, useState } from "react";
+
+import { useEffect, useMemo, useState } from "react";
+
 import Link from "next/link";
 import Toggle from "@/components/Toggle";
+import { PREFECTURES } from "@/constants/prefectures";
+import { JOB_CATEGORIES, JOB_LARGE } from "@/constants/jobCategories";
 
 type Row = {
   id: string;
@@ -16,6 +20,7 @@ type Row = {
   job_category_small: string | null;
   job_type: string | null;
   is_active: boolean | null;
+  consent: string | null; // 'opt_out' のとき配信停止申請
 };
 
 const safe = (v: any) => v ?? "";
@@ -49,6 +54,21 @@ export default function RecipientsPage() {
   const [rows, setRows] = useState<Row[]>([]);
   const [msg, setMsg] = useState("");
 
+  // フィルタ（配信先ページ相当）
+  const [openFilter, setOpenFilter] = useState(false); // ← トグル“形式”（スイッチではなく開閉）
+  const [q, setQ] = useState("");
+  const [ageMin, setAgeMin] = useState<string>("");
+  const [ageMax, setAgeMax] = useState<string>("");
+  const [gender, setGender] = useState<string>("");
+  const [pref, setPref] = useState<string>("");
+  const [large, setLarge] = useState<string>("");
+  const [small, setSmall] = useState<string>("");
+
+  const smallOptions = useMemo(
+    () => (large ? JOB_CATEGORIES[large] ?? [] : []),
+    [large]
+  );
+
   const load = async () => {
     const res = await fetch("/api/recipients/search?active=0");
     const j = await res.json();
@@ -57,6 +77,21 @@ export default function RecipientsPage() {
   useEffect(() => {
     load();
   }, []);
+
+  const filtered = useMemo(() => {
+    return rows.filter((r) => {
+      if (q && !(r.name ?? "").includes(q) && !(r.email ?? "").includes(q))
+        return false;
+      if (gender && r.gender !== (gender as any)) return false;
+      if (pref && r.region !== pref) return false;
+      if (large && r.job_category_large !== large) return false;
+      if (small && r.job_category_small !== small) return false;
+      const age = ageFromBirthday(r.birthday);
+      if (ageMin && (age ? +age : -1) < +ageMin) return false;
+      if (ageMax && (age ? +age : 999) > +ageMax) return false;
+      return true;
+    });
+  }, [rows, q, gender, pref, large, small, ageMin, ageMax]);
 
   const toggleActive = async (id: string, next: boolean) => {
     const res = await fetch("/api/recipients/toggle", {
@@ -79,6 +114,16 @@ export default function RecipientsPage() {
     const t = await res.text();
     setMsg(`${res.status}: ${t}`);
     if (res.ok) load();
+  };
+
+  const clearFilters = () => {
+    setQ("");
+    setAgeMin("");
+    setAgeMax("");
+    setGender("");
+    setPref("");
+    setLarge("");
+    setSmall("");
   };
 
   return (
@@ -106,6 +151,121 @@ export default function RecipientsPage() {
         </div>
       </div>
 
+      {/* フィルタ：トグル“形式”（開閉できるヘッダ行） */}
+      <div className="mb-3 rounded-2xl border border-neutral-200">
+        <button
+          type="button"
+          aria-expanded={openFilter}
+          onClick={() => setOpenFilter((v) => !v)}
+          className="flex w-full items-center justify-between px-4 py-3 text-left"
+        >
+          <span className="text-sm text-neutral-700">フィルター</span>
+          <span
+            className={`inline-block text-neutral-500 transition-transform ${
+              openFilter ? "rotate-180" : ""
+            }`}
+            aria-hidden
+          >
+            ▾
+          </span>
+        </button>
+
+        {openFilter && (
+          <div className="border-t border-neutral-200 px-4 py-4">
+            <div className="mb-3 grid grid-cols-1 gap-3 md:grid-cols-3">
+              <input
+                placeholder="名前/メールで検索"
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                className="rounded-lg border border-neutral-300 px-3 py-2"
+              />
+              <div className="flex gap-2">
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  placeholder="年齢(最小)"
+                  value={ageMin}
+                  onChange={(e) => setAgeMin(e.target.value)}
+                  className="w-full rounded-lg border border-neutral-300 px-3 py-2"
+                />
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  placeholder="年齢(最大)"
+                  value={ageMax}
+                  onChange={(e) => setAgeMax(e.target.value)}
+                  className="w-full rounded-lg border border-neutral-300 px-3 py-2"
+                />
+              </div>
+              <select
+                value={gender}
+                onChange={(e) => setGender(e.target.value)}
+                className="rounded-lg border border-neutral-300 px-3 py-2"
+              >
+                <option value="">性別: 指定なし</option>
+                <option value="male">男性</option>
+                <option value="female">女性</option>
+              </select>
+
+              <select
+                value={large}
+                onChange={(e) => {
+                  setLarge(e.target.value);
+                  setSmall("");
+                }}
+                className="rounded-lg border border-neutral-300 px-3 py-2"
+              >
+                <option value="">大カテゴリ: 指定なし</option>
+                {JOB_LARGE.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                value={small}
+                onChange={(e) => setSmall(e.target.value)}
+                disabled={!large}
+                className="rounded-lg border border-neutral-300 px-3 py-2 disabled:bg-neutral-100"
+              >
+                <option value="">
+                  {large ? "小カテゴリ: 指定なし" : "大カテゴリを先に選択"}
+                </option>
+                {(large ? smallOptions : []).map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                value={pref}
+                onChange={(e) => setPref(e.target.value)}
+                className="rounded-lg border border-neutral-300 px-3 py-2"
+              >
+                <option value="">都道府県: 指定なし</option>
+                {PREFECTURES.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={clearFilters}
+                className="rounded-lg border border-neutral-200 px-3 py-1.5 text-sm hover:bg-neutral-50"
+              >
+                条件クリア
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
       <div className="overflow-x-auto rounded-2xl border border-neutral-200">
         <table className="min-w-[980px] w-full text-sm">
           <thead className="bg-neutral-50 text-neutral-600">
@@ -122,9 +282,18 @@ export default function RecipientsPage() {
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => (
+            {filtered.map((r) => (
               <tr key={r.id} className="border-t border-neutral-200">
-                <td className="px-3 py-3">{safe(r.name)}</td>
+                <td className="px-3 py-3 align-top">
+                  <div className="flex flex-col gap-1">
+                    <span>{safe(r.name)}</span>
+                    {r.consent === "opt_out" && (
+                      <span className="inline-block w-fit rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-xs text-red-600">
+                        配信停止申請
+                      </span>
+                    )}
+                  </div>
+                </td>
                 <td className="px-3 py-3 text-neutral-600">{safe(r.email)}</td>
                 <td className="px-3 py-3 text-neutral-600">{safe(r.phone)}</td>
                 <td className="px-3 py-3 text-center text-neutral-600">
@@ -168,7 +337,7 @@ export default function RecipientsPage() {
                 </td>
               </tr>
             ))}
-            {rows.length === 0 && (
+            {filtered.length === 0 && (
               <tr>
                 <td
                   colSpan={9}

@@ -1,13 +1,10 @@
+// web/next.config.ts
 import type { NextConfig } from "next";
-import path from "path";
+import path from "node:path";
 
 const nextConfig: NextConfig = {
-  // 必要に応じて他のオプションを追加
-  webpack(config) {
-    // Next（webpack）側にも alias を明示しておくと安定します
-    config.resolve.alias["@"] = path.resolve(__dirname, "src");
-    return config;
-  },
+  // monorepo 警告の抑制（web/ 配下にロックファイルがある場合）
+  outputFileTracingRoot: path.resolve(__dirname, ".."),
 };
 
 export default nextConfig;

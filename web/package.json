@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "worker:email": "tsx src/worker/email.worker.ts"
+    "worker:email": "tsx src/worker/email.worker.ts",
+    "worker:dev": "tsx src/worker/email.worker.ts",
+    "worker:prod": "node --import=tsx/loader src/worker/email.worker.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.7.0",
