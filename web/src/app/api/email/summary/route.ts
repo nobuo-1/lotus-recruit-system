@@ -1,107 +1,196 @@
+export const dynamic = "force-dynamic";
+
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
 
-export async function GET() {
-  const supabase = await supabaseServer();
-  const { data: u } = await supabase.auth.getUser();
-  if (!u?.user)
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+/**
+ * ?range= 7d | 14d | 1m | 3m | 6m | 1y  （省略時 14d）
+ */
+export async function GET(req: Request) {
+  try {
+    const url = new URL(req.url);
+    const range = (url.searchParams.get("range") ?? "14d").toLowerCase();
 
-  const { data: prof } = await supabase
-    .from("profiles")
-    .select("tenant_id")
-    .eq("id", u.user.id)
-    .maybeSingle();
-  const tenant = prof?.tenant_id;
-  if (!tenant)
-    return NextResponse.json({ error: "no tenant" }, { status: 400 });
+    const supabase = await supabaseServer();
 
-  // キャンペーン総数
-  const { count: campaignCount } = await supabase
-    .from("campaigns")
-    .select("*", { count: "exact", head: true })
-    .eq("tenant_id", tenant);
+    // 認証→テナント
+    const { data: u } = await supabase.auth.getUser();
+    if (!u?.user) return NextResponse.json({ metrics: emptyMetrics() });
 
-  // 直近30日 配信試行（sent）
-  const { count: sent30 } = await supabase
-    .from("campaign_recipients")
-    .select("*", { count: "exact", head: true })
-    .eq("tenant_id", tenant)
-    .gte(
-      "sent_at",
-      new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
+    const { data: prof } = await supabase
+      .from("profiles")
+      .select("tenant_id")
+      .eq("id", u.user.id)
+      .maybeSingle();
+
+    const tenantId = prof?.tenant_id as string | undefined;
+    if (!tenantId) return NextResponse.json({ metrics: emptyMetrics() });
+
+    // 期間
+    const now = new Date();
+    const startForSeries = calcStart(range, now);
+    const start30 = addDays(now, -30);
+
+    const nowISO = now.toISOString();
+    const startSeriesISO = toDayStartISO(startForSeries);
+    const start30ISO = toDayStartISO(start30);
+
+    // ① キャンペーン総数
+    {
+      const { count: cRaw } = await supabase
+        .from("campaigns")
+        .select("id", { count: "exact", head: true })
+        .eq("tenant_id", tenantId);
+      var campaignCount = cRaw ?? 0;
+    }
+
+    // ② 直近30日の sent 件数
+    {
+      const { count: sRaw } = await supabase
+        .from("deliveries")
+        .select("id", { count: "exact", head: true })
+        .eq("tenant_id", tenantId)
+        .eq("status", "sent")
+        .gte("sent_at", start30ISO)
+        .lte("sent_at", nowISO);
+      var sent30 = sRaw ?? 0;
+    }
+
+    // ③ 到達率: (直近30日 sent) / (直近30日 deliveries 作成)
+    {
+      const { count: aRaw } = await supabase
+        .from("deliveries")
+        .select("id", { count: "exact", head: true })
+        .eq("tenant_id", tenantId)
+        .gte("created_at", start30ISO)
+        .lte("created_at", nowISO);
+      const attempted30 = aRaw ?? 0;
+      var reachRate =
+        attempted30 > 0 ? Math.round((sent30 / attempted30) * 1000) / 10 : 0;
+    }
+
+    // ④ 開封率: opened_at / sent （opened_atが無い環境は0%）
+    let openRate = 0;
+    try {
+      const { count: oRaw } = await supabase
+        .from("deliveries")
+        .select("id", { count: "exact", head: true })
+        .eq("tenant_id", tenantId)
+        .gte("opened_at", start30ISO)
+        .lte("opened_at", nowISO);
+      const opened30 = oRaw ?? 0;
+      openRate = sent30 > 0 ? Math.round((opened30 / sent30) * 1000) / 10 : 0;
+    } catch {
+      openRate = 0;
+    }
+
+    // ⑤ 直近30日の配信停止数
+    {
+      const { count: uRaw } = await supabase
+        .from("recipients")
+        .select("id", { count: "exact", head: true })
+        .eq("tenant_id", tenantId)
+        .gte("unsubscribed_at", start30ISO)
+        .lte("unsubscribed_at", nowISO);
+      var unsub30 = uRaw ?? 0;
+    }
+
+    // ⑥ 折れ線グラフ: 日別 sent
+    const { data: sentRows } = await supabase
+      .from("deliveries")
+      .select("sent_at")
+      .eq("tenant_id", tenantId)
+      .eq("status", "sent")
+      .gte("sent_at", startSeriesISO)
+      .lte("sent_at", nowISO);
+
+    const series = bucketByDay(
+      startForSeries,
+      now,
+      (sentRows ?? []).map((r) => r.sent_at as string)
     );
 
-  // 到達率 = sent / queued（簡易。statusやlast_errorの運用に合わせて調整）
-  const { count: queued30 } = await supabase
-    .from("campaign_recipients")
-    .select("*", { count: "exact", head: true })
-    .eq("tenant_id", tenant)
-    .gte(
-      "created_at",
-      new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
-    );
-
-  // 開封率（open_at あり ÷ sent）
-  const { count: opened30 } = await supabase
-    .from("campaign_recipients")
-    .select("*", { count: "exact", head: true })
-    .eq("tenant_id", tenant)
-    .gte(
-      "open_at",
-      new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
-    );
-
-  // 配信停止数（直近30日）
-  const { count: unsub30 } = await supabase
-    .from("recipients")
-    .select("*", { count: "exact", head: true })
-    .eq("tenant_id", tenant)
-    .gte(
-      "unsubscribed_at",
-      new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
-    );
-
-  // シンプルな日別シリーズ（直近14日：送信数）
-  const from = new Date();
-  from.setDate(from.getDate() - 13);
-  const to = new Date();
-  const { data: seriesRaw } = await supabase
-    .from("campaign_recipients")
-    .select("sent_at")
-    .eq("tenant_id", tenant)
-    .gte("sent_at", from.toISOString())
-    .lte("sent_at", to.toISOString());
-
-  const map = new Map<string, number>();
-  for (let i = 0; i < 14; i++) {
-    const d = new Date(from);
-    d.setDate(from.getDate() + i);
-    map.set(d.toISOString().slice(0, 10), 0);
+    return NextResponse.json({
+      metrics: {
+        campaignCount,
+        sent30,
+        reachRate,
+        openRate,
+        unsub30,
+        series,
+      },
+    });
+  } catch {
+    return NextResponse.json({ metrics: emptyMetrics() });
   }
-  (seriesRaw ?? []).forEach((r) => {
-    const key = (r as any).sent_at?.slice(0, 10);
-    if (key && map.has(key)) map.set(key, (map.get(key) ?? 0) + 1);
-  });
-  const series = Array.from(map.entries()).map(([date, count]) => ({
-    date,
-    count,
-  }));
+}
 
-  const reachRate =
-    queued30 && queued30 > 0 ? Math.round(((sent30 ?? 0) * 100) / queued30) : 0;
-  const openRate =
-    sent30 && sent30 > 0 ? Math.round(((opened30 ?? 0) * 100) / sent30) : 0;
-
-  return NextResponse.json({
-    ok: true,
-    metrics: {
-      campaignCount: campaignCount ?? 0,
-      sent30: sent30 ?? 0,
-      reachRate,
-      openRate,
-      unsub30: unsub30 ?? 0,
-      series,
-    },
-  });
+// ---------- helpers ----------
+function emptyMetrics() {
+  return {
+    campaignCount: 0,
+    sent30: 0,
+    reachRate: 0,
+    openRate: 0,
+    unsub30: 0,
+    series: [] as { date: string; count: number }[],
+  };
+}
+function calcStart(range: string, now: Date) {
+  switch (range) {
+    case "7d":
+      return addDays(now, -6);
+    case "14d":
+      return addDays(now, -13);
+    case "1m":
+      return addMonths(now, -1);
+    case "3m":
+      return addMonths(now, -3);
+    case "6m":
+      return addMonths(now, -6);
+    case "1y":
+      return addMonths(now, -12);
+    default:
+      return addDays(now, -13);
+  }
+}
+function addDays(d: Date, n: number) {
+  const x = new Date(d);
+  x.setDate(x.getDate() + n);
+  return toLocalDayStart(x);
+}
+function addMonths(d: Date, n: number) {
+  const x = new Date(d);
+  x.setMonth(x.getMonth() + n);
+  return toLocalDayStart(x);
+}
+function toLocalDayStart(d: Date) {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0);
+}
+function toDayStartISO(d: Date) {
+  return new Date(
+    Date.UTC(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0)
+  ).toISOString();
+}
+function fmtMD(d: Date) {
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${m}/${day}`;
+}
+function bucketByDay(start: Date, end: Date, isoList: string[]) {
+  const map = new Map<string, number>();
+  const days: { date: string; count: number }[] = [];
+  const cur = new Date(start);
+  while (cur <= end) {
+    const label = fmtMD(cur);
+    map.set(label, 0);
+    days.push({ date: label, count: 0 });
+    cur.setDate(cur.getDate() + 1);
+  }
+  for (const iso of isoList) {
+    const d = new Date(iso);
+    const label = fmtMD(d);
+    if (map.has(label)) map.set(label, (map.get(label) ?? 0) + 1);
+  }
+  return days.map((d) => ({ date: d.date, count: map.get(d.date) ?? 0 }));
 }
