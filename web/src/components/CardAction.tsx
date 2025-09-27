@@ -1,4 +1,5 @@
 // web/src/components/CardAction.tsx
+import React from "react";
 import Link from "next/link";
 import type { ComponentType } from "react";
 import { clsx } from "clsx";

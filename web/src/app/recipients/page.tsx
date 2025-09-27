@@ -1,6 +1,8 @@
 // web/src/app/recipients/page.tsx
 "use client";
+
 import { useEffect, useMemo, useState } from "react";
+
 import Link from "next/link";
 import Toggle from "@/components/Toggle";
 import { PREFECTURES } from "@/constants/prefectures";

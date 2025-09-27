@@ -1,12 +1,10 @@
 // web/next.config.ts
 import type { NextConfig } from "next";
-import path from "path";
+import path from "node:path";
 
 const nextConfig: NextConfig = {
-  outputFileTracingRoot: path.join(__dirname, ".."),
-  eslint: {
-    ignoreDuringBuilds: true, // ← これで ESLint エラーでも build を止めない
-  },
+  // monorepo 警告の抑制（web/ 配下にロックファイルがある場合）
+  outputFileTracingRoot: path.resolve(__dirname, ".."),
 };
 
 export default nextConfig;

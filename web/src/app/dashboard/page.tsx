@@ -1,3 +1,4 @@
+import React from "react";
 import AppHeader from "@/components/AppHeader";
 import Link from "next/link";
 import { Mail, Search, Send, FileText } from "lucide-react";

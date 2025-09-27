@@ -1,5 +1,6 @@
 // web/src/app/email/page.tsx
 "use client";
+import React from "react";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { PlusCircle, List, Users, Settings } from "lucide-react";
