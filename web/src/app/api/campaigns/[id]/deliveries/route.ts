@@ -1,11 +1,13 @@
+// web/src/app/api/campaigns/[id]/deliveries/route.ts
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
 
 export async function GET(
   _req: Request,
-  { params }: { params: { id: string } }
+  ctx: { params: Promise<{ id: string }> } // ★ Next.js 15: params は Promise
 ) {
   try {
+    const { id } = await ctx.params; // ★ await で取り出し
     const supabase = await supabaseServer();
 
     const { data: u } = await supabase.auth.getUser();
@@ -26,7 +28,7 @@ export async function GET(
       .from("deliveries")
       .select("id, recipient_id, status, scheduled_at, sent_at")
       .eq("tenant_id", tenantId)
-      .eq("campaign_id", params.id)
+      .eq("campaign_id", id) // ★ params.id → id
       .order("sent_at", { ascending: false })
       .order("scheduled_at", { ascending: false });
     if (de) return NextResponse.json({ error: de.message }, { status: 400 });

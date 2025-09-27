@@ -9,10 +9,10 @@ type EnqueueBody = {
 
 export async function POST(
   req: Request,
-  { params }: { params: { id: string } }
+  ctx: { params: Promise<{ id: string }> } // ★ Next.js 15: params は Promise
 ) {
   try {
-    const campaignId = params.id;
+    const { id: campaignId } = await ctx.params; // ★ await で取り出し
     const supabase = await supabaseServer();
 
     // 1) 認証
@@ -110,7 +110,7 @@ export async function POST(
     let queued = 0;
 
     for (const r of targets) {
-      // deliveries へ queued で先に記録（重複は一意制約で自然に弾く前提）
+      // deliveries へ queued で先に記録
       await supabase.from("deliveries").insert({
         tenant_id: tenantId,
         campaign_id: campaignId,
@@ -134,8 +134,6 @@ export async function POST(
         brandSupport,
       };
 
-      // campaignId は型に無いので data に含めない。
-      // 代わりに jobId へ埋め込み、トレースできるようにする。
       await emailQueue.add("direct_email", job, {
         jobId: `camp:${campaignId}:rcpt:${r.id}:${Date.now()}`,
         removeOnComplete: 1000,
