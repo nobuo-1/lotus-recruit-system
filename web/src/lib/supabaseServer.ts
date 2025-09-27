@@ -1,28 +1,27 @@
-import { createServerClient, type CookieOptions } from "@supabase/ssr";
+// web/src/lib/supabaseServer.ts
 import { cookies } from "next/headers";
+import { createServerClient, type CookieOptions } from "@supabase/ssr";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
-/**
- * Next.js 15 対応版:
- * - cookies() は Promise なので await が必要
- * - set/remove は RequestCookies の API に合わせて set/delete を使用
- */
-export const supabaseServer = async () => {
-  const cookieStore = await cookies(); // ← ここがポイント（await）
+/** RSC/ページ用：Cookie 書き込みは no-op */
+export async function supabaseServer(): Promise<SupabaseClient> {
+  const store = await cookies(); // ← Next.js 15 では await 必須
 
-  return createServerClient(
+  const client = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookies: {
-        get: (name: string) => cookieStore.get(name)?.value,
-        set: (name: string, value: string, options: CookieOptions) => {
-          cookieStore.set({ name, value, ...options });
+        get(name: string) {
+          return store.get(name)?.value;
         },
-        remove: (name: string, options: CookieOptions) => {
-          // Next.js 15 では delete が素直
-          cookieStore.delete({ name, ...options });
-        },
+        // RSC では Cookie を変更しない
+        set(_name: string, _value: string, _options: CookieOptions) {},
+        remove(_name: string, _options: CookieOptions) {},
       },
     }
   );
-};
+
+  // TS2589（型が深すぎ）回避のためキャスト
+  return client as unknown as SupabaseClient;
+}
