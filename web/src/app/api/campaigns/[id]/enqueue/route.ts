@@ -1,4 +1,4 @@
-// web/src/app/api/campaigns/[id]/enqueue/route.ts
+// src/app/api/campaigns/[id]/enqueue/route.ts
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
 import { emailQueue, type DirectEmailJob } from "@/server/queue";
@@ -7,12 +7,24 @@ type EnqueueBody = {
   recipientIds?: string[];
 };
 
+type RecipientRow = {
+  id: string;
+  email: string | null;
+  unsubscribe_token: string | null;
+  consent: string | null; // "opt_out" など
+  is_active: boolean | null;
+};
+
+type DeliveredRow = {
+  recipient_id: string;
+};
+
 export async function POST(
   req: Request,
-  ctx: { params: Promise<{ id: string }> } // ★ Next.js 15: params は Promise
+  ctx: { params: Promise<{ id: string }> } // Next.js 15: params は Promise
 ) {
   try {
-    const { id: campaignId } = await ctx.params; // ★ await で取り出し
+    const { id: campaignId } = await ctx.params;
     const supabase = await supabaseServer();
 
     // 1) 認証
@@ -29,7 +41,7 @@ export async function POST(
       .maybeSingle();
     if (pe) return NextResponse.json({ error: pe.message }, { status: 400 });
 
-    const tenantId = prof?.tenant_id as string | undefined;
+    const tenantId = (prof?.tenant_id as string | undefined) ?? undefined;
     if (!tenantId) {
       return NextResponse.json({ error: "no tenant" }, { status: 400 });
     }
@@ -56,7 +68,7 @@ export async function POST(
     // 5) body(任意)
     let body: EnqueueBody | null = null;
     try {
-      body = await req.json();
+      body = (await req.json()) as EnqueueBody;
     } catch {
       body = null;
     }
@@ -75,8 +87,9 @@ export async function POST(
     const { data: recs, error: re } = await q;
     if (re) return NextResponse.json({ error: re.message }, { status: 400 });
 
-    const candidates = (recs ?? []).filter(
-      (r: any) => r?.email && (r.is_active ?? true)
+    const recsData = (recs ?? []) as RecipientRow[];
+    const candidates = recsData.filter(
+      (r) => !!r.email && (r.is_active ?? true)
     );
     if (candidates.length === 0) {
       return NextResponse.json({ error: "no recipients" }, { status: 400 });
@@ -89,10 +102,10 @@ export async function POST(
       .eq("campaign_id", campaignId);
     if (de) return NextResponse.json({ error: de.message }, { status: 400 });
 
-    const sentSet = new Set<string>(
-      (deliveredRows ?? []).map((d: any) => d.recipient_id)
-    );
-    const targets = candidates.filter((r: any) => !sentSet.has(r.id));
+    const delivered = (deliveredRows ?? []) as DeliveredRow[];
+    const sentSet = new Set<string>(delivered.map((d) => d.recipient_id));
+
+    const targets = candidates.filter((r) => !sentSet.has(r.id));
     if (targets.length === 0) {
       return NextResponse.json({
         ok: true,
@@ -127,7 +140,7 @@ export async function POST(
         html: (camp.body_html ?? "") as string,
         text: undefined,
         tenantId,
-        unsubscribeToken: (r as any).unsubscribe_token ?? undefined,
+        unsubscribeToken: r.unsubscribe_token ?? undefined,
         fromOverride,
         brandCompany,
         brandAddress,
@@ -156,9 +169,10 @@ export async function POST(
       queued,
       skipped: candidates.length - queued,
     });
-  } catch (e: any) {
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
     return NextResponse.json(
-      { error: e?.message ?? "internal error" },
+      { error: msg ?? "internal error" },
       { status: 500 }
     );
   }

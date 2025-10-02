@@ -1,4 +1,4 @@
-// web/src/app/api/campaigns/[id]/schedule/route.ts
+// src/app/api/campaigns/[id]/schedule/route.ts
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
@@ -6,13 +6,13 @@ import { supabaseServer } from "@/lib/supabaseServer";
 
 export async function POST(
   req: Request,
-  ctx: { params: Promise<{ id: string }> } // ★ params は Promise
+  ctx: { params: Promise<{ id: string }> } // params は Promise
 ) {
   try {
-    const { id } = await ctx.params; // ★ await で取り出す
+    const { id } = await ctx.params;
 
-    const body = await req.json().catch(() => ({}));
-    const when = body?.when as string | undefined;
+    const body = await req.json().catch(() => ({} as { when?: string }));
+    const when = body?.when;
     if (!when) {
       return NextResponse.json({ error: "when required" }, { status: 400 });
     }
@@ -38,9 +38,10 @@ export async function POST(
     }
 
     return NextResponse.json({ ok: true, scheduled_at: dt.toISOString() });
-  } catch (e: any) {
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
     return NextResponse.json(
-      { error: e?.message ?? "internal error" },
+      { error: msg ?? "internal error" },
       { status: 500 }
     );
   }
