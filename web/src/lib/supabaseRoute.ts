@@ -3,13 +3,26 @@ import { cookies } from "next/headers";
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-/** API ルート/Server Action 用：Cookie 書き込みOK（環境により no-op フォールバック） */
+type CookieValueLike = { value: string };
+type StoreLike = {
+  get?: (name: string) => CookieValueLike | undefined;
+  set?: (opts: { name: string; value: string } & CookieOptions) => void;
+};
+
+function isPromise<T>(v: unknown): v is Promise<T> {
+  return typeof (v as { then?: unknown }).then === "function";
+}
+function hasGet(x: unknown): x is Required<Pick<StoreLike, "get">> {
+  return typeof (x as StoreLike)?.get === "function";
+}
+function hasSet(x: unknown): x is Required<Pick<StoreLike, "set">> {
+  return typeof (x as StoreLike)?.set === "function";
+}
+
+/** API ルート/Server Action 用：Cookie 書き込みOK（不可環境では no-op） */
 export async function supabaseRoute(): Promise<SupabaseClient> {
-  // cookies() が Promise の型でも同期値でも、await で安全に吸収
-  const store = (await (cookies() as any)) as {
-    get?: (name: string) => { value: string } | undefined;
-    set?: (opts: { name: string; value: string } & CookieOptions) => void;
-  };
+  const raw = cookies() as unknown;
+  const store: unknown = isPromise(raw) ? await raw : raw;
 
   return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -17,22 +30,19 @@ export async function supabaseRoute(): Promise<SupabaseClient> {
     {
       cookies: {
         get(name: string) {
-          return store?.get?.(name)?.value;
+          return hasGet(store) ? store.get(name)?.value : undefined;
         },
         set(name: string, value: string, options?: CookieOptions) {
-          try {
-            store?.set?.({ name, value, ...(options ?? {}) });
-          } catch {
-            // 読み取り専用環境では無視（no-op）
+          if (hasSet(store)) {
+            store.set({ name, value, ...(options ?? {}) });
           }
+          // 読み取り専用環境では no-op
         },
         remove(name: string, options?: CookieOptions) {
-          try {
-            // delete 相当：空値 + maxAge=0
-            store?.set?.({ name, value: "", ...(options ?? {}), maxAge: 0 });
-          } catch {
-            // 読み取り専用環境では無視（no-op）
+          if (hasSet(store)) {
+            store.set({ name, value: "", ...(options ?? {}), maxAge: 0 });
           }
+          // 読み取り専用環境では no-op
         },
       },
     }

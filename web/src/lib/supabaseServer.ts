@@ -6,39 +6,43 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 
+type CookieValueLike = { value: string };
+type StoreLike = {
+  get?: (name: string) => CookieValueLike | undefined;
+  set?: (opts: { name: string; value: string } & CookieOptions) => void;
+};
+
+function isPromise<T>(v: unknown): v is Promise<T> {
+  return typeof (v as { then?: unknown }).then === "function";
+}
+function hasGet(x: unknown): x is Required<Pick<StoreLike, "get">> {
+  return typeof (x as StoreLike)?.get === "function";
+}
+function hasSet(x: unknown): x is Required<Pick<StoreLike, "set">> {
+  return typeof (x as StoreLike)?.set === "function";
+}
+
 /**
- * App Router の Route Handlers / Server Components で使う Supabase クライアント。
- * Cookie は next/headers の cookies() を経由して読み書き（不可環境では no-op）。
+ * Route Handlers / Server Components で使う Supabase クライアント。
+ * Cookie は next/headers 経由（書き込み不可環境では no-op）。
  */
 export async function supabaseServer(): Promise<SupabaseClient> {
-  // cookies() が Promise | 非Promise どちらでも安全に扱う
-  const cookieStore = (await (cookies() as any)) as {
-    get?: (name: string) => { value: string } | undefined;
-    set?: (opts: { name: string; value: string } & CookieOptions) => void;
-  };
+  const raw = cookies() as unknown;
+  const store: unknown = isPromise(raw) ? await raw : raw;
 
   return createServerClient(url, anon, {
     cookies: {
       get(name: string) {
-        return cookieStore?.get?.(name)?.value;
+        return hasGet(store) ? store.get(name)?.value : undefined;
       },
       set(name: string, value: string, options?: CookieOptions) {
-        try {
-          cookieStore?.set?.({ name, value, ...(options ?? {}) });
-        } catch {
-          // 読み取り専用環境（Server Component など）では無視
+        if (hasSet(store)) {
+          store.set({ name, value, ...(options ?? {}) });
         }
       },
       remove(name: string, options?: CookieOptions) {
-        try {
-          cookieStore?.set?.({
-            name,
-            value: "",
-            ...(options ?? {}),
-            maxAge: 0,
-          });
-        } catch {
-          // 読み取り専用環境では無視
+        if (hasSet(store)) {
+          store.set({ name, value: "", ...(options ?? {}), maxAge: 0 });
         }
       },
     },
