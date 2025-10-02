@@ -1,4 +1,4 @@
-// src/app/api/campaigns/[id]/enqueue/route.ts
+// web/src/app/api/campaigns/[id]/enqueue/route.ts
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
 import { emailQueue, type DirectEmailJob } from "@/server/queue";
@@ -6,34 +6,28 @@ import { emailQueue, type DirectEmailJob } from "@/server/queue";
 type EnqueueBody = {
   recipientIds?: string[];
 };
-
 type RecipientRow = {
   id: string;
   email: string | null;
   unsubscribe_token: string | null;
-  consent: string | null; // "opt_out" など
+  consent: string | null;
   is_active: boolean | null;
 };
-
-type DeliveredRow = {
-  recipient_id: string;
-};
+type DeliveredRow = { recipient_id: string };
 
 export async function POST(
   req: Request,
-  ctx: { params: Promise<{ id: string }> } // Next.js 15: params は Promise
+  ctx: { params: Promise<{ id: string }> }
 ) {
   try {
     const { id: campaignId } = await ctx.params;
     const supabase = await supabaseServer();
 
-    // 1) 認証
     const { data: u } = await supabase.auth.getUser();
     if (!u?.user) {
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
     }
 
-    // 2) テナント取得
     const { data: prof, error: pe } = await supabase
       .from("profiles")
       .select("tenant_id")
@@ -42,11 +36,9 @@ export async function POST(
     if (pe) return NextResponse.json({ error: pe.message }, { status: 400 });
 
     const tenantId = (prof?.tenant_id as string | undefined) ?? undefined;
-    if (!tenantId) {
+    if (!tenantId)
       return NextResponse.json({ error: "no tenant" }, { status: 400 });
-    }
 
-    // 3) キャンペーン取得
     const { data: camp, error: ce } = await supabase
       .from("campaigns")
       .select("id, tenant_id, name, subject, body_html, from_email, status")
@@ -57,7 +49,6 @@ export async function POST(
       return NextResponse.json({ error: "not found" }, { status: 404 });
     }
 
-    // 4) ブランド / 差出人設定
     const { data: brand, error: be } = await supabase
       .from("tenants")
       .select("company_name, company_address, support_email, from_email")
@@ -65,7 +56,6 @@ export async function POST(
       .maybeSingle();
     if (be) return NextResponse.json({ error: be.message }, { status: 400 });
 
-    // 5) body(任意)
     let body: EnqueueBody | null = null;
     try {
       body = (await req.json()) as EnqueueBody;
@@ -73,16 +63,13 @@ export async function POST(
       body = null;
     }
 
-    // 6) 宛先取得（opt-out / 非アクティブ除外）
     let q = supabase
       .from("recipients")
       .select("id, email, unsubscribe_token, consent, is_active")
       .eq("tenant_id", tenantId)
       .neq("consent", "opt_out");
 
-    if (body?.recipientIds?.length) {
-      q = q.in("id", body.recipientIds);
-    }
+    if (body?.recipientIds?.length) q = q.in("id", body.recipientIds);
 
     const { data: recs, error: re } = await q;
     if (re) return NextResponse.json({ error: re.message }, { status: 400 });
@@ -95,7 +82,6 @@ export async function POST(
       return NextResponse.json({ error: "no recipients" }, { status: 400 });
     }
 
-    // 7) 既送信(同キャンペーン)を deliveries から除外
     const { data: deliveredRows, error: de } = await supabase
       .from("deliveries")
       .select("recipient_id")
@@ -114,7 +100,6 @@ export async function POST(
       });
     }
 
-    // 8) キュー投入 + deliveries へ queued で記録
     const fromOverride = brand?.from_email ?? camp.from_email ?? undefined;
     const brandCompany = brand?.company_name ?? undefined;
     const brandAddress = brand?.company_address ?? undefined;
@@ -123,7 +108,6 @@ export async function POST(
     let queued = 0;
 
     for (const r of targets) {
-      // deliveries へ queued で先に記録
       await supabase.from("deliveries").insert({
         tenant_id: tenantId,
         campaign_id: campaignId,
@@ -156,7 +140,6 @@ export async function POST(
       queued++;
     }
 
-    // 9) ステータス更新（未送信→キュー済み）
     if (queued > 0 && camp.status !== "queued") {
       await supabase
         .from("campaigns")

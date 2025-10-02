@@ -1,15 +1,14 @@
-// src/app/api/campaigns/[id]/deliveries/route.ts
+// web/src/app/api/campaigns/[id]/deliveries/route.ts
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
 
 type DeliveryRow = {
   id: string;
   recipient_id: string;
-  status: string; // "scheduled" | "queued" | "sent" | "cancelled" など
+  status: string;
   scheduled_at: string | null;
   sent_at: string | null;
 };
-
 type RecipientInfo = {
   id: string;
   name: string | null;
@@ -22,7 +21,7 @@ type RecipientInfo = {
 
 export async function GET(
   _req: Request,
-  ctx: { params: Promise<{ id: string }> } // Next.js 15: params は Promise
+  ctx: { params: Promise<{ id: string }> }
 ) {
   try {
     const { id } = await ctx.params;
@@ -52,7 +51,6 @@ export async function GET(
       .eq("campaign_id", id)
       .order("sent_at", { ascending: false })
       .order("scheduled_at", { ascending: false });
-
     if (de) return NextResponse.json({ error: de.message }, { status: 400 });
 
     const delsData = (dels ?? []) as DeliveryRow[];
@@ -68,9 +66,7 @@ export async function GET(
         .in("id", ids);
 
       const recsData = (recs ?? []) as RecipientInfo[];
-      for (const r of recsData) {
-        detail[r.id] = r;
-      }
+      for (const r of recsData) detail[r.id] = r;
     }
 
     const rows = delsData.map((d) => ({

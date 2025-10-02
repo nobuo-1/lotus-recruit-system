@@ -1,4 +1,4 @@
-// src/lib/supabaseRoute.ts
+// web/src/lib/supabaseRoute.ts
 import { cookies } from "next/headers";
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -36,13 +36,11 @@ export async function supabaseRoute(): Promise<SupabaseClient> {
           if (hasSet(store)) {
             store.set({ name, value, ...(options ?? {}) });
           }
-          // 読み取り専用環境では no-op
         },
         remove(name: string, options?: CookieOptions) {
           if (hasSet(store)) {
             store.set({ name, value: "", ...(options ?? {}), maxAge: 0 });
           }
-          // 読み取り専用環境では no-op
         },
       },
     }

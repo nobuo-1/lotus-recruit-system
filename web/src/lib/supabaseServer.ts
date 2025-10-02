@@ -1,4 +1,4 @@
-// src/lib/supabaseServer.ts
+// web/src/lib/supabaseServer.ts
 import { cookies } from "next/headers";
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -22,10 +22,7 @@ function hasSet(x: unknown): x is Required<Pick<StoreLike, "set">> {
   return typeof (x as StoreLike)?.set === "function";
 }
 
-/**
- * Route Handlers / Server Components で使う Supabase クライアント。
- * Cookie は next/headers 経由（書き込み不可環境では no-op）。
- */
+/** Route Handlers / Server Components 用（書き込み不可環境は no-op） */
 export async function supabaseServer(): Promise<SupabaseClient> {
   const raw = cookies() as unknown;
   const store: unknown = isPromise(raw) ? await raw : raw;

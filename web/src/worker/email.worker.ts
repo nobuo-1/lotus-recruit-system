@@ -1,4 +1,4 @@
-// src/worker/email.worker.ts
+// web/src/worker/email.worker.ts
 import "../env";
 import { Worker, type Job } from "bullmq";
 import IORedis from "ioredis";
@@ -21,7 +21,6 @@ function parseCampaignAndRecipient(jobId: string | number | undefined) {
   return m ? { campaignId: m[1], recipientId: m[2] } : null;
 }
 
-// --- type guard: EmailJob -> DirectEmailJob ---
 function isDirectEmail(job: EmailJob): job is DirectEmailJob {
   return job?.kind === "direct_email";
 }
@@ -31,7 +30,6 @@ const worker = new Worker<EmailJob>(
   async (job: Job<EmailJob>) => {
     const payload = job.data;
 
-    // direct_email 以外は安全にスキップ（将来の拡張用）
     if (!isDirectEmail(payload)) {
       console.warn("[email.skip]", {
         jobId: job.id,
@@ -43,7 +41,6 @@ const worker = new Worker<EmailJob>(
       };
     }
 
-    // --- 実送信（mailer 側でフッター重複を避ける実装済み） ---
     const info = await sendMail({
       to: payload.to,
       subject: payload.subject,
@@ -56,7 +53,6 @@ const worker = new Worker<EmailJob>(
       brandSupport: payload.brandSupport,
     });
 
-    // ジョブIDに campaign/recipient が入っていれば delivery / campaign / email_schedules を更新
     const meta = parseCampaignAndRecipient(job.id);
     if (meta) {
       const nowIso = new Date().toISOString();
@@ -67,13 +63,11 @@ const worker = new Worker<EmailJob>(
         .eq("campaign_id", meta.campaignId)
         .eq("recipient_id", meta.recipientId);
 
-      // 予約消化後は campaign を queued へ
       await admin
         .from("campaigns")
         .update({ status: "queued" })
         .eq("id", meta.campaignId);
 
-      // 期限到来した予約も queued へ
       await admin
         .from("email_schedules")
         .update({ status: "queued" })
@@ -89,7 +83,6 @@ const worker = new Worker<EmailJob>(
       tenantId: payload.tenantId,
     });
 
-    // 戻り値の型は自由。モニタリング用に messageId と kind を返す
     return { messageId: info.messageId, kind: payload.kind };
   },
   {

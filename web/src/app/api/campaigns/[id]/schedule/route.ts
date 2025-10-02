@@ -1,4 +1,4 @@
-// src/app/api/campaigns/[id]/schedule/route.ts
+// web/src/app/api/campaigns/[id]/schedule/route.ts
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
@@ -6,7 +6,7 @@ import { supabaseServer } from "@/lib/supabaseServer";
 
 export async function POST(
   req: Request,
-  ctx: { params: Promise<{ id: string }> } // params は Promise
+  ctx: { params: Promise<{ id: string }> }
 ) {
   try {
     const { id } = await ctx.params;

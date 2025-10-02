@@ -1,3 +1,4 @@
+// web/src/app/api/email/summary/route.ts
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
@@ -36,40 +37,34 @@ export async function GET(req: Request) {
     const start30ISO = toDayStartISO(start30);
 
     // ① キャンペーン総数
-    {
-      const { count: cRaw } = await supabase
-        .from("campaigns")
-        .select("id", { count: "exact", head: true })
-        .eq("tenant_id", tenantId);
-      var campaignCount = cRaw ?? 0;
-    }
+    const { count: cRaw } = await supabase
+      .from("campaigns")
+      .select("id", { count: "exact", head: true })
+      .eq("tenant_id", tenantId);
+    let campaignCount = cRaw ?? 0;
 
     // ② 直近30日の sent 件数
-    {
-      const { count: sRaw } = await supabase
-        .from("deliveries")
-        .select("id", { count: "exact", head: true })
-        .eq("tenant_id", tenantId)
-        .eq("status", "sent")
-        .gte("sent_at", start30ISO)
-        .lte("sent_at", nowISO);
-      var sent30 = sRaw ?? 0;
-    }
+    const { count: sRaw } = await supabase
+      .from("deliveries")
+      .select("id", { count: "exact", head: true })
+      .eq("tenant_id", tenantId)
+      .eq("status", "sent")
+      .gte("sent_at", start30ISO)
+      .lte("sent_at", nowISO);
+    let sent30 = sRaw ?? 0;
 
     // ③ 到達率: (直近30日 sent) / (直近30日 deliveries 作成)
-    {
-      const { count: aRaw } = await supabase
-        .from("deliveries")
-        .select("id", { count: "exact", head: true })
-        .eq("tenant_id", tenantId)
-        .gte("created_at", start30ISO)
-        .lte("created_at", nowISO);
-      const attempted30 = aRaw ?? 0;
-      var reachRate =
-        attempted30 > 0 ? Math.round((sent30 / attempted30) * 1000) / 10 : 0;
-    }
+    const { count: aRaw } = await supabase
+      .from("deliveries")
+      .select("id", { count: "exact", head: true })
+      .eq("tenant_id", tenantId)
+      .gte("created_at", start30ISO)
+      .lte("created_at", nowISO);
+    const attempted30 = aRaw ?? 0;
+    let reachRate =
+      attempted30 > 0 ? Math.round((sent30 / attempted30) * 1000) / 10 : 0;
 
-    // ④ 開封率: opened_at / sent （opened_atが無い環境は0%）
+    // ④ 開封率: opened_at / sent （opened_at が無い環境は 0%）
     let openRate = 0;
     try {
       const { count: oRaw } = await supabase
@@ -85,15 +80,13 @@ export async function GET(req: Request) {
     }
 
     // ⑤ 直近30日の配信停止数
-    {
-      const { count: uRaw } = await supabase
-        .from("recipients")
-        .select("id", { count: "exact", head: true })
-        .eq("tenant_id", tenantId)
-        .gte("unsubscribed_at", start30ISO)
-        .lte("unsubscribed_at", nowISO);
-      var unsub30 = uRaw ?? 0;
-    }
+    const { count: uRaw } = await supabase
+      .from("recipients")
+      .select("id", { count: "exact", head: true })
+      .eq("tenant_id", tenantId)
+      .gte("unsubscribed_at", start30ISO)
+      .lte("unsubscribed_at", nowISO);
+    let unsub30 = uRaw ?? 0;
 
     // ⑥ 折れ線グラフ: 日別 sent
     const { data: sentRows } = await supabase
@@ -111,14 +104,7 @@ export async function GET(req: Request) {
     );
 
     return NextResponse.json({
-      metrics: {
-        campaignCount,
-        sent30,
-        reachRate,
-        openRate,
-        unsub30,
-        series,
-      },
+      metrics: { campaignCount, sent30, reachRate, openRate, unsub30, series },
     });
   } catch {
     return NextResponse.json({ metrics: emptyMetrics() });
