@@ -1,109 +1,116 @@
-import "../env";
-import { Worker, Job } from "bullmq";
+// src/worker/email.worker.ts
+/**
+ * BullMQ のワーカー。Vercel（サーバーレス）では常駐不可のため、
+ * RUN_EMAIL_WORKER=1 のときのみ起動します。
+ * フッターは mailer 側で「1回だけ」注入するため、ここでは足しません。
+ */
+import { Worker, type Job } from "bullmq";
 import IORedis from "ioredis";
-import { sendMail } from "../server/mailer";
-import type { EmailJob } from "../server/queue";
-import { supabaseAdmin } from "../lib/supabaseAdmin";
+import { sendMail } from "@/server/mailer";
+import type { DirectEmailJob } from "@/server/queue";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-const connection = new IORedis(
-  process.env.REDIS_URL ?? "redis://localhost:6379",
-  {
-    maxRetriesPerRequest: null,
-    enableReadyCheck: true,
-  }
-);
-const admin = supabaseAdmin();
+const QUEUE_NAME = process.env.EMAIL_QUEUE_NAME || "email";
+const RUN = process.env.RUN_EMAIL_WORKER === "1";
+const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 
-function parseCampaignAndRecipient(jobId: string | number | undefined) {
+type Meta = { campaignId: string; recipientId: string };
+
+function parseCampaignAndRecipient(
+  jobId: string | number | undefined
+): Meta | null {
   const s = String(jobId ?? "");
   const m = s.match(/^camp:([^:]+):rcpt:([^:]+):/);
   return m ? { campaignId: m[1], recipientId: m[2] } : null;
 }
 
-const worker = new Worker<EmailJob>(
-  "email",
-  async (job: Job<EmailJob>) => {
-    const data: any = job.data;
+export function startEmailWorker() {
+  if (!RUN || !REDIS_URL) return null;
 
-    // --- ここでフッターを付与（設定があれば） ---
-    if (data?.html) {
-      const lines: string[] = [];
-      if (data.brandCompany) lines.push(`<div>${data.brandCompany}</div>`);
-      if (data.brandAddress) lines.push(`<div>${data.brandAddress}</div>`);
-      if (data.brandSupport)
-        lines.push(`<div>お問い合わせ: ${data.brandSupport}</div>`);
-      if (data.unsubscribeToken)
-        lines.push(
-          `<div style="margin-top:8px;font-size:12px;color:#666">
-             配信停止: {{UNSUB_URL}}
-           </div>`
-        );
-      if (lines.length) {
-        const footer = `<hr style="margin:16px 0;border:none;border-top:1px solid #eee" />${lines.join(
-          ""
-        )}`;
-        data.html = `${data.html}${footer}`;
+  const connection = new IORedis(REDIS_URL, {
+    maxRetriesPerRequest: null,
+    enableReadyCheck: true,
+  });
+
+  const admin = supabaseAdmin();
+
+  // DirectEmailJob をジェネリクスで指定（any を使わない）
+  const worker = new Worker<DirectEmailJob>(
+    QUEUE_NAME,
+    async (job: Job<DirectEmailJob>) => {
+      // 実送信（mailer 側でフッター/解除導線を注入）
+      const info = await sendMail(job.data);
+
+      // ジョブIDに campaign/recipient が入っていれば DB を更新
+      const meta = parseCampaignAndRecipient(job.id);
+      if (meta) {
+        const nowIso = new Date().toISOString();
+
+        // 1) deliveries: sent に更新
+        await admin
+          .from("deliveries")
+          .update({ status: "sent", sent_at: nowIso })
+          .eq("campaign_id", meta.campaignId)
+          .eq("recipient_id", meta.recipientId);
+
+        // 2) campaigns: scheduled → queued（予約消化後）
+        await admin
+          .from("campaigns")
+          .update({ status: "queued" })
+          .eq("id", meta.campaignId);
+
+        // 3) email_schedules: 期限到来した予約は queued へ
+        await admin
+          .from("email_schedules")
+          .update({ status: "queued" })
+          .eq("campaign_id", meta.campaignId)
+          .lte("scheduled_at", nowIso)
+          .eq("status", "scheduled");
       }
-    }
 
-    // 実送信
-    const info = await sendMail(data);
+      // eslint-disable-next-line no-console
+      console.log("[email.sent]", {
+        to: job.data.to,
+        messageId: info.messageId,
+        jobId: job.id,
+        tenantId: job.data.tenantId,
+      });
 
-    // ジョブIDに campaign/recipient が入っていれば delivery と campaign/email_schedules を更新
-    const meta = parseCampaignAndRecipient(job.id);
-    if (meta) {
-      const nowIso = new Date().toISOString();
-
-      // 送信済みに
-      await admin
-        .from("deliveries")
-        .update({ status: "sent", sent_at: nowIso })
-        .eq("campaign_id", meta.campaignId)
-        .eq("recipient_id", meta.recipientId);
-
-      // 予約が走ったタイミングでキャンペーンを queued に（scheduled → queued）
-      await admin
-        .from("campaigns")
-        .update({ status: "queued" })
-        .eq("id", meta.campaignId);
-
-      // 予約一覧からは消しつつ状態も揃える（同キャンペーンで期限の来た予約を queued）
-      await admin
-        .from("email_schedules")
-        .update({ status: "queued" })
-        .eq("campaign_id", meta.campaignId)
-        .lte("scheduled_at", nowIso)
-        .eq("status", "scheduled");
-    }
-
-    console.log("[email.sent]", {
-      to: data && "to" in data ? data.to : undefined,
-      messageId: info.messageId,
-      jobId: job.id,
-      tenantId: data?.tenantId,
-    });
-    return { messageId: info.messageId, kind: "direct_email" };
-  },
-  {
-    connection,
-    concurrency: Number(process.env.EMAIL_WORKER_CONCURRENCY ?? 5),
-    limiter: {
-      max: Number(process.env.EMAIL_RATE_MAX ?? 30),
-      duration: Number(process.env.EMAIL_RATE_DURATION_MS ?? 60_000),
+      return { messageId: info.messageId, kind: "direct_email" as const };
     },
+    {
+      connection,
+      concurrency: Number(process.env.EMAIL_WORKER_CONCURRENCY ?? 5),
+      limiter: {
+        max: Number(process.env.EMAIL_RATE_MAX ?? 30),
+        duration: Number(process.env.EMAIL_RATE_DURATION_MS ?? 60_000),
+      },
+    }
+  );
+
+  worker.on("completed", (job, result) => {
+    // eslint-disable-next-line no-console
+    console.log("[email.done]", { jobId: job.id, result });
+  });
+  worker.on("failed", (job, err) => {
+    // eslint-disable-next-line no-console
+    console.error("[email.fail]", { jobId: job?.id, err: err?.message });
+  });
+
+  if (typeof process !== "undefined") {
+    process.on("SIGINT", async () => {
+      // eslint-disable-next-line no-console
+      console.log("Shutting down email worker...");
+      await worker.close();
+      await connection.quit();
+      process.exit(0);
+    });
   }
-);
 
-worker.on("completed", (job, result) =>
-  console.log("[email.done]", { jobId: job.id, result })
-);
-worker.on("failed", (job, err) =>
-  console.error("[email.fail]", { jobId: job?.id, err: err?.message })
-);
+  return worker;
+}
 
-process.on("SIGINT", async () => {
-  console.log("Shutting down email worker...");
-  await worker.close();
-  await connection.quit();
-  process.exit(0);
-});
+// ローカル/常駐環境で自動起動（Vercel 等では RUN=1 を付けない）
+if (RUN) {
+  startEmailWorker();
+}
