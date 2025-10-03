@@ -1,42 +1,37 @@
-import { NextRequest, NextResponse } from "next/server";
-import { createServerClient } from "@supabase/ssr";
+// web/src/app/api/auth/set/route.ts
+import { NextResponse } from "next/server";
+import { supabaseRoute } from "@/lib/supabaseRoute";
 
-export async function POST(req: NextRequest) {
-  const { access_token, refresh_token } = await req.json();
+type Body = {
+  access_token?: string;
+  refresh_token?: string;
+};
 
-  if (!access_token || !refresh_token) {
-    return NextResponse.json({ error: "missing tokens" }, { status: 400 });
-  }
-
-  // 応答オブジェクトを用意（ここに Cookie を書く）
-  const res = NextResponse.json({ ok: true });
-
-  // req.cookies で読み、res.cookies に書く —— これが重要
-  const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        get(name) {
-          return req.cookies.get(name)?.value;
-        },
-        set(name, value, options) {
-          res.cookies.set({ name, value, ...options });
-        },
-        remove(name, options) {
-          res.cookies.set({ name, value: "", ...options, maxAge: 0 });
-        },
-      },
+export async function POST(req: Request) {
+  try {
+    const { access_token, refresh_token } = (await req.json()) as Body;
+    if (!access_token || !refresh_token) {
+      return NextResponse.json(
+        { error: "access_token / refresh_token required" },
+        { status: 400 }
+      );
     }
-  );
 
-  const { error } = await supabase.auth.setSession({
-    access_token,
-    refresh_token,
-  });
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 400 });
+    const sb = await supabaseRoute();
+    const { error } = await sb.auth.setSession({
+      access_token,
+      refresh_token,
+    });
+
+    if (error) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
+
+    // setSession 成功時、@supabase/ssr の cookies.set が呼ばれ、
+    // sb-access-token / sb-refresh-token が HttpOnly で発行されます。
+    return NextResponse.json({ ok: true });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
-  // ここで res に sb-access-token / sb-refresh-token が積まれて返る
-  return res;
 }
