@@ -3,10 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useState } from "react";
-import { supabase } from "@/lib/supabaseClient";
-import { Settings } from "lucide-react";
 
-/** メール配信トップのトーンに合わせたシンプルなUI */
 export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
@@ -20,42 +17,17 @@ export default function LoginPage() {
     setMsg("ログイン中…");
 
     try {
-      // 1) Supabase でサインイン
-      const { data, error } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-      });
-      if (error) {
-        setMsg(`エラー: ${error.message}`);
-        setBusy(false);
-        return;
-      }
-
-      const session = data.session;
-      if (!session?.access_token || !session?.refresh_token) {
-        setMsg("エラー: セッション取得に失敗しました。");
-        setBusy(false);
-        return;
-      }
-
-      // 2) サーバ側 Cookie を発行（※ 正しいエンドポイントは /auth/set）
-      const res = await fetch("/auth/set", {
+      // ★ email/password をそのままサーバへ。Cookie はサーバが発行
+      const res = await fetch("/auth/login", {
         method: "POST",
-        credentials: "include", // Set-Cookie を確実に反映させる
+        credentials: "include", // Set-Cookie を確実に反映
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          access_token: session.access_token,
-          refresh_token: session.refresh_token,
-        }),
+        body: JSON.stringify({ email, password }),
       });
 
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
-        setMsg(
-          `エラー: サーバCookie設定に失敗しました (${res.status}) ${
-            j?.error ? `- ${j.error}` : ""
-          }`
-        );
+        setMsg(`エラー: ${j?.error ?? `HTTP ${res.status}`}`);
         setBusy(false);
         return;
       }
@@ -63,9 +35,8 @@ export default function LoginPage() {
       setMsg("ログインに成功しました。ダッシュボードへ移動します…");
       router.replace("/dashboard");
     } catch (e) {
-      // 本番で出ていた "Failed to fetch" はここで拾われます（/api/auth/set → /auth/set で解消）
       const m = e instanceof Error ? e.message : String(e);
-      setMsg(`エラー: ${m}`);
+      setMsg(`エラー: ${m}`); // ここに出ていた "Failed to fetch" も表示されます
     } finally {
       setBusy(false);
     }
@@ -75,7 +46,7 @@ export default function LoginPage() {
     if (ev.key === "Enter") onLogin();
   };
 
-  // --- 共通ヘッダー（/email/page.tsx と同系色のミニマルデザイン） ---
+  // 共通っぽいシンプルなヘッダー（★「メール用設定」ボタンは削除）
   const Header = () => (
     <header className="sticky top-0 z-40 border-b border-neutral-200 bg-white/80 backdrop-blur">
       <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-4">
@@ -99,14 +70,6 @@ export default function LoginPage() {
           <span className="text-sm font-semibold tracking-wide text-neutral-900">
             Lotus Recruit
           </span>
-        </Link>
-
-        <Link
-          href="/email/settings"
-          className="inline-flex items-center gap-1.5 rounded-xl border border-neutral-200 px-3 py-1.5 text-sm hover:bg-neutral-50"
-        >
-          <Settings className="h-4 w-4 text-neutral-600" strokeWidth={1.6} />
-          メール用設定
         </Link>
       </div>
     </header>
@@ -162,7 +125,7 @@ export default function LoginPage() {
             </button>
 
             {msg && (
-              <p className="mt-3 text-sm text-neutral-500 whitespace-pre-wrap">
+              <p className="mt-3 whitespace-pre-wrap text-sm text-neutral-500">
                 {msg}
               </p>
             )}
