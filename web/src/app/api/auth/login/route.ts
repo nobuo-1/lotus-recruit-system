@@ -1,34 +1,45 @@
 // web/src/app/api/auth/login/route.ts
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 
 /**
- * email / password でサインインし、Supabase の Cookie をサーバ側で発行する。
- * フロントはこのエンドポイントに POST するだけでOK。
+ * email / password を受け取り、Supabase セッション Cookie を発行する。
+ * 成功時は 200 { ok: true } を返し、Set-Cookie で sb- 系 Cookie を設定。
  */
 export async function POST(req: NextRequest) {
-  const { email, password } = (await req.json().catch(() => ({}))) as {
-    email?: string;
-    password?: string;
-  };
+  try {
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-  if (!email || !password) {
-    return NextResponse.json(
-      { error: "email and password required" },
-      { status: 400 }
-    );
-  }
+    if (!url || !/^https?:\/\//.test(url) || !anon) {
+      console.error("[auth/login] invalid env", { url: !!url, anon: !!anon });
+      return NextResponse.json(
+        { error: "Supabase env is missing or invalid" },
+        { status: 500 }
+      );
+    }
 
-  // 応答（ここに Set-Cookie が書かれる）
-  const res = NextResponse.json({ ok: true });
+    const { email, password } = (await req.json().catch(() => ({}))) as {
+      email?: string;
+      password?: string;
+    };
 
-  // @supabase/ssr@0.7 仕様の cookies(getAll/setAll) で橋渡し
-  const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
+    if (!email || !password) {
+      return NextResponse.json(
+        { error: "email and password required" },
+        { status: 400 }
+      );
+    }
+
+    // 応答オブジェクト(ここに Set-Cookie を書く)
+    const res = NextResponse.json({ ok: true });
+
+    // @supabase/ssr@0.7 の getAll/setAll で Cookie を橋渡し
+    const supabase = createServerClient(url, anon, {
       cookies: {
         getAll() {
           return req.cookies.getAll().map((c) => ({
@@ -42,21 +53,29 @@ export async function POST(req: NextRequest) {
           }
         },
       },
+    });
+
+    // 既存セッションが壊れていても必ず前掃除
+    try {
+      await supabase.auth.signOut();
+    } catch {
+      /* noop */
     }
-  );
 
-  // 古いトークンを掃除（refresh_token_already_used 回避）
-  try {
-    await supabase.auth.signOut();
-  } catch {
-    /* noop */
+    const { error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+
+    if (error) {
+      console.error("[auth/login] signIn error", error);
+      return NextResponse.json({ error: error.message }, { status: 401 });
+    }
+
+    return res;
+  } catch (e) {
+    console.error("[auth/login] fatal", e);
+    const msg = e instanceof Error ? e.message : String(e);
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
-
-  const { error } = await supabase.auth.signInWithPassword({ email, password });
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 401 });
-  }
-
-  // res に sb- 系 Cookie が積まれて返る
-  return res;
 }

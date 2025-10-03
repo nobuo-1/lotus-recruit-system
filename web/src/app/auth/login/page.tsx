@@ -7,11 +7,11 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 
 export default function Login() {
+  const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(false);
-  const router = useRouter();
 
   async function onLogin() {
     if (loading) return;
@@ -23,6 +23,8 @@ export default function Login() {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ email, password }),
+        cache: "no-store",
+        credentials: "same-origin",
       });
 
       if (!res.ok) {
@@ -40,11 +42,22 @@ export default function Login() {
     }
   }
 
+  function onKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      void onLogin();
+    }
+  }
+
   // メール配信トップに寄せたヘッダー（設定ボタンは無し）
   const Header = () => (
     <header className="sticky top-0 z-40 border-b border-neutral-200 bg-white/80 backdrop-blur">
       <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-4">
-        <Link href="/" className="inline-flex items-center gap-2">
+        <Link
+          href="/"
+          className="inline-flex items-center gap-2"
+          aria-label="トップへ"
+        >
           <svg
             width="22"
             height="22"
@@ -96,6 +109,7 @@ export default function Login() {
               inputMode="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
+              onKeyDown={onKeyDown}
             />
             <input
               className="w-full rounded-lg border border-neutral-300 p-2"
@@ -104,18 +118,19 @@ export default function Login() {
               autoComplete="current-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              onKeyDown={onKeyDown}
             />
             <button
               className="w-full rounded-xl bg-black px-4 py-2 text-white disabled:opacity-60"
               onClick={onLogin}
               disabled={loading}
             >
-              ログイン
+              {loading ? "処理中…" : "ログイン"}
             </button>
           </div>
 
           {msg && (
-            <p className="mt-3 text-sm text-neutral-500 whitespace-pre-wrap">
+            <p className="mt-3 whitespace-pre-wrap text-sm text-neutral-500">
               {msg}
             </p>
           )}
