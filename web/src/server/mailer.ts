@@ -1,11 +1,25 @@
 // web/src/server/mailer.ts
 import nodemailer from "nodemailer";
 
-// ========= Env & defaults =========
+/* ========= Env & defaults ========= */
 const host = process.env.SMTP_HOST!;
 const port = Number(process.env.SMTP_PORT!);
+const user = process.env.SMTP_USER || ""; // 認証（任意）
+const pass = process.env.SMTP_PASS || ""; // 認証（任意）
 const defaultFrom = process.env.FROM_EMAIL!;
-const appUrl = process.env.APP_URL || "http://localhost:3000";
+const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
+  /\/+$/,
+  ""
+);
+
+// 任意: DKIM（用意がある場合のみ有効化）
+const dkimDomain = process.env.DKIM_DOMAIN || "";
+const dkimSelector = process.env.DKIM_SELECTOR || "";
+const dkimKey =
+  process.env.DKIM_PRIVATE_KEY ||
+  (process.env.DKIM_PRIVATE_KEY_B64
+    ? Buffer.from(process.env.DKIM_PRIVATE_KEY_B64, "base64").toString("utf8")
+    : "");
 
 // 「設定が未入力のとき」に使うフォールバック
 const fallbackCompany = process.env.COMPANY_NAME ?? "Lotus Recruit System";
@@ -31,11 +45,33 @@ export type SendArgs = {
 
 // 可能ならコネクションはモジュールスコープで再利用
 const transporter = nodemailer.createTransport({
+  pool: true, // 複数通送る時にコネクション再利用
+  maxConnections: 3,
+  maxMessages: 50,
   host,
   port,
-  secure: port === 465, // 465 のときのみ TLS
+  secure: port === 465, // 587は false（STARTTLS）
+  requireTLS: true, // TLS必須（平文は失敗させる）
+  auth: user && pass ? { user, pass } : undefined, // 自前SMTPやSESの認証
+  tls: {
+    servername: host, // SNI
+    minVersion: "TLSv1.2",
+    // 自己署名を使う場合は下記を false に（Let’s Encryptなら不要）
+    // rejectUnauthorized: false,
+  },
+  // 任意: DKIM 署名（鍵があれば自動で付与）
+  ...(dkimDomain && dkimSelector && dkimKey
+    ? {
+        dkim: {
+          domainName: dkimDomain,
+          keySelector: dkimSelector,
+          privateKey: dkimKey,
+        },
+      }
+    : {}),
 });
 
+// ---------- helpers ----------
 function escapeHtml(s: string) {
   return s.replace(
     /[&<>"']/g,
@@ -163,7 +199,7 @@ export async function sendMail(args: SendArgs) {
   // 差出人（キャンペーンやテナント設定の上書き優先）
   const from = args.fromOverride || defaultFrom;
 
-  // 配信停止URL & ヘッダ
+  // 配信停止URL & ヘッダ（RFC 8058 One-Click）
   const unsubscribeUrl = buildUnsubscribeUrl(args.unsubscribeToken ?? null);
   const headers: Record<string, string> = {};
   if (unsubscribeUrl) {
@@ -202,5 +238,5 @@ export async function sendMail(args: SendArgs) {
     headers,
   });
 
-  return info;
+  return info; // .messageId などをワーカー側で参照
 }

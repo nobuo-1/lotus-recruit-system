@@ -1,58 +1,49 @@
-// web/src/worker/email.worker.ts
+// src/worker/email.worker.ts
 import "../env";
 import { Worker, type Job } from "bullmq";
-import IORedis from "ioredis";
+import { redis, type EmailJob, isDirectEmailJob } from "../server/queue";
 import { sendMail } from "../server/mailer";
-import type { EmailJob, DirectEmailJob } from "../server/queue";
 import { supabaseAdmin } from "../lib/supabaseAdmin";
 
-const connection = new IORedis(
-  process.env.REDIS_URL ?? "redis://localhost:6379",
-  {
-    maxRetriesPerRequest: null,
-    enableReadyCheck: true,
-  }
-);
 const admin = supabaseAdmin();
 
+/** camp:CID:rcpt:RID:timestamp から抽出 */
 function parseCampaignAndRecipient(jobId: string | number | undefined) {
   const s = String(jobId ?? "");
   const m = s.match(/^camp:([^:]+):rcpt:([^:]+):/);
   return m ? { campaignId: m[1], recipientId: m[2] } : null;
 }
 
-function isDirectEmail(job: EmailJob): job is DirectEmailJob {
-  return job?.kind === "direct_email";
-}
-
 const worker = new Worker<EmailJob>(
   "email",
   async (job: Job<EmailJob>) => {
-    const payload = job.data;
+    const data = job.data;
 
-    if (!isDirectEmail(payload)) {
+    if (!isDirectEmailJob(data)) {
       console.warn("[email.skip]", {
         jobId: job.id,
-        kind: (payload as { kind?: string })?.kind,
+        kind: (data as { kind?: string })?.kind,
       });
       return {
         messageId: "skipped",
-        kind: (payload as { kind?: string })?.kind ?? "unknown",
+        kind: (data as { kind?: string })?.kind ?? "unknown",
       };
     }
 
+    // 実送信
     const info = await sendMail({
-      to: payload.to,
-      subject: payload.subject,
-      html: payload.html,
-      text: payload.text,
-      unsubscribeToken: payload.unsubscribeToken,
-      fromOverride: payload.fromOverride,
-      brandCompany: payload.brandCompany,
-      brandAddress: payload.brandAddress,
-      brandSupport: payload.brandSupport,
+      to: data.to,
+      subject: data.subject,
+      html: data.html,
+      text: data.text,
+      unsubscribeToken: data.unsubscribeToken,
+      fromOverride: data.fromOverride,
+      brandCompany: data.brandCompany,
+      brandAddress: data.brandAddress,
+      brandSupport: data.brandSupport,
     });
 
+    // DB 更新
     const meta = parseCampaignAndRecipient(job.id);
     if (meta) {
       const nowIso = new Date().toISOString();
@@ -77,16 +68,16 @@ const worker = new Worker<EmailJob>(
     }
 
     console.log("[email.sent]", {
-      to: payload.to,
+      to: data.to,
       messageId: info.messageId,
       jobId: job.id,
-      tenantId: payload.tenantId,
+      tenantId: data.tenantId,
     });
 
-    return { messageId: info.messageId, kind: payload.kind };
+    return { messageId: info.messageId, kind: data.kind };
   },
   {
-    connection,
+    connection: redis,
     concurrency: Number(process.env.EMAIL_WORKER_CONCURRENCY ?? 5),
     limiter: {
       max: Number(process.env.EMAIL_RATE_MAX ?? 30),
@@ -95,16 +86,16 @@ const worker = new Worker<EmailJob>(
   }
 );
 
-worker.on("completed", (job, result) =>
-  console.log("[email.done]", { jobId: job.id, result })
-);
-worker.on("failed", (job, err) =>
-  console.error("[email.fail]", { jobId: job?.id, err: err?.message })
-);
+worker.on("completed", (job, result) => {
+  console.log("[email.done]", { jobId: job.id, result });
+});
+worker.on("failed", (job, err) => {
+  console.error("[email.fail]", { jobId: job?.id, err: err?.message });
+});
 
 process.on("SIGINT", async () => {
   console.log("Shutting down email worker...");
   await worker.close();
-  await connection.quit();
+  await redis.quit();
   process.exit(0);
 });

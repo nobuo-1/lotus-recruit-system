@@ -8,12 +8,14 @@ export const redis = new IORedis(
   {
     maxRetriesPerRequest: null,
     enableReadyCheck: true,
+    // Upstashなど rediss:// の場合は TLS を自動有効化
+    tls: process.env.REDIS_URL?.startsWith("rediss://") ? {} : undefined,
   }
 );
 
 /** これまで使っていた単発メール送信用のジョブ */
 export type DirectEmailJob = {
-  kind: "direct_email"; // ← 判別キーを追加
+  kind: "direct_email"; // ← 判別キー
   to: string;
   subject: string;
   html: string;
@@ -39,7 +41,7 @@ export type CampaignSendJob = {
 /** キューが受け付けるジョブの総称（判別可能ユニオン） */
 export type EmailJob = DirectEmailJob | CampaignSendJob;
 
-/** 型ガード（任意・ワーカー側で便利） */
+/** 型ガード（ワーカー側で利用） */
 export const isCampaignJob = (j: EmailJob): j is CampaignSendJob =>
   j.kind === "campaign_send";
 export const isDirectEmailJob = (j: EmailJob): j is DirectEmailJob =>
@@ -55,3 +57,5 @@ export const emailQueue = new Queue<EmailJob>("email", {
     removeOnFail: 1000,
   },
 });
+
+export default emailQueue;

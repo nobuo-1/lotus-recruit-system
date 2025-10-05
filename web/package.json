@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev --turbopack",
     "build": "next build",
-    "start": "next start",
+    "start": "next start -p $PORT",
     "lint": "eslint",
     "worker": "tsx src/worker/email.worker.ts",
     "worker:email": "tsx src/worker/email.worker.ts",
