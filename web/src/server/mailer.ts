@@ -6,7 +6,7 @@ const host = process.env.SMTP_HOST!;
 const port = Number(process.env.SMTP_PORT!);
 const user = process.env.SMTP_USER || ""; // 認証（任意）
 const pass = process.env.SMTP_PASS || ""; // 認証（任意）
-const defaultFrom = process.env.FROM_EMAIL!;
+const defaultFrom = process.env.FROM_EMAIL!; // 例: no-reply@lotus-d-transformation.com
 const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
   /\/+$/,
   ""
@@ -37,7 +37,7 @@ export type SendArgs = {
   unsubscribeToken?: string;
 
   // テナントごとの上書き（任意）
-  fromOverride?: string;
+  fromOverride?: string; // /email/settings の「送信元アドレス」
   brandCompany?: string;
   brandAddress?: string;
   brandSupport?: string;
@@ -196,8 +196,12 @@ export async function sendMail(args: SendArgs) {
   const address = args.brandAddress || fallbackAddress;
   const support = args.brandSupport || fallbackSupport;
 
-  // 差出人（キャンペーンやテナント設定の上書き優先）
-  const from = args.fromOverride || defaultFrom;
+  // 差出人（表示上の From は fromOverride、無ければ no-reply）
+  const fromHeader = args.fromOverride || defaultFrom;
+  // 技術的送信者（Sender）は no-reply 固定
+  const senderHeader = defaultFrom;
+  // 返信先（Reply-To）は fromOverride を優先
+  const replyToHeader = args.fromOverride || undefined;
 
   // 配信停止URL & ヘッダ（RFC 8058 One-Click）
   const unsubscribeUrl = buildUnsubscribeUrl(args.unsubscribeToken ?? null);
@@ -230,12 +234,19 @@ export async function sendMail(args: SendArgs) {
       : "");
 
   const info = await transporter.sendMail({
-    from,
+    // 表示上の From（テナント/ユーザー設定を優先）
+    from: fromHeader,
+    // 実送信者（ヘッダに Sender として入る）
+    sender: senderHeader,
+    // 返信先（指定アドレスに返信される）
+    replyTo: replyToHeader,
     to: args.to,
     subject: args.subject,
     html: finalHtml,
     text: finalText || undefined,
     headers,
+    // 必要に応じて envelope を固定したい場合は以下を有効化
+    // envelope: { from: senderHeader, to: args.to },
   });
 
   return info; // .messageId などをワーカー側で参照

@@ -1,3 +1,4 @@
+// web/src/app/api/campaigns/send/route.ts
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
@@ -11,7 +12,95 @@ type Payload = {
   scheduleAt?: string | null; // 未来→予約 / 省略→即時
 };
 
-const appUrl = process.env.APP_URL || "http://localhost:3000";
+const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
+  /\/+$/,
+  ""
+);
+
+/** /email/settings（user優先→tenant）から送信元/ブランド設定をロード */
+async function loadSenderConfigForCurrentUser() {
+  const sb = await supabaseServer();
+  const { data: u } = await sb.auth.getUser();
+  const user = u?.user;
+  if (!user)
+    return {
+      tenantId: undefined as string | undefined,
+      cfg: {} as {
+        fromOverride?: string;
+        brandCompany?: string;
+        brandAddress?: string;
+        brandSupport?: string;
+      },
+    };
+
+  // tenant_id
+  const { data: prof } = await sb
+    .from("profiles")
+    .select("tenant_id")
+    .eq("id", user.id)
+    .maybeSingle();
+  const tenantId = (prof?.tenant_id as string | undefined) ?? undefined;
+
+  let from_address: string | undefined;
+  let brand_company: string | undefined;
+  let brand_address: string | undefined;
+  let brand_support: string | undefined;
+
+  // 1) user 設定
+  const byUser = await sb
+    .from("email_settings")
+    .select("from_address,brand_company,brand_address,brand_support")
+    .eq("user_id", user.id)
+    .maybeSingle();
+
+  if (byUser.data) {
+    ({ from_address, brand_company, brand_address, brand_support } =
+      byUser.data as any);
+  }
+
+  // 2) user 設定が無ければ tenant 設定
+  if ((!from_address || !brand_company) && tenantId) {
+    const byTenant = await sb
+      .from("email_settings")
+      .select("from_address,brand_company,brand_address,brand_support")
+      .eq("tenant_id", tenantId)
+      .maybeSingle();
+    if (byTenant.data) {
+      from_address = from_address || (byTenant.data as any).from_address;
+      brand_company = brand_company || (byTenant.data as any).brand_company;
+      brand_address = brand_address || (byTenant.data as any).brand_address;
+      brand_support = brand_support || (byTenant.data as any).brand_support;
+    }
+  }
+
+  // 3) さらに足りなければ tenants テーブルをフォールバック
+  if (tenantId) {
+    const { data: tenantRow } = await sb
+      .from("tenants")
+      .select("company_name, company_address, support_email, from_email")
+      .eq("id", tenantId)
+      .maybeSingle();
+    if (tenantRow) {
+      from_address = from_address || (tenantRow as any).from_email || undefined;
+      brand_company =
+        brand_company || (tenantRow as any).company_name || undefined;
+      brand_address =
+        brand_address || (tenantRow as any).company_address || undefined;
+      brand_support =
+        brand_support || (tenantRow as any).support_email || undefined;
+    }
+  }
+
+  return {
+    tenantId,
+    cfg: {
+      fromOverride: from_address || undefined,
+      brandCompany: brand_company || undefined,
+      brandAddress: brand_address || undefined,
+      brandSupport: brand_support || undefined,
+    },
+  };
+}
 
 /** </body> 直前に 1px ピクセルを差し込む（無ければ末尾に付与） */
 function injectOpenPixel(html: string, url: string) {
@@ -22,6 +111,14 @@ function injectOpenPixel(html: string, url: string) {
     return html.replace(/<\/body\s*>/i, `${pixel}\n</body>`);
   }
   return `${html}\n${pixel}`;
+}
+
+/** 配列を n 件ずつに分割 */
+function chunk<T>(arr: T[], size: number): T[][] {
+  const a = [...arr];
+  const out: T[][] = [];
+  while (a.length) out.push(a.splice(0, size));
+  return out;
 }
 
 export async function POST(req: Request) {
@@ -47,54 +144,57 @@ export async function POST(req: Request) {
     if (!u?.user)
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
-    const { data: prof } = await supabase
-      .from("profiles")
-      .select("tenant_id")
-      .eq("id", u.user.id)
-      .maybeSingle();
-    const tenantId = prof?.tenant_id as string | undefined;
+    // 送信元/ブランド設定
+    const { tenantId, cfg } = await loadSenderConfigForCurrentUser();
     if (!tenantId)
       return NextResponse.json({ error: "no tenant" }, { status: 400 });
 
-    // キャンペーン取得（差出人/本文）
+    // キャンペーン取得（本文は body_html / html どちらでも拾う）
     const { data: camp, error: ce } = await supabase
       .from("campaigns")
-      .select("id, tenant_id, name, subject, body_html, from_email, status")
+      .select(
+        "id, tenant_id, name, subject, body_html, html, text, from_email, status"
+      )
       .eq("id", campaignId)
       .maybeSingle();
+
     if (ce || !camp || camp.tenant_id !== tenantId)
       return NextResponse.json({ error: "not found" }, { status: 404 });
 
-    // テナント設定（フッター上書き等）
-    const { data: brand } = await supabase
-      .from("tenants")
-      .select("company_name, company_address, support_email, from_email")
-      .eq("id", tenantId)
-      .maybeSingle();
+    const htmlBody =
+      (camp as any).html ??
+      (camp as any).body_html ??
+      ""; /* どちらか存在する方を使用 */
 
-    // 受信者取得（同一テナント & アクティブ & opt-out 以外）
+    // 対象受信者（テナント一致＆アクティブ＆未オプトアウト／未購読解除）
     const { data: recs } = await supabase
       .from("recipients")
-      .select("id, email, unsubscribe_token, is_active, consent")
+      .select(
+        "id, email, unsubscribe_token, is_active, consent, unsubscribed_at, disabled"
+      )
       .eq("tenant_id", tenantId)
       .in("id", recipientIds);
 
-    const recipients = (recs ?? []).filter(
-      (r) => r?.email && (r.is_active ?? true) && r.consent !== "opt_out"
-    );
-    if (recipients.length === 0) {
+    const recipients = (recs ?? []).filter((r: any) => {
+      if (!r?.email) return false;
+      if (r.disabled === true) return false;
+      if (r.unsubscribed_at) return false;
+      if (r.is_active === false) return false;
+      if (r.consent === "opt_out") return false;
+      return true;
+    });
+    if (recipients.length === 0)
       return NextResponse.json({ error: "no recipients" }, { status: 400 });
-    }
 
-    // 同キャンペーンで既に予約/送信済みのIDは除外（二重配信防止）
+    // 重複配信防止（既に予約/送信済みは除外）
     const { data: already } = await supabase
       .from("deliveries")
       .select("recipient_id")
       .eq("tenant_id", tenantId)
       .eq("campaign_id", campaignId)
       .in("status", ["scheduled", "queued", "sent"]);
-    const exclude = new Set((already ?? []).map((r: any) => r.recipient_id));
 
+    const exclude = new Set((already ?? []).map((r: any) => r.recipient_id));
     const targets = recipients.filter((r) => !exclude.has(r.id));
     if (targets.length === 0) {
       return NextResponse.json({
@@ -119,7 +219,7 @@ export async function POST(req: Request) {
       scheduleAt = new Date(ts).toISOString();
     }
 
-    // --- deliveries を upsert（予約は scheduled、即時は queued） ---
+    // deliveries を upsert
     if (scheduleAt) {
       await supabase.from("deliveries").upsert(
         targets.map((r) => ({
@@ -131,8 +231,6 @@ export async function POST(req: Request) {
         })),
         { onConflict: "campaign_id,recipient_id" }
       );
-
-      // キャンペーン見かけの状態
       await supabase
         .from("campaigns")
         .update({ status: "scheduled" })
@@ -148,14 +246,13 @@ export async function POST(req: Request) {
         })),
         { onConflict: "campaign_id,recipient_id" }
       );
-
       await supabase
         .from("campaigns")
         .update({ status: "queued" })
         .eq("id", campaignId);
     }
 
-    // ★ ピクセル埋め込み用に delivery_id を取得（recipient_id → id の対応）
+    // delivery_id ←→ recipient_id map（開封ピクセル埋め込み用）
     const { data: dels } = await supabase
       .from("deliveries")
       .select("id, recipient_id")
@@ -168,44 +265,37 @@ export async function POST(req: Request) {
 
     const idMap = new Map<string, string>();
     (dels ?? []).forEach((d) =>
-      idMap.set(d.recipient_id as string, d.id as string)
+      idMap.set(String(d.recipient_id), String(d.id))
     );
 
-    // キュー投入（jobId に campaignId/recipientId を埋め込み）
-    const fromOverride = brand?.from_email ?? camp.from_email ?? undefined;
-    const brandCompany = brand?.company_name ?? undefined;
-    const brandAddress = brand?.company_address ?? undefined;
-    const brandSupport = brand?.support_email ?? undefined;
+    // fromOverride: user/tenant の設定 → 無ければキャンペーンの from_email
+    const fromOverride =
+      (cfg.fromOverride as string | undefined) ||
+      ((camp as any).from_email as string | undefined) ||
+      undefined;
 
+    // キュー投入
     let queued = 0;
     for (const r of targets) {
-      const deliveryId = idMap.get(r.id);
-      // 個別ピクセルURLを本文へ埋め込み
-      const htmlWithPixel =
-        deliveryId && !scheduleAt // 予約でも本文は同じ。送信時点で画像が読まれるだけ
-          ? injectOpenPixel(
-              camp.body_html ?? "",
-              `${appUrl}/api/email/open?id=${encodeURIComponent(deliveryId)}`
-            )
-          : injectOpenPixel(
-              camp.body_html ?? "",
-              `${appUrl}/api/email/open?id=${encodeURIComponent(
-                deliveryId ?? ""
-              )}`
-            );
+      const deliveryId = idMap.get(String(r.id));
+      const pixelUrl = `${appUrl}/api/email/open?id=${encodeURIComponent(
+        deliveryId ?? ""
+      )}`;
+      const htmlWithPixel = injectOpenPixel(htmlBody ?? "", pixelUrl);
 
       const job: DirectEmailJob = {
         kind: "direct_email",
-        to: r.email as string,
-        subject: (camp.subject ?? "") as string,
+        to: String(r.email),
+        subject: String(camp.subject ?? ""),
         html: htmlWithPixel,
-        text: undefined,
+        text: (camp.text as string | null) ?? undefined,
         tenantId,
-        unsubscribeToken: r.unsubscribe_token ?? undefined,
+        unsubscribeToken: (r as any).unsubscribe_token ?? undefined,
+        // ここが「指定メールアドレス」— mailer 側で Sender を no-reply にし、Reply-To にも反映
         fromOverride,
-        brandCompany,
-        brandAddress,
-        brandSupport,
+        brandCompany: cfg.brandCompany,
+        brandAddress: cfg.brandAddress,
+        brandSupport: cfg.brandSupport,
       };
 
       const jobId = `camp:${campaignId}:rcpt:${r.id}:${Date.now()}`;
@@ -237,6 +327,7 @@ export async function POST(req: Request) {
       ok: true,
       queued,
       scheduled: scheduleAt ?? null,
+      fromOverride: fromOverride ?? null,
     });
   } catch (e: any) {
     console.error("POST /api/campaigns/send error", e);

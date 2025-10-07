@@ -1,6 +1,7 @@
-// src/worker/email.worker.ts
-import "../env";
+// web/src/worker/emailWorker.ts
+import "dotenv/config";
 import { Worker, type Job } from "bullmq";
+
 import { redis, type EmailJob, isDirectEmailJob } from "../server/queue";
 import { sendMail } from "../server/mailer";
 import { supabaseAdmin } from "../lib/supabaseAdmin";
@@ -30,14 +31,14 @@ const worker = new Worker<EmailJob>(
       };
     }
 
-    // 実送信
+    // 実送信（mailer.ts 側で From/Reply-To/Sender を整備）
     const info = await sendMail({
       to: data.to,
       subject: data.subject,
       html: data.html,
       text: data.text,
       unsubscribeToken: data.unsubscribeToken,
-      fromOverride: data.fromOverride,
+      fromOverride: data.fromOverride, // ← 指定アドレス（email_settings）
       brandCompany: data.brandCompany,
       brandAddress: data.brandAddress,
       brandSupport: data.brandSupport,
@@ -71,7 +72,7 @@ const worker = new Worker<EmailJob>(
       to: data.to,
       messageId: info.messageId,
       jobId: job.id,
-      tenantId: data.tenantId,
+      tenantId: (data as any).tenantId,
     });
 
     return { messageId: info.messageId, kind: data.kind };
