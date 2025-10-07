@@ -1,5 +1,6 @@
 // web/src/app/api/campaigns/send/route.ts
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
@@ -9,7 +10,7 @@ import type { DirectEmailJob } from "@/server/queue";
 type Payload = {
   campaignId: string;
   recipientIds: string[];
-  scheduleAt?: string | null; // 未来→予約 / 省略→即時
+  scheduleAt?: string | null; // ISO。省略→即時
 };
 
 const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
@@ -17,36 +18,37 @@ const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
   ""
 );
 
-/** /email/settings（user優先→tenant）から送信元/ブランド設定をロード */
+/** 個別オープンピクセルを本文に挿入 */
+function injectOpenPixel(html: string, url: string) {
+  const pixel =
+    `<img src="${url}" alt="" width="1" height="1" ` +
+    `style="display:none;max-width:1px;max-height:1px;" />`;
+  return /<\/body\s*>/i.test(html)
+    ? html.replace(/<\/body\s*>/i, `${pixel}\n</body>`)
+    : `${html}\n${pixel}`;
+}
+
+/** /email/settings の「ユーザー優先→テナント」設定を読む */
 async function loadSenderConfigForCurrentUser() {
   const sb = await supabaseServer();
   const { data: u } = await sb.auth.getUser();
   const user = u?.user;
   if (!user)
-    return {
-      tenantId: undefined as string | undefined,
-      cfg: {} as {
-        fromOverride?: string;
-        brandCompany?: string;
-        brandAddress?: string;
-        brandSupport?: string;
-      },
-    };
+    return { tenantId: undefined as string | undefined, cfg: {} as any };
 
-  // tenant_id
   const { data: prof } = await sb
     .from("profiles")
     .select("tenant_id")
     .eq("id", user.id)
     .maybeSingle();
+
   const tenantId = (prof?.tenant_id as string | undefined) ?? undefined;
 
-  let from_address: string | undefined;
-  let brand_company: string | undefined;
-  let brand_address: string | undefined;
-  let brand_support: string | undefined;
+  let from_address: string | undefined,
+    brand_company: string | undefined,
+    brand_address: string | undefined,
+    brand_support: string | undefined;
 
-  // 1) user 設定
   const byUser = await sb
     .from("email_settings")
     .select("from_address,brand_company,brand_address,brand_support")
@@ -56,69 +58,28 @@ async function loadSenderConfigForCurrentUser() {
   if (byUser.data) {
     ({ from_address, brand_company, brand_address, brand_support } =
       byUser.data as any);
-  }
-
-  // 2) user 設定が無ければ tenant 設定
-  if ((!from_address || !brand_company) && tenantId) {
+  } else if (tenantId) {
     const byTenant = await sb
       .from("email_settings")
       .select("from_address,brand_company,brand_address,brand_support")
       .eq("tenant_id", tenantId)
       .maybeSingle();
-    if (byTenant.data) {
-      from_address = from_address || (byTenant.data as any).from_address;
-      brand_company = brand_company || (byTenant.data as any).brand_company;
-      brand_address = brand_address || (byTenant.data as any).brand_address;
-      brand_support = brand_support || (byTenant.data as any).brand_support;
-    }
-  }
 
-  // 3) さらに足りなければ tenants テーブルをフォールバック
-  if (tenantId) {
-    const { data: tenantRow } = await sb
-      .from("tenants")
-      .select("company_name, company_address, support_email, from_email")
-      .eq("id", tenantId)
-      .maybeSingle();
-    if (tenantRow) {
-      from_address = from_address || (tenantRow as any).from_email || undefined;
-      brand_company =
-        brand_company || (tenantRow as any).company_name || undefined;
-      brand_address =
-        brand_address || (tenantRow as any).company_address || undefined;
-      brand_support =
-        brand_support || (tenantRow as any).support_email || undefined;
+    if (byTenant.data) {
+      ({ from_address, brand_company, brand_address, brand_support } =
+        byTenant.data as any);
     }
   }
 
   return {
     tenantId,
     cfg: {
-      fromOverride: from_address || undefined,
+      fromOverride: from_address || undefined, // ← 指定があればこちらを優先
       brandCompany: brand_company || undefined,
       brandAddress: brand_address || undefined,
       brandSupport: brand_support || undefined,
     },
   };
-}
-
-/** </body> 直前に 1px ピクセルを差し込む（無ければ末尾に付与） */
-function injectOpenPixel(html: string, url: string) {
-  const pixel =
-    `<img src="${url}" alt="" width="1" height="1" ` +
-    `style="display:none;max-width:1px;max-height:1px;" />`;
-  if (/<\/body\s*>/i.test(html)) {
-    return html.replace(/<\/body\s*>/i, `${pixel}\n</body>`);
-  }
-  return `${html}\n${pixel}`;
-}
-
-/** 配列を n 件ずつに分割 */
-function chunk<T>(arr: T[], size: number): T[][] {
-  const a = [...arr];
-  const out: T[][] = [];
-  while (a.length) out.push(a.splice(0, size));
-  return out;
 }
 
 export async function POST(req: Request) {
@@ -137,57 +98,70 @@ export async function POST(req: Request) {
       );
     }
 
-    const supabase = await supabaseServer();
+    const sb = await supabaseServer();
 
-    // 認証 → tenant
-    const { data: u } = await supabase.auth.getUser();
+    // 認証→tenant
+    const { data: u } = await sb.auth.getUser();
     if (!u?.user)
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
-    // 送信元/ブランド設定
-    const { tenantId, cfg } = await loadSenderConfigForCurrentUser();
+    const { data: prof } = await sb
+      .from("profiles")
+      .select("tenant_id")
+      .eq("id", u.user.id)
+      .maybeSingle();
+    const tenantId = prof?.tenant_id as string | undefined;
     if (!tenantId)
       return NextResponse.json({ error: "no tenant" }, { status: 400 });
 
-    // キャンペーン取得（本文は body_html / html どちらでも拾う）
-    const { data: camp, error: ce } = await supabase
+    // 送信元/ブランド（ユーザー優先→テナント）
+    const { cfg } = await loadSenderConfigForCurrentUser();
+
+    // キャンペーン本文（このプロジェクトのスキーマに合わせて取得）
+    const { data: camp, error: ce } = await sb
       .from("campaigns")
-      .select(
-        "id, tenant_id, name, subject, body_html, html, text, from_email, status"
-      )
+      .select("id, tenant_id, subject, body_html, from_email, status")
       .eq("id", campaignId)
       .maybeSingle();
 
-    if (ce || !camp || camp.tenant_id !== tenantId)
-      return NextResponse.json({ error: "not found" }, { status: 404 });
+    if (ce || !camp || camp.tenant_id !== tenantId) {
+      return NextResponse.json(
+        { error: "campaign not found" },
+        { status: 404 }
+      );
+    }
 
-    const htmlBody =
-      (camp as any).html ??
-      (camp as any).body_html ??
-      ""; /* どちらか存在する方を使用 */
+    // テナントのブランド情報（存在すれば利用）
+    const { data: brand } = await sb
+      .from("tenants")
+      .select("company_name, company_address, support_email, from_email")
+      .eq("id", tenantId)
+      .maybeSingle();
 
-    // 対象受信者（テナント一致＆アクティブ＆未オプトアウト／未購読解除）
-    const { data: recs } = await supabase
+    // 受信者の取得（ is_active / opt-out 除外 ）
+    const { data: recs, error: re } = await sb
       .from("recipients")
       .select(
-        "id, email, unsubscribe_token, is_active, consent, unsubscribed_at, disabled"
+        "id, email, unsubscribe_token, is_active, consent, disabled, unsubscribed_at"
       )
       .eq("tenant_id", tenantId)
       .in("id", recipientIds);
 
+    if (re) return NextResponse.json({ error: re.message }, { status: 400 });
+
     const recipients = (recs ?? []).filter((r: any) => {
       if (!r?.email) return false;
-      if (r.disabled === true) return false;
-      if (r.unsubscribed_at) return false;
-      if (r.is_active === false) return false;
-      if (r.consent === "opt_out") return false;
+      if (r?.disabled === true) return false;
+      if (r?.unsubscribed_at) return false;
+      if (r?.is_active === false) return false;
+      if (r?.consent === "opt_out") return false;
       return true;
     });
     if (recipients.length === 0)
       return NextResponse.json({ error: "no recipients" }, { status: 400 });
 
-    // 重複配信防止（既に予約/送信済みは除外）
-    const { data: already } = await supabase
+    // すでに scheduled/queued/sent 済みは除外
+    const { data: already } = await sb
       .from("deliveries")
       .select("recipient_id")
       .eq("tenant_id", tenantId)
@@ -204,7 +178,7 @@ export async function POST(req: Request) {
       });
     }
 
-    // 予約 or 即時
+    // 予約か即時か
     const now = Date.now();
     let delay = 0;
     let scheduleAt: string | null = null;
@@ -221,7 +195,7 @@ export async function POST(req: Request) {
 
     // deliveries を upsert
     if (scheduleAt) {
-      await supabase.from("deliveries").upsert(
+      await sb.from("deliveries").upsert(
         targets.map((r) => ({
           tenant_id: tenantId,
           campaign_id: campaignId,
@@ -231,12 +205,12 @@ export async function POST(req: Request) {
         })),
         { onConflict: "campaign_id,recipient_id" }
       );
-      await supabase
+      await sb
         .from("campaigns")
         .update({ status: "scheduled" })
         .eq("id", campaignId);
     } else {
-      await supabase.from("deliveries").upsert(
+      await sb.from("deliveries").upsert(
         targets.map((r) => ({
           tenant_id: tenantId,
           campaign_id: campaignId,
@@ -246,14 +220,14 @@ export async function POST(req: Request) {
         })),
         { onConflict: "campaign_id,recipient_id" }
       );
-      await supabase
+      await sb
         .from("campaigns")
         .update({ status: "queued" })
         .eq("id", campaignId);
     }
 
-    // delivery_id ←→ recipient_id map（開封ピクセル埋め込み用）
-    const { data: dels } = await supabase
+    // delivery_id を取得（ピクセル埋め込み用）
+    const { data: dels } = await sb
       .from("deliveries")
       .select("id, recipient_id")
       .eq("tenant_id", tenantId)
@@ -265,37 +239,44 @@ export async function POST(req: Request) {
 
     const idMap = new Map<string, string>();
     (dels ?? []).forEach((d) =>
-      idMap.set(String(d.recipient_id), String(d.id))
+      idMap.set(d.recipient_id as string, d.id as string)
     );
 
-    // fromOverride: user/tenant の設定 → 無ければキャンペーンの from_email
+    // 送信元判定：/email/settings > tenants.from_email > campaigns.from_email > 環境変数(FROM_EMAIL)
     const fromOverride =
-      (cfg.fromOverride as string | undefined) ||
-      ((camp as any).from_email as string | undefined) ||
+      (cfg as any)?.fromOverride ||
+      (brand?.from_email as string | undefined) ||
+      (camp.from_email as string | undefined) ||
       undefined;
+
+    const brandCompany =
+      (cfg as any)?.brandCompany ?? brand?.company_name ?? undefined;
+    const brandAddress =
+      (cfg as any)?.brandAddress ?? brand?.company_address ?? undefined;
+    const brandSupport =
+      (cfg as any)?.brandSupport ?? brand?.support_email ?? undefined;
 
     // キュー投入
     let queued = 0;
     for (const r of targets) {
-      const deliveryId = idMap.get(String(r.id));
-      const pixelUrl = `${appUrl}/api/email/open?id=${encodeURIComponent(
-        deliveryId ?? ""
-      )}`;
-      const htmlWithPixel = injectOpenPixel(htmlBody ?? "", pixelUrl);
+      const deliveryId = idMap.get(r.id);
+      const htmlWithPixel = injectOpenPixel(
+        (camp.body_html ?? "") as string,
+        `${appUrl}/api/email/open?id=${encodeURIComponent(deliveryId ?? "")}`
+      );
 
       const job: DirectEmailJob = {
         kind: "direct_email",
-        to: String(r.email),
-        subject: String(camp.subject ?? ""),
+        to: r.email as string,
+        subject: (camp.subject ?? "") as string,
         html: htmlWithPixel,
-        text: (camp.text as string | null) ?? undefined,
+        text: undefined,
         tenantId,
-        unsubscribeToken: (r as any).unsubscribe_token ?? undefined,
-        // ここが「指定メールアドレス」— mailer 側で Sender を no-reply にし、Reply-To にも反映
-        fromOverride,
-        brandCompany: cfg.brandCompany,
-        brandAddress: cfg.brandAddress,
-        brandSupport: cfg.brandSupport,
+        unsubscribeToken: r.unsubscribe_token ?? undefined,
+        fromOverride, // ← 指定時はここが From になる / 未指定なら defaultFrom
+        brandCompany,
+        brandAddress,
+        brandSupport,
       };
 
       const jobId = `camp:${campaignId}:rcpt:${r.id}:${Date.now()}`;
@@ -308,9 +289,9 @@ export async function POST(req: Request) {
       queued++;
     }
 
-    // 予約の集約表示（メール予約リスト用）
+    // 予約の集約表示用
     if (scheduleAt) {
-      await supabase.from("email_schedules").upsert(
+      await sb.from("email_schedules").upsert(
         [
           {
             tenant_id: tenantId,
@@ -330,7 +311,10 @@ export async function POST(req: Request) {
       fromOverride: fromOverride ?? null,
     });
   } catch (e: any) {
-    console.error("POST /api/campaigns/send error", e);
-    return NextResponse.json({ error: "server error" }, { status: 500 });
+    console.error("POST /api/campaigns/send error:", e);
+    return NextResponse.json(
+      { error: e?.message ?? "server error" },
+      { status: 500 }
+    );
   }
 }

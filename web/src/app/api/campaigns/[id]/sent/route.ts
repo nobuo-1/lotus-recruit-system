@@ -66,11 +66,32 @@ function chunk<T>(arr: T[], size: number): T[][] {
 }
 
 type Body = {
-  // 明示的に対象IDを渡したいとき（未指定ならテナント全受信者を対象）
-  recipientIds?: string[];
-  // 下書き確認だけ行いたいとき
-  dryRun?: boolean;
+  recipientIds?: string[]; // 明示的に対象IDを渡したいとき（未指定ならテナント全受信者を対象）
+  dryRun?: boolean; // 下書き確認だけ行いたいとき
 };
+
+/** 安全に JSON を読む（空ボディでも落ちない） */
+async function safeJson<T = any>(req: Request): Promise<T | {}> {
+  try {
+    // 0 length や content-type 不在でも受け入れる
+    if (!req.headers.get("content-length")) return {};
+    return (await req.json()) as T;
+  } catch {
+    return {};
+  }
+}
+
+/** プリフライト対策（405 回避） */
+export async function OPTIONS() {
+  return new NextResponse(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    },
+  });
+}
 
 export async function POST(
   req: Request,
@@ -85,7 +106,7 @@ export async function POST(
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
     }
 
-    const body = (await req.json().catch(() => ({}))) as Body;
+    const body = (await safeJson<Body>(req)) as Body;
 
     // 送信元/ブランド設定
     const { cfg, tenantId } = await loadSenderConfigForCurrentUser();
@@ -117,7 +138,6 @@ export async function POST(
       recipientIds = body.recipientIds;
     } else {
       // テナント全受信者（配信停止や無効は除外できるなら除外）
-      // 代表的カラム名の差異を吸収するため最小要件のみで取得
       const { data: recs, error: rErr } = await sb
         .from("recipients")
         .select("id, email, unsubscribed_at, disabled")
@@ -143,7 +163,7 @@ export async function POST(
     }
 
     // dryRun: enqueせず件数だけ返す
-    if (body.dryRun) {
+    if (body?.dryRun) {
       return NextResponse.json({
         ok: true,
         dryRun: true,
@@ -196,6 +216,7 @@ export async function POST(
       const to = emailById.get(rid);
       if (!to) continue;
 
+      // 既存のワーカー実装に合わせて jobId を name として使う（互換性維持）
       await emailQueue.add(
         `camp:${id}:rcpt:${rid}:${Date.now()}`,
         {
@@ -218,9 +239,10 @@ export async function POST(
       enqueued,
       campaignId: id,
       tenantId,
-      fromOverride: basePayload as { fromOverride?: string },
+      fromOverride: (basePayload as { fromOverride?: string }).fromOverride,
     });
   } catch (e: any) {
+    console.error("POST /api/campaigns/[id]/send error:", e);
     return NextResponse.json(
       { error: e?.message || "internal error" },
       { status: 500 }

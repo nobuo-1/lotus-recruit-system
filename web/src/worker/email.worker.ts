@@ -1,13 +1,13 @@
 // web/src/worker/email.worker.ts
 import "../env";
 import { Worker, type Job } from "bullmq";
-import { redis, type EmailJob, isDirectEmailJob } from "../server/queue";
-import { sendMail } from "../server/mailer";
-import { supabaseAdmin } from "../lib/supabaseAdmin";
+import { redis, type EmailJob, isDirectEmailJob } from "@/server/queue";
+import { sendMail } from "@/server/mailer";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 const admin = supabaseAdmin();
 
-/** camp:CID:rcpt:RID:timestamp から抽出 */
+/** jobId: camp:CID:rcpt:RID:timestamp → { campaignId, recipientId } */
 function parseCampaignAndRecipient(jobId: string | number | undefined) {
   const s = String(jobId ?? "");
   const m = s.match(/^camp:([^:]+):rcpt:([^:]+):/);
@@ -27,64 +27,52 @@ const worker = new Worker<EmailJob>(
       return { messageId: "skipped", kind: (data as any)?.kind ?? "unknown" };
     }
 
-    try {
-      // 実送信
-      const info = await sendMail({
-        to: data.to,
-        subject: data.subject,
-        html: data.html,
-        text: data.text,
-        unsubscribeToken: data.unsubscribeToken,
-        fromOverride: data.fromOverride,
-        brandCompany: data.brandCompany,
-        brandAddress: data.brandAddress,
-        brandSupport: data.brandSupport,
-      });
+    // 送信
+    const info = await sendMail({
+      to: data.to,
+      subject: data.subject,
+      html: data.html,
+      text: data.text,
+      unsubscribeToken: data.unsubscribeToken,
+      fromOverride: data.fromOverride,
+      brandCompany: data.brandCompany,
+      brandAddress: data.brandAddress,
+      brandSupport: data.brandSupport,
+    });
 
-      // DB 更新
-      const meta = parseCampaignAndRecipient(job.id);
-      if (meta) {
-        const nowIso = new Date().toISOString();
+    // DB 更新
+    const meta = parseCampaignAndRecipient(job.id);
+    if (meta) {
+      const nowIso = new Date().toISOString();
 
-        await admin
-          .from("deliveries")
-          .update({ status: "sent", sent_at: nowIso })
-          .eq("campaign_id", meta.campaignId)
-          .eq("recipient_id", meta.recipientId);
+      await admin
+        .from("deliveries")
+        .update({ status: "sent", sent_at: nowIso })
+        .eq("campaign_id", meta.campaignId)
+        .eq("recipient_id", meta.recipientId);
 
-        await admin
-          .from("campaigns")
-          .update({ status: "queued" })
-          .eq("id", meta.campaignId);
+      // 一覧の見た目用に queued にしておく
+      await admin
+        .from("campaigns")
+        .update({ status: "queued" })
+        .eq("id", meta.campaignId);
 
-        await admin
-          .from("email_schedules")
-          .update({ status: "queued" })
-          .eq("campaign_id", meta.campaignId)
-          .lte("scheduled_at", nowIso)
-          .eq("status", "scheduled");
-      }
-
-      console.log("[email.sent]", {
-        to: data.to,
-        messageId: info.messageId,
-        jobId: job.id,
-        tenantId: (data as any).tenantId,
-      });
-
-      return { messageId: info.messageId, kind: data.kind };
-    } catch (err: any) {
-      const meta = parseCampaignAndRecipient(job.id);
-      if (meta) {
-        await admin
-          .from("deliveries")
-          .update({ status: "failed" })
-          .eq("campaign_id", meta.campaignId)
-          .eq("recipient_id", meta.recipientId);
-      }
-      console.error("[email.fail]", { jobId: job?.id, err: err?.message });
-      throw err; // BullMQ にも失敗を通知
+      await admin
+        .from("email_schedules")
+        .update({ status: "queued" })
+        .eq("campaign_id", meta.campaignId)
+        .lte("scheduled_at", nowIso)
+        .eq("status", "scheduled");
     }
+
+    console.log("[email.sent]", {
+      to: data.to,
+      messageId: info?.messageId,
+      jobId: job.id,
+      tenantId: (data as any).tenantId,
+    });
+
+    return { messageId: info?.messageId, kind: data.kind };
   },
   {
     connection: redis,
@@ -100,7 +88,7 @@ worker.on("completed", (job, result) => {
   console.log("[email.done]", { jobId: job.id, result });
 });
 worker.on("failed", (job, err) => {
-  console.error("[email.failed]", { jobId: job?.id, err: err?.message });
+  console.error("[email.fail]", { jobId: job?.id, err: err?.message });
 });
 
 process.on("SIGINT", async () => {
