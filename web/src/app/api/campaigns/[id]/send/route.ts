@@ -5,14 +5,13 @@ import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
 import { emailQueue } from "@/server/queue";
 
-/** /email/settings から送信元/ブランド設定を取得（user優先→tenant→tenantsフォールバック） */
+/** /email/settings → user優先 → tenant → tenants フォールバックで送信元/ブランドを取得 */
 async function loadSenderConfigForCurrentUser() {
   const sb = await supabaseServer();
   const { data: u } = await sb.auth.getUser();
   const user = u?.user;
   if (!user) return { cfg: {}, tenantId: undefined as string | undefined };
 
-  // tenant_id
   const { data: prof } = await sb
     .from("profiles")
     .select("tenant_id")
@@ -25,7 +24,7 @@ async function loadSenderConfigForCurrentUser() {
   let brand_address: string | undefined;
   let brand_support: string | undefined;
 
-  // user 設定
+  // user の設定
   const byUser = await sb
     .from("email_settings")
     .select("from_address,brand_company,brand_address,brand_support")
@@ -36,7 +35,7 @@ async function loadSenderConfigForCurrentUser() {
       byUser.data as any);
   }
 
-  // tenant 設定
+  // tenant の設定
   if ((!from_address || !brand_company) && tenantId) {
     const byTenant = await sb
       .from("email_settings")
@@ -50,7 +49,7 @@ async function loadSenderConfigForCurrentUser() {
       brand_support = brand_support || (byTenant.data as any).brand_support;
     }
 
-    // tenants テーブル フォールバック
+    // tenants テーブルのフォールバック
     const { data: tenantRow } = await sb
       .from("tenants")
       .select("company_name, company_address, support_email, from_email")
@@ -76,7 +75,7 @@ async function loadSenderConfigForCurrentUser() {
   return { cfg, tenantId };
 }
 
-/** 配列を n 件ずつに分割 */
+/** 配列チャンク */
 function chunk<T>(arr: T[], size: number): T[][] {
   const a = [...arr];
   const out: T[][] = [];
@@ -85,11 +84,11 @@ function chunk<T>(arr: T[], size: number): T[][] {
 }
 
 type Body = {
-  recipientIds?: string[]; // 渡されなければテナント全受信者
+  recipientIds?: string[];
   dryRun?: boolean;
 };
 
-/** 空ボディでも落ちない JSON パーサ */
+/** 空ボディでも安全に JSON を読む */
 async function safeJson<T = any>(req: Request): Promise<T | {}> {
   try {
     if (!req.headers.get("content-length")) return {};
@@ -99,7 +98,38 @@ async function safeJson<T = any>(req: Request): Promise<T | {}> {
   }
 }
 
-/** CORS / プリフライト */
+/** どのランタイムでも id を安全に取り出す */
+async function getCampaignId(
+  req: Request,
+  ctx?: { params?: any }
+): Promise<string | null> {
+  try {
+    const p = ctx?.params;
+    // Next.js の一部ランタイムでは params が Promise になることがある
+    if (p && typeof p === "object") {
+      if ("then" in p && typeof (p as any).then === "function") {
+        const resolved = await (p as Promise<{ id?: string }>);
+        if (resolved?.id) return String(resolved.id);
+      } else if ((p as any).id) {
+        return String((p as any).id);
+      }
+    }
+  } catch {
+    /* noop */
+  }
+  // 予備: URL から抽出 /api/campaigns/:id/send
+  try {
+    const u = new URL(req.url);
+    const parts = u.pathname.split("/").filter(Boolean);
+    const i = parts.findIndex((s) => s === "campaigns");
+    if (i >= 0 && parts[i + 1]) return parts[i + 1]!;
+  } catch {
+    /* noop */
+  }
+  return null;
+}
+
+/** CORS / プリフライト（405 回避） */
 export async function OPTIONS() {
   return new NextResponse(null, {
     status: 204,
@@ -113,10 +143,16 @@ export async function OPTIONS() {
 
 export async function POST(
   req: Request,
-  ctx: { params: Promise<{ id: string }> }
+  ctx: { params?: any } // 形は何でも受ける
 ) {
   try {
-    const { id } = await ctx.params;
+    const id = await getCampaignId(req, ctx);
+    if (!id) {
+      return NextResponse.json(
+        { error: "invalid campaign id" },
+        { status: 400 }
+      );
+    }
 
     const sb = await supabaseServer();
     const { data: u } = await sb.auth.getUser();
@@ -132,7 +168,7 @@ export async function POST(
       return NextResponse.json({ error: "tenant not found" }, { status: 400 });
     }
 
-    // キャンペーン取得
+    // キャンペーン本文
     const { data: campaign, error: campErr } = await sb
       .from("campaigns")
       .select("id, tenant_id, subject, html, text, unsubscribe_token")
@@ -153,9 +189,9 @@ export async function POST(
     let recipientIds: string[] | null = null;
 
     if (Array.isArray(body.recipientIds) && body.recipientIds.length > 0) {
-      recipientIds = body.recipientIds;
+      recipientIds = body.recipientIds.map(String);
     } else {
-      // 最小カラムのみ選択（列がない環境でも安全）
+      // 存在保証のある最小カラムだけ取得（列がない環境でもOK）
       const { data: recs, error: rErr } = await sb
         .from("recipients")
         .select("id, email, unsubscribe_token, unsubscribed_at")
@@ -167,11 +203,11 @@ export async function POST(
 
       const active = (recs ?? []).filter((r: any) => {
         if (!r?.id || !r?.email) return false;
-        // 任意列が存在すれば尊重（存在チェックしてから）
-        if ("disabled" in r && r?.disabled === true) return false;
-        if ("is_active" in r && r?.is_active === false) return false;
-        if ("consent" in r && r?.consent === "opt_out") return false;
-        if (r?.unsubscribed_at) return false;
+        // 任意列は存在した場合のみ評価
+        if ("disabled" in r && r.disabled === true) return false;
+        if ("is_active" in r && r.is_active === false) return false;
+        if ("consent" in r && r.consent === "opt_out") return false;
+        if (r.unsubscribed_at) return false;
         return true;
       });
 
@@ -182,7 +218,7 @@ export async function POST(
       return NextResponse.json({ ok: true, enqueued: 0 });
     }
 
-    // dry-run
+    // dryRun
     if (body?.dryRun) {
       return NextResponse.json({
         ok: true,
@@ -191,7 +227,7 @@ export async function POST(
       });
     }
 
-    // deliveries upsert（queued）
+    // deliveries を upsert（queued）
     const nowIso = new Date().toISOString();
     const rows = recipientIds.map((rid) => ({
       tenant_id: tenantId,
@@ -212,20 +248,20 @@ export async function POST(
       .select("id, email, unsubscribe_token")
       .in("id", recipientIds);
 
-    const emailById = new Map<string, { email: string; token?: string }>();
+    const byId = new Map<string, { email: string; token?: string }>();
     (recEmails ?? []).forEach((r: any) => {
       if (r?.id && r?.email) {
-        emailById.set(String(r.id), {
+        byId.set(String(r.id), {
           email: String(r.email),
           token: r.unsubscribe_token ?? undefined,
         });
       }
     });
 
-    // キュー投入（jobId をパターンに）
+    // キュー投入（ワーカーのパーサに合わせた jobId）
     let enqueued = 0;
     for (const rid of recipientIds) {
-      const rec = emailById.get(rid);
+      const rec = byId.get(rid);
       if (!rec) continue;
 
       await emailQueue.add(
@@ -249,7 +285,7 @@ export async function POST(
       enqueued++;
     }
 
-    // 見た目状態
+    // 見た目の状態
     await sb.from("campaigns").update({ status: "queued" }).eq("id", id);
 
     return NextResponse.json({
