@@ -1,18 +1,38 @@
-// web/src/app/api/campaigns/[id]/send/route.ts
+// web/src/app/api/campaigns/send/route.ts
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
 import { emailQueue } from "@/server/queue";
+import type { DirectEmailJob } from "@/server/queue";
 
-/** /email/settings から送信元/ブランド設定を取得（user優先→tenant→tenantsフォールバック） */
+type Payload = {
+  campaignId: string;
+  recipientIds: string[];
+  scheduleAt?: string | null; // ISO 将来日時で予約
+};
+
+const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
+  /\/+$/,
+  ""
+);
+
+/** /email/settings（user→tenant→tenants） */
 async function loadSenderConfigForCurrentUser() {
   const sb = await supabaseServer();
   const { data: u } = await sb.auth.getUser();
   const user = u?.user;
-  if (!user) return { cfg: {}, tenantId: undefined as string | undefined };
+  if (!user)
+    return {
+      tenantId: undefined as string | undefined,
+      cfg: {} as {
+        fromOverride?: string;
+        brandCompany?: string;
+        brandAddress?: string;
+        brandSupport?: string;
+      },
+    };
 
-  // tenant_id
   const { data: prof } = await sb
     .from("profiles")
     .select("tenant_id")
@@ -25,7 +45,7 @@ async function loadSenderConfigForCurrentUser() {
   let brand_address: string | undefined;
   let brand_support: string | undefined;
 
-  // user 設定
+  // user
   const byUser = await sb
     .from("email_settings")
     .select("from_address,brand_company,brand_address,brand_support")
@@ -36,7 +56,7 @@ async function loadSenderConfigForCurrentUser() {
       byUser.data as any);
   }
 
-  // tenant 設定
+  // tenant
   if ((!from_address || !brand_company) && tenantId) {
     const byTenant = await sb
       .from("email_settings")
@@ -50,7 +70,6 @@ async function loadSenderConfigForCurrentUser() {
       brand_support = brand_support || (byTenant.data as any).brand_support;
     }
 
-    // tenants テーブル フォールバック
     const { data: tenantRow } = await sb
       .from("tenants")
       .select("company_name, company_address, support_email, from_email")
@@ -67,13 +86,23 @@ async function loadSenderConfigForCurrentUser() {
     }
   }
 
-  const cfg = {
-    fromOverride: from_address || undefined,
-    brandCompany: brand_company || undefined,
-    brandAddress: brand_address || undefined,
-    brandSupport: brand_support || undefined,
+  return {
+    tenantId,
+    cfg: {
+      fromOverride: from_address || undefined,
+      brandCompany: brand_company || undefined,
+      brandAddress: brand_address || undefined,
+      brandSupport: brand_support || undefined,
+    },
   };
-  return { cfg, tenantId };
+}
+
+/** ピクセル挿入（</body> の直前。無ければ末尾） */
+function injectOpenPixel(html: string, url: string) {
+  const pixel = `<img src="${url}" alt="" width="1" height="1" style="display:none;max-width:1px;max-height:1px;" />`;
+  return /<\/body\s*>/i.test(html)
+    ? html.replace(/<\/body\s*>/i, `${pixel}\n</body>`)
+    : `${html}\n${pixel}`;
 }
 
 /** 配列を n 件ずつに分割 */
@@ -82,21 +111,6 @@ function chunk<T>(arr: T[], size: number): T[][] {
   const out: T[][] = [];
   while (a.length) out.push(a.splice(0, size));
   return out;
-}
-
-type Body = {
-  recipientIds?: string[]; // 渡されなければテナント全受信者
-  dryRun?: boolean;
-};
-
-/** 空ボディでも落ちない JSON パーサ */
-async function safeJson<T = any>(req: Request): Promise<T | {}> {
-  try {
-    if (!req.headers.get("content-length")) return {};
-    return (await req.json()) as T;
-  } catch {
-    return {};
-  }
 }
 
 /** CORS / プリフライト */
@@ -111,159 +125,208 @@ export async function OPTIONS() {
   });
 }
 
-export async function POST(
-  req: Request,
-  ctx: { params: Promise<{ id: string }> }
-) {
+export async function POST(req: Request) {
   try {
-    const { id } = await ctx.params;
+    const body = (await req.json().catch(() => ({}))) as Partial<Payload>;
+    const campaignId = body.campaignId ?? "";
+    const recipientIds = Array.isArray(body.recipientIds)
+      ? body.recipientIds
+      : [];
+    const scheduleAtISO = body.scheduleAt ?? null;
 
-    const sb = await supabaseServer();
-    const { data: u } = await sb.auth.getUser();
-    if (!u?.user) {
-      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-    }
-
-    const body = (await safeJson<Body>(req)) as Body;
-
-    // 送信元/ブランド設定
-    const { cfg, tenantId } = await loadSenderConfigForCurrentUser();
-    if (!tenantId) {
-      return NextResponse.json({ error: "tenant not found" }, { status: 400 });
-    }
-
-    // キャンペーン取得
-    const { data: campaign, error: campErr } = await sb
-      .from("campaigns")
-      .select("id, tenant_id, subject, html, text, unsubscribe_token")
-      .eq("id", id)
-      .maybeSingle();
-
-    if (campErr || !campaign) {
+    if (!campaignId || recipientIds.length === 0) {
       return NextResponse.json(
-        { error: campErr?.message || "campaign not found" },
-        { status: 404 }
+        { error: "campaignId と recipientIds は必須です" },
+        { status: 400 }
       );
     }
-    if (campaign.tenant_id !== tenantId) {
-      return NextResponse.json({ error: "forbidden" }, { status: 403 });
-    }
 
-    // 対象受信者
-    let recipientIds: string[] | null = null;
+    const supabase = await supabaseServer();
 
-    if (Array.isArray(body.recipientIds) && body.recipientIds.length > 0) {
-      recipientIds = body.recipientIds;
-    } else {
-      // 最小カラムのみ選択（列がない環境でも安全）
-      const { data: recs, error: rErr } = await sb
-        .from("recipients")
-        .select("id, email, unsubscribe_token, unsubscribed_at")
-        .eq("tenant_id", tenantId);
+    // 認証
+    const { data: u } = await supabase.auth.getUser();
+    if (!u?.user)
+      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
-      if (rErr) {
-        return NextResponse.json({ error: rErr.message }, { status: 400 });
-      }
+    // 送信元/ブランド
+    const { tenantId, cfg } = await loadSenderConfigForCurrentUser();
+    if (!tenantId)
+      return NextResponse.json({ error: "no tenant" }, { status: 400 });
 
-      const active = (recs ?? []).filter((r: any) => {
-        if (!r?.id || !r?.email) return false;
-        // 任意列が存在すれば尊重（存在チェックしてから）
-        if ("disabled" in r && r?.disabled === true) return false;
-        if ("is_active" in r && r?.is_active === false) return false;
-        if ("consent" in r && r?.consent === "opt_out") return false;
-        if (r?.unsubscribed_at) return false;
-        return true;
-      });
+    // キャンペーン（html or body_html を採用）
+    const { data: camp, error: ce } = await supabase
+      .from("campaigns")
+      .select(
+        "id, tenant_id, name, subject, body_html, html, text, from_email, status"
+      )
+      .eq("id", campaignId)
+      .maybeSingle();
+    if (ce || !camp || camp.tenant_id !== tenantId)
+      return NextResponse.json({ error: "not found" }, { status: 404 });
 
-      recipientIds = active.map((r: any) => String(r.id));
-    }
+    const htmlBody = (camp as any).html ?? (camp as any).body_html ?? "";
 
-    if (!recipientIds || recipientIds.length === 0) {
-      return NextResponse.json({ ok: true, enqueued: 0 });
-    }
-
-    // dry-run
-    if (body?.dryRun) {
-      return NextResponse.json({
-        ok: true,
-        dryRun: true,
-        wouldEnqueue: recipientIds.length,
-      });
-    }
-
-    // deliveries upsert（queued）
-    const nowIso = new Date().toISOString();
-    const rows = recipientIds.map((rid) => ({
-      tenant_id: tenantId,
-      campaign_id: id,
-      recipient_id: rid,
-      status: "queued" as const,
-      queued_at: nowIso,
-    }));
-    for (const part of chunk(rows, 500)) {
-      await sb.from("deliveries").upsert(part, {
-        onConflict: "campaign_id,recipient_id",
-      });
-    }
-
-    // 受信者メールを一括取得
-    const { data: recEmails } = await sb
+    // 受信者（最小カラム取得＋任意列は存在する時のみ評価）
+    const { data: recs } = await supabase
       .from("recipients")
-      .select("id, email, unsubscribe_token")
+      .select("id, email, unsubscribe_token, unsubscribed_at")
+      .eq("tenant_id", tenantId)
       .in("id", recipientIds);
 
-    const emailById = new Map<string, { email: string; token?: string }>();
-    (recEmails ?? []).forEach((r: any) => {
-      if (r?.id && r?.email) {
-        emailById.set(String(r.id), {
-          email: String(r.email),
-          token: r.unsubscribe_token ?? undefined,
-        });
-      }
+    const recipients = (recs ?? []).filter((r: any) => {
+      if (!r?.email) return false;
+      if ("disabled" in r && r?.disabled === true) return false;
+      if ("is_active" in r && r?.is_active === false) return false;
+      if ("consent" in r && r?.consent === "opt_out") return false;
+      if (r?.unsubscribed_at) return false;
+      return true;
     });
+    if (recipients.length === 0)
+      return NextResponse.json({ error: "no recipients" }, { status: 400 });
 
-    // キュー投入（jobId をパターンに）
-    let enqueued = 0;
-    for (const rid of recipientIds) {
-      const rec = emailById.get(rid);
-      if (!rec) continue;
-
-      await emailQueue.add(
-        "direct_email",
-        {
-          kind: "direct_email",
-          to: rec.email,
-          subject: String(campaign.subject ?? ""),
-          html: String(campaign.html ?? ""),
-          text: (campaign.text as string | null) ?? undefined,
-          unsubscribeToken: rec.token,
-          tenantId,
-          ...cfg, // fromOverride / brand*
-        },
-        {
-          jobId: `camp:${id}:rcpt:${rid}:${Date.now()}`,
-          removeOnComplete: 1000,
-          removeOnFail: 1000,
-        }
-      );
-      enqueued++;
+    // 既送/予約済み除外
+    const { data: already } = await supabase
+      .from("deliveries")
+      .select("recipient_id")
+      .eq("tenant_id", tenantId)
+      .eq("campaign_id", campaignId)
+      .in("status", ["scheduled", "queued", "sent"]);
+    const exclude = new Set(
+      (already ?? []).map((r: any) => String(r.recipient_id))
+    );
+    const targets = recipients.filter((r) => !exclude.has(String(r.id)));
+    if (targets.length === 0) {
+      return NextResponse.json({
+        ok: true,
+        queued: 0,
+        skipped: recipientIds.length,
+      });
     }
 
-    // 見た目状態
-    await sb.from("campaigns").update({ status: "queued" }).eq("id", id);
+    // 予約 or 即時
+    const now = Date.now();
+    let delay = 0;
+    let scheduleAt: string | null = null;
+    if (scheduleAtISO) {
+      const ts = Date.parse(scheduleAtISO);
+      if (Number.isNaN(ts))
+        return NextResponse.json(
+          { error: "scheduleAt が不正です" },
+          { status: 400 }
+        );
+      delay = Math.max(0, ts - now);
+      scheduleAt = new Date(ts).toISOString();
+    }
+
+    // deliveries upsert
+    if (scheduleAt) {
+      await supabase.from("deliveries").upsert(
+        targets.map((r) => ({
+          tenant_id: tenantId,
+          campaign_id: campaignId,
+          recipient_id: r.id,
+          status: "scheduled",
+          scheduled_at: scheduleAt,
+        })),
+        { onConflict: "campaign_id,recipient_id" }
+      );
+      await supabase
+        .from("campaigns")
+        .update({ status: "scheduled" })
+        .eq("id", campaignId);
+    } else {
+      await supabase.from("deliveries").upsert(
+        targets.map((r) => ({
+          tenant_id: tenantId,
+          campaign_id: campaignId,
+          recipient_id: r.id,
+          status: "queued",
+          scheduled_at: null,
+        })),
+        { onConflict: "campaign_id,recipient_id" }
+      );
+      await supabase
+        .from("campaigns")
+        .update({ status: "queued" })
+        .eq("id", campaignId);
+    }
+
+    // delivery_id map（ピクセル用）
+    const { data: dels } = await supabase
+      .from("deliveries")
+      .select("id, recipient_id")
+      .eq("tenant_id", tenantId)
+      .eq("campaign_id", campaignId)
+      .in(
+        "recipient_id",
+        targets.map((t) => t.id)
+      );
+    const idMap = new Map<string, string>();
+    (dels ?? []).forEach((d) =>
+      idMap.set(String(d.recipient_id), String(d.id))
+    );
+
+    // 差出人（設定→キャンペーン from_email → mailer デフォルト）
+    const fromOverride =
+      (cfg.fromOverride as string | undefined) ||
+      ((camp as any).from_email as string | undefined) ||
+      undefined;
+
+    // キュー投入
+    let queued = 0;
+    for (const r of targets) {
+      const deliveryId = idMap.get(String(r.id));
+      const pixelUrl = `${appUrl}/api/email/open?id=${encodeURIComponent(
+        deliveryId ?? ""
+      )}`;
+      const htmlWithPixel = injectOpenPixel(htmlBody ?? "", pixelUrl);
+
+      const job: DirectEmailJob = {
+        kind: "direct_email",
+        to: String(r.email),
+        subject: String(camp.subject ?? ""),
+        html: htmlWithPixel,
+        text: (camp.text as string | null) ?? undefined,
+        tenantId,
+        unsubscribeToken: (r as any).unsubscribe_token ?? undefined,
+        fromOverride,
+        brandCompany: cfg.brandCompany,
+        brandAddress: cfg.brandAddress,
+        brandSupport: cfg.brandSupport,
+      };
+
+      await emailQueue.add("direct_email", job, {
+        jobId: `camp:${campaignId}:rcpt:${r.id}:${Date.now()}`,
+        delay,
+        removeOnComplete: 1000,
+        removeOnFail: 1000,
+      });
+      queued++;
+    }
+
+    // 予約リスト集約
+    if (scheduleAt) {
+      await supabase.from("email_schedules").upsert(
+        [
+          {
+            tenant_id: tenantId,
+            campaign_id: campaignId,
+            scheduled_at: scheduleAt,
+            status: "scheduled",
+          },
+        ],
+        { onConflict: "tenant_id,campaign_id,scheduled_at" }
+      );
+    }
 
     return NextResponse.json({
       ok: true,
-      enqueued,
-      campaignId: id,
-      tenantId,
-      fromOverride: (cfg as { fromOverride?: string }).fromOverride ?? null,
+      queued,
+      scheduled: scheduleAt ?? null,
+      fromOverride: fromOverride ?? null,
     });
   } catch (e: any) {
-    console.error("POST /api/campaigns/[id]/send error:", e);
-    return NextResponse.json(
-      { error: e?.message || "internal error" },
-      { status: 500 }
-    );
+    console.error("POST /api/campaigns/send error", e);
+    return NextResponse.json({ error: "server error" }, { status: 500 });
   }
 }
