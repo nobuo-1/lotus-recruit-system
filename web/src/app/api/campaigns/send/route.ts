@@ -1,37 +1,16 @@
-// web/src/app/api/campaigns/send/route.ts
+// web/src/app/api/campaigns/[id]/send/route.ts
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
 import { emailQueue } from "@/server/queue";
-import type { DirectEmailJob } from "@/server/queue";
 
-type Payload = {
-  campaignId: string;
-  recipientIds: string[];
-  scheduleAt?: string | null; // 未来→予約 / 省略→即時
-};
-
-const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
-  /\/+$/,
-  ""
-);
-
-/** /email/settings（user優先→tenant）から送信元/ブランド設定をロード */
+/** /email/settings から送信元/ブランド設定を取得（user優先→tenant→tenantsフォールバック） */
 async function loadSenderConfigForCurrentUser() {
   const sb = await supabaseServer();
   const { data: u } = await sb.auth.getUser();
   const user = u?.user;
-  if (!user)
-    return {
-      tenantId: undefined as string | undefined,
-      cfg: {} as {
-        fromOverride?: string;
-        brandCompany?: string;
-        brandAddress?: string;
-        brandSupport?: string;
-      },
-    };
+  if (!user) return { cfg: {}, tenantId: undefined as string | undefined };
 
   // tenant_id
   const { data: prof } = await sb
@@ -46,19 +25,18 @@ async function loadSenderConfigForCurrentUser() {
   let brand_address: string | undefined;
   let brand_support: string | undefined;
 
-  // 1) user 設定
+  // user 設定
   const byUser = await sb
     .from("email_settings")
     .select("from_address,brand_company,brand_address,brand_support")
     .eq("user_id", user.id)
     .maybeSingle();
-
   if (byUser.data) {
     ({ from_address, brand_company, brand_address, brand_support } =
       byUser.data as any);
   }
 
-  // 2) user 設定が無ければ tenant 設定
+  // tenant 設定
   if ((!from_address || !brand_company) && tenantId) {
     const byTenant = await sb
       .from("email_settings")
@@ -71,10 +49,8 @@ async function loadSenderConfigForCurrentUser() {
       brand_address = brand_address || (byTenant.data as any).brand_address;
       brand_support = brand_support || (byTenant.data as any).brand_support;
     }
-  }
 
-  // 3) さらに足りなければ tenants テーブルをフォールバック
-  if (tenantId) {
+    // tenants テーブル フォールバック
     const { data: tenantRow } = await sb
       .from("tenants")
       .select("company_name, company_address, support_email, from_email")
@@ -91,26 +67,13 @@ async function loadSenderConfigForCurrentUser() {
     }
   }
 
-  return {
-    tenantId,
-    cfg: {
-      fromOverride: from_address || undefined,
-      brandCompany: brand_company || undefined,
-      brandAddress: brand_address || undefined,
-      brandSupport: brand_support || undefined,
-    },
+  const cfg = {
+    fromOverride: from_address || undefined,
+    brandCompany: brand_company || undefined,
+    brandAddress: brand_address || undefined,
+    brandSupport: brand_support || undefined,
   };
-}
-
-/** </body> 直前に 1px ピクセルを差し込む（無ければ末尾に付与） */
-function injectOpenPixel(html: string, url: string) {
-  const pixel =
-    `<img src="${url}" alt="" width="1" height="1" ` +
-    `style="display:none;max-width:1px;max-height:1px;" />`;
-  if (/<\/body\s*>/i.test(html)) {
-    return html.replace(/<\/body\s*>/i, `${pixel}\n</body>`);
-  }
-  return `${html}\n${pixel}`;
+  return { cfg, tenantId };
 }
 
 /** 配列を n 件ずつに分割 */
@@ -121,18 +84,22 @@ function chunk<T>(arr: T[], size: number): T[][] {
   return out;
 }
 
-/** 空ボディでも安全に JSON を読む */
+type Body = {
+  recipientIds?: string[]; // 渡されなければテナント全受信者
+  dryRun?: boolean;
+};
+
+/** 空ボディでも落ちない JSON パーサ */
 async function safeJson<T = any>(req: Request): Promise<T | {}> {
   try {
-    const len = Number(req.headers.get("content-length") || 0);
-    if (!len) return {};
+    if (!req.headers.get("content-length")) return {};
     return (await req.json()) as T;
   } catch {
     return {};
   }
 }
 
-/** CORS/プリフライト対策（405 回避） */
+/** CORS / プリフライト */
 export async function OPTIONS() {
   return new NextResponse(null, {
     status: 204,
@@ -144,252 +111,159 @@ export async function OPTIONS() {
   });
 }
 
-/** 受信者行（列は任意・存在すれば拾う） */
-type RecRow = {
-  id: string;
-  email: string;
-  unsubscribe_token?: string | null;
-  unsubscribed_at?: string | null;
-  disabled?: boolean | null;
-  is_active?: boolean | null;
-  consent?: string | null;
-};
-
-export async function POST(req: Request) {
+export async function POST(
+  req: Request,
+  ctx: { params: Promise<{ id: string }> }
+) {
   try {
-    const body = (await safeJson<Partial<Payload>>(req)) as Partial<Payload>;
-    const campaignId = body.campaignId ?? "";
-    const recipientIds = Array.isArray(body.recipientIds)
-      ? body.recipientIds
-      : [];
-    const scheduleAtISO = body.scheduleAt ?? null;
+    const { id } = await ctx.params;
 
-    if (!campaignId || recipientIds.length === 0) {
-      return NextResponse.json(
-        { error: "campaignId と recipientIds は必須です" },
-        { status: 400 }
-      );
+    const sb = await supabaseServer();
+    const { data: u } = await sb.auth.getUser();
+    if (!u?.user) {
+      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
     }
 
-    const supabase = await supabaseServer();
-
-    // 認証 → tenant
-    const { data: u } = await supabase.auth.getUser();
-    if (!u?.user)
-      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    const body = (await safeJson<Body>(req)) as Body;
 
     // 送信元/ブランド設定
-    const { tenantId, cfg } = await loadSenderConfigForCurrentUser();
-    if (!tenantId)
-      return NextResponse.json({ error: "no tenant" }, { status: 400 });
+    const { cfg, tenantId } = await loadSenderConfigForCurrentUser();
+    if (!tenantId) {
+      return NextResponse.json({ error: "tenant not found" }, { status: 400 });
+    }
 
-    // キャンペーン取得（本文は body_html / html どちらでも拾う）
-    const { data: camp, error: ce } = await supabase
+    // キャンペーン取得
+    const { data: campaign, error: campErr } = await sb
       .from("campaigns")
-      .select(
-        "id, tenant_id, name, subject, body_html, html, text, from_email, status"
-      )
-      .eq("id", campaignId)
+      .select("id, tenant_id, subject, html, text, unsubscribe_token")
+      .eq("id", id)
       .maybeSingle();
 
-    if (ce || !camp || camp.tenant_id !== tenantId)
-      return NextResponse.json({ error: "not found" }, { status: 404 });
-
-    const htmlBody = (camp as any).html ?? (camp as any).body_html ?? "";
-
-    // ===== 受信者取得（列の有無に強いフォールバック）=====
-    let recs: RecRow[] = [];
-    {
-      // 1st try: 列を広めに指定
-      const resp1: any = await supabase
-        .from("recipients")
-        .select(
-          "id, email, unsubscribe_token, is_active, consent, unsubscribed_at, disabled"
-        )
-        .eq("tenant_id", tenantId)
-        .in("id", recipientIds);
-
-      if (!resp1.error) {
-        recs = (resp1.data ?? []) as RecRow[];
-      } else {
-        // フォールバック: 最小列のみ
-        const resp2: any = await supabase
-          .from("recipients")
-          .select("id, email, unsubscribe_token, unsubscribed_at")
-          .eq("tenant_id", tenantId)
-          .in("id", recipientIds);
-
-        if (resp2.error) {
-          return NextResponse.json(
-            { error: resp2.error.message },
-            { status: 400 }
-          );
-        }
-        recs = (resp2.data ?? []) as RecRow[];
-      }
+    if (campErr || !campaign) {
+      return NextResponse.json(
+        { error: campErr?.message || "campaign not found" },
+        { status: 404 }
+      );
+    }
+    if (campaign.tenant_id !== tenantId) {
+      return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
 
-    const recipients = (recs ?? []).filter((r: RecRow) => {
-      if (!r?.email) return false;
-      if (r?.unsubscribed_at) return false; // 解除済み
-      if (r?.disabled === true) return false; // あれば除外
-      if (r?.is_active === false) return false; // あれば除外
-      if (r?.consent === "opt_out") return false; // あれば除外
-      return true;
-    });
-    if (recipients.length === 0)
-      return NextResponse.json({ error: "no recipients" }, { status: 400 });
+    // 対象受信者
+    let recipientIds: string[] | null = null;
 
-    // 重複配信防止（既に予約/送信済みは除外）
-    const { data: already } = await supabase
-      .from("deliveries")
-      .select("recipient_id")
-      .eq("tenant_id", tenantId)
-      .eq("campaign_id", campaignId)
-      .in("status", ["scheduled", "queued", "sent"]);
+    if (Array.isArray(body.recipientIds) && body.recipientIds.length > 0) {
+      recipientIds = body.recipientIds;
+    } else {
+      // 最小カラムのみ選択（列がない環境でも安全）
+      const { data: recs, error: rErr } = await sb
+        .from("recipients")
+        .select("id, email, unsubscribe_token, unsubscribed_at")
+        .eq("tenant_id", tenantId);
 
-    const exclude = new Set((already ?? []).map((r: any) => r.recipient_id));
-    const targets = recipients.filter((r) => !exclude.has(r.id));
-    if (targets.length === 0) {
+      if (rErr) {
+        return NextResponse.json({ error: rErr.message }, { status: 400 });
+      }
+
+      const active = (recs ?? []).filter((r: any) => {
+        if (!r?.id || !r?.email) return false;
+        // 任意列が存在すれば尊重（存在チェックしてから）
+        if ("disabled" in r && r?.disabled === true) return false;
+        if ("is_active" in r && r?.is_active === false) return false;
+        if ("consent" in r && r?.consent === "opt_out") return false;
+        if (r?.unsubscribed_at) return false;
+        return true;
+      });
+
+      recipientIds = active.map((r: any) => String(r.id));
+    }
+
+    if (!recipientIds || recipientIds.length === 0) {
+      return NextResponse.json({ ok: true, enqueued: 0 });
+    }
+
+    // dry-run
+    if (body?.dryRun) {
       return NextResponse.json({
         ok: true,
-        queued: 0,
-        skipped: recipientIds.length,
+        dryRun: true,
+        wouldEnqueue: recipientIds.length,
       });
     }
 
-    // 予約 or 即時
-    const now = Date.now();
-    let delay = 0;
-    let scheduleAt: string | null = null;
-    if (scheduleAtISO) {
-      const ts = Date.parse(scheduleAtISO);
-      if (Number.isNaN(ts))
-        return NextResponse.json(
-          { error: "scheduleAt が不正です" },
-          { status: 400 }
-        );
-      delay = Math.max(0, ts - now);
-      scheduleAt = new Date(ts).toISOString();
-    }
-
-    // deliveries を upsert
-    if (scheduleAt) {
-      const res = await supabase.from("deliveries").upsert(
-        targets.map((r) => ({
-          tenant_id: tenantId,
-          campaign_id: campaignId,
-          recipient_id: r.id,
-          status: "scheduled",
-          scheduled_at: scheduleAt,
-        })),
-        { onConflict: "campaign_id,recipient_id" }
-      );
-      if (res.error) {
-        return NextResponse.json({ error: res.error.message }, { status: 400 });
-      }
-      await supabase
-        .from("campaigns")
-        .update({ status: "scheduled" })
-        .eq("id", campaignId);
-    } else {
-      const res = await supabase.from("deliveries").upsert(
-        targets.map((r) => ({
-          tenant_id: tenantId,
-          campaign_id: campaignId,
-          recipient_id: r.id,
-          status: "queued",
-          scheduled_at: null,
-        })),
-        { onConflict: "campaign_id,recipient_id" }
-      );
-      if (res.error) {
-        return NextResponse.json({ error: res.error.message }, { status: 400 });
-      }
-      await supabase
-        .from("campaigns")
-        .update({ status: "queued" })
-        .eq("id", campaignId);
-    }
-
-    // delivery_id ←→ recipient_id map（開封ピクセル埋め込み用）
-    const { data: dels } = await supabase
-      .from("deliveries")
-      .select("id, recipient_id")
-      .eq("tenant_id", tenantId)
-      .eq("campaign_id", campaignId)
-      .in(
-        "recipient_id",
-        targets.map((t) => t.id)
-      );
-
-    const idMap = new Map<string, string>();
-    (dels ?? []).forEach((d) =>
-      idMap.set(String(d.recipient_id), String(d.id))
-    );
-
-    // fromOverride: /email/settings → 無ければ campaign.from_email
-    const fromOverride =
-      (cfg.fromOverride as string | undefined) ||
-      ((camp as any).from_email as string | undefined) ||
-      undefined;
-
-    // キュー投入
-    let queued = 0;
-    for (const r of targets) {
-      const deliveryId = idMap.get(String(r.id));
-      const pixelUrl = `${appUrl}/api/email/open?id=${encodeURIComponent(
-        deliveryId ?? ""
-      )}`;
-      const htmlWithPixel = injectOpenPixel(htmlBody ?? "", pixelUrl);
-
-      const job: DirectEmailJob = {
-        kind: "direct_email",
-        to: String(r.email),
-        subject: String(camp.subject ?? ""),
-        html: htmlWithPixel,
-        text: (camp.text as string | null) ?? undefined,
-        tenantId,
-        unsubscribeToken: (r as any).unsubscribe_token ?? undefined,
-        fromOverride,
-        brandCompany: cfg.brandCompany,
-        brandAddress: cfg.brandAddress,
-        brandSupport: cfg.brandSupport,
-      };
-
-      const jobId = `camp:${campaignId}:rcpt:${r.id}:${Date.now()}`;
-      await emailQueue.add("direct_email", job, {
-        jobId, // ← worker が job.id をパース
-        delay, // ← 予約なら遅延
-        removeOnComplete: 1000,
-        removeOnFail: 1000,
+    // deliveries upsert（queued）
+    const nowIso = new Date().toISOString();
+    const rows = recipientIds.map((rid) => ({
+      tenant_id: tenantId,
+      campaign_id: id,
+      recipient_id: rid,
+      status: "queued" as const,
+      queued_at: nowIso,
+    }));
+    for (const part of chunk(rows, 500)) {
+      await sb.from("deliveries").upsert(part, {
+        onConflict: "campaign_id,recipient_id",
       });
-      queued++;
     }
 
-    // 予約の集約表示（メール予約リスト用）
-    if (scheduleAt) {
-      await supabase.from("email_schedules").upsert(
-        [
-          {
-            tenant_id: tenantId,
-            campaign_id: campaignId,
-            scheduled_at: scheduleAt,
-            status: "scheduled",
-          },
-        ],
-        { onConflict: "tenant_id,campaign_id,scheduled_at" }
+    // 受信者メールを一括取得
+    const { data: recEmails } = await sb
+      .from("recipients")
+      .select("id, email, unsubscribe_token")
+      .in("id", recipientIds);
+
+    const emailById = new Map<string, { email: string; token?: string }>();
+    (recEmails ?? []).forEach((r: any) => {
+      if (r?.id && r?.email) {
+        emailById.set(String(r.id), {
+          email: String(r.email),
+          token: r.unsubscribe_token ?? undefined,
+        });
+      }
+    });
+
+    // キュー投入（jobId をパターンに）
+    let enqueued = 0;
+    for (const rid of recipientIds) {
+      const rec = emailById.get(rid);
+      if (!rec) continue;
+
+      await emailQueue.add(
+        "direct_email",
+        {
+          kind: "direct_email",
+          to: rec.email,
+          subject: String(campaign.subject ?? ""),
+          html: String(campaign.html ?? ""),
+          text: (campaign.text as string | null) ?? undefined,
+          unsubscribeToken: rec.token,
+          tenantId,
+          ...cfg, // fromOverride / brand*
+        },
+        {
+          jobId: `camp:${id}:rcpt:${rid}:${Date.now()}`,
+          removeOnComplete: 1000,
+          removeOnFail: 1000,
+        }
       );
+      enqueued++;
     }
+
+    // 見た目状態
+    await sb.from("campaigns").update({ status: "queued" }).eq("id", id);
 
     return NextResponse.json({
       ok: true,
-      queued,
-      scheduled: scheduleAt ?? null,
-      fromOverride: fromOverride ?? null,
+      enqueued,
+      campaignId: id,
+      tenantId,
+      fromOverride: (cfg as { fromOverride?: string }).fromOverride ?? null,
     });
   } catch (e: any) {
-    console.error("POST /api/campaigns/send error", e);
-    return NextResponse.json({ error: "server error" }, { status: 500 });
+    console.error("POST /api/campaigns/[id]/send error:", e);
+    return NextResponse.json(
+      { error: e?.message || "internal error" },
+      { status: 500 }
+    );
   }
 }
