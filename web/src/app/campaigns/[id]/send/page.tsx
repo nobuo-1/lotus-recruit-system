@@ -183,7 +183,7 @@ export default function SendPage() {
       });
 
     let res = await post("/api/campaigns/send");
-    if (res.status === 404) res = await post("/api/email/schedule");
+    if (res.status === 404) res = await post("/api/email/schedules");
 
     const t = await res.text();
     setMsg(`${res.status}: ${t}`);
