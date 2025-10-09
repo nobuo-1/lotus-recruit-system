@@ -1,12 +1,16 @@
 // web/src/server/mailer.ts
 import nodemailer from "nodemailer";
+import type SMTPTransport from "nodemailer/lib/smtp-transport";
 
 /* ========= Env & defaults ========= */
 const host = process.env.SMTP_HOST!;
 const port = Number(process.env.SMTP_PORT!);
 const user = process.env.SMTP_USER || ""; // 認証（任意）
 const pass = process.env.SMTP_PASS || ""; // 認証（任意）
+
+// 技術的送信者（MAIL FROM / Sender ヘッダ）は no-reply 固定
 const defaultFrom = process.env.FROM_EMAIL!; // 例: no-reply@lotus-d-transformation.com
+
 const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
   /\/+$/,
   ""
@@ -21,7 +25,11 @@ const dkimKey =
     ? Buffer.from(process.env.DKIM_PRIVATE_KEY_B64, "base64").toString("utf8")
     : "");
 
-// 「設定が未入力のとき」に使うフォールバック
+// TLS 要件（既定: true）
+const requireTLS =
+  (process.env.SMTP_REQUIRE_TLS ?? "true").toLowerCase() !== "false";
+
+// 既定ブランド（不足分のフォールバック）
 const fallbackCompany = process.env.COMPANY_NAME ?? "Lotus Recruit System";
 const fallbackAddress = process.env.COMPANY_ADDRESS ?? "";
 const fallbackSupport = process.env.SUPPORT_EMAIL ?? "";
@@ -36,8 +44,8 @@ export type SendArgs = {
   text?: string;
   unsubscribeToken?: string;
 
-  // テナントごとの上書き（任意）
-  fromOverride?: string; // /email/settings の「送信元アドレス」
+  // テナント/ユーザー設定の上書き（表示用From）
+  fromOverride?: string;
   brandCompany?: string;
   brandAddress?: string;
   brandSupport?: string;
@@ -50,13 +58,13 @@ const transporter = nodemailer.createTransport({
   maxMessages: 50,
   host,
   port,
-  secure: port === 465, // 587は false（STARTTLS）
-  requireTLS: true, // TLS必須（平文は失敗させる）
-  auth: user && pass ? { user, pass } : undefined, // 自前SMTPやSESの認証
+  secure: port === 465, // 465=implicit TLS / 587=STARTTLS
+  requireTLS,
+  auth: user && pass ? { user, pass } : undefined,
   tls: {
     servername: host, // SNI
     minVersion: "TLSv1.2",
-    // 自己署名を使う場合は下記を false に（Let’s Encryptなら不要）
+    // 自己署名などを許容したい場合は以下をコメントアウト解除
     // rejectUnauthorized: false,
   },
   // 任意: DKIM 署名（鍵があれば自動で付与）
@@ -69,7 +77,7 @@ const transporter = nodemailer.createTransport({
         },
       }
     : {}),
-});
+} as SMTPTransport.Options);
 
 // ---------- helpers ----------
 function escapeHtml(s: string) {
@@ -105,7 +113,7 @@ function stripLegacyFooter(
   let out = html || "";
 
   // 置換対象となるアンsubscribeトークン表記の候補
-  const TOKEN = String.raw`(?:\{\{\s*UNSUB_URL\s*\}\}|\[\[\s*UNSUB_URL\s*\]\]|__UNSUB_URL__|%%UNSUB_URL%%)`;
+  const TOKEN = String.raw`(?:\{\{\s*UNSUB_URL\s*\}\}|$begin:math:display$\\[\\s*UNSUB_URL\\s*$end:math:display$\]|__UNSUB_URL__|%%UNSUB_URL%%)`;
 
   // 「会社名」「住所」「お問い合わせ」「配信停止: {{UNSUB_URL}}」の並びを弱結合で一括除去
   const block = (s: string) =>
@@ -196,11 +204,17 @@ export async function sendMail(args: SendArgs) {
   const address = args.brandAddress || fallbackAddress;
   const support = args.brandSupport || fallbackSupport;
 
-  // 差出人（表示上の From は fromOverride、無ければ no-reply）
-  const fromHeader = args.fromOverride || defaultFrom;
-  // 技術的送信者（Sender）は no-reply 固定
+  // 表示上の From（ヘッダ）は fromOverride を優先、無ければ no-reply
+  const displayFromAddress = args.fromOverride || defaultFrom;
+  const fromHeader =
+    company && displayFromAddress
+      ? { name: company, address: displayFromAddress }
+      : displayFromAddress;
+
+  // 技術的送信者（MAIL FROM / Sender / SPF）は no-reply 固定
   const senderHeader = defaultFrom;
-  // 返信先（Reply-To）は fromOverride を優先
+
+  // 返信先は fromOverride を優先（無ければ未設定）
   const replyToHeader = args.fromOverride || undefined;
 
   // 配信停止URL & ヘッダ（RFC 8058 One-Click）
@@ -211,7 +225,7 @@ export async function sendMail(args: SendArgs) {
     headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click";
   }
 
-  // --- ① まず既存の“手書きフッター”を削除 ---
+  // --- ① 既存“手書きフッター”を削除 ---
   const sanitizedHtml = stripLegacyFooter(args.html, company, address, support);
 
   // --- ② 自動フッターを1回だけ注入 ---
@@ -222,7 +236,7 @@ export async function sendMail(args: SendArgs) {
       )
     : sanitizedHtml;
 
-  // テキストは末尾にフッターを足す（既存トークンは掃除）
+  // --- ③ テキスト本文もクリーンアップしてフッターを追記 ---
   const cleanedText = (args.text ?? "").replace(
     /\{\{\s*UNSUB_URL\s*\}\}|\[\[\s*UNSUB_URL\s*\]\]|__UNSUB_URL__|%%UNSUB_URL%%/gi,
     ""
@@ -234,7 +248,7 @@ export async function sendMail(args: SendArgs) {
       : "");
 
   const info = await transporter.sendMail({
-    // 表示上の From（テナント/ユーザー設定を優先）
+    // 表示上の From（ブランド名 + 表示アドレス）
     from: fromHeader,
     // 実送信者（ヘッダに Sender として入る）
     sender: senderHeader,
@@ -245,8 +259,8 @@ export async function sendMail(args: SendArgs) {
     html: finalHtml,
     text: finalText || undefined,
     headers,
-    // 必要に応じて envelope を固定したい場合は以下を有効化
-    // envelope: { from: senderHeader, to: args.to },
+    // ★技術的送信（MAIL FROM）は no-reply 固定（SPF/バウンス整合）
+    envelope: { from: senderHeader, to: args.to },
   });
 
   return info; // .messageId などをワーカー側で参照
