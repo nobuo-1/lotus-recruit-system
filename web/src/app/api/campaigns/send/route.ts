@@ -304,8 +304,9 @@ export async function POST(req: Request) {
         brandSupport: cfg.brandSupport,
       };
 
-      const jobName = `camp:${campaignId}:rcpt:${r.id}:${Date.now()}`;
-      await emailQueue.add(jobName, job, {
+      const jobId = `camp:${campaignId}:rcpt:${r.id}:${Date.now()}`;
+      await emailQueue.add("direct_email", job, {
+        jobId,
         delay,
         removeOnComplete: 1000,
         removeOnFail: 1000,

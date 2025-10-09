@@ -8,8 +8,9 @@ import { supabaseAdmin } from "@/lib/supabaseAdmin";
 const admin = supabaseAdmin();
 
 /** jobId: camp:CID:rcpt:RID:timestamp → { campaignId, recipientId } */
-function parseCampaignAndRecipient(jobId: string | number | undefined) {
-  const s = String(jobId ?? "");
+// 既存そのまま
+function parseCampaignAndRecipient(source: string | number | undefined) {
+  const s = String(source ?? "");
   const m = s.match(/^camp:([^:]+):rcpt:([^:]+):/);
   return m ? { campaignId: m[1], recipientId: m[2] } : null;
 }
@@ -27,7 +28,7 @@ const worker = new Worker<EmailJob>(
       return { messageId: "skipped", kind: (data as any)?.kind ?? "unknown" };
     }
 
-    // 送信
+    // ---- 送信 ----
     const info = await sendMail({
       to: data.to,
       subject: data.subject,
@@ -40,9 +41,19 @@ const worker = new Worker<EmailJob>(
       brandSupport: data.brandSupport,
     });
 
-    // DB 更新
-    const meta = parseCampaignAndRecipient(job.id);
-    if (meta) {
+    // ---- DB 更新 ----
+    // まず job.id（= API で指定した jobId）を試す。だめなら job.name からも救済。
+    let meta = parseCampaignAndRecipient(job.id);
+    if (!meta) {
+      meta = parseCampaignAndRecipient(job.name as any);
+    }
+
+    if (!meta) {
+      console.warn("[email.warn.meta-missing]", {
+        jobId: job.id,
+        name: job.name,
+      });
+    } else {
       const nowIso = new Date().toISOString();
 
       await admin
@@ -51,8 +62,7 @@ const worker = new Worker<EmailJob>(
         .eq("campaign_id", meta.campaignId)
         .eq("recipient_id", meta.recipientId);
 
-      // 一覧の見た目用に queued にしておく
-      await admin
+      await admin // 一覧の見た目用
         .from("campaigns")
         .update({ status: "queued" })
         .eq("id", meta.campaignId);
@@ -69,6 +79,7 @@ const worker = new Worker<EmailJob>(
       to: data.to,
       messageId: info?.messageId,
       jobId: job.id,
+      jobName: job.name,
       tenantId: (data as any).tenantId,
     });
 
