@@ -7,6 +7,9 @@ const PUBLIC = [
   "/api/healthz",
   "/api/auth",
   "/api/unsubscribe",
+  "/api/campaigns/send",
+  "/api/email/schedule",
+  "/api/email/schedules",
 ];
 
 // Supabase(SSR)のクッキーを検出（新旧どちらの名前でもOK）
