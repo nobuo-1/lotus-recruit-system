@@ -1,0 +1,136 @@
+## Git
+branch: develop
+commit: ff47655
+## develop...origin/develop
+?? support-context.txt
+
+## Versions
+node: v24.7.0
+pnpm: 10.18.1
+next: 15.5.3
+
+## Next config (web/next.config.* exists?)
+next.config.mjs
+next.config.ts
+
+## Source routes (app/)
+ (page)
+/api/auth/login (route)
+/api/auth/set (route)
+/api/campaigns (route)
+/api/campaigns/[id]/deliveries (route)
+/api/campaigns/[id]/enqueue (route)
+/api/campaigns/[id]/schedule (route)
+/api/campaigns/[id]/send (route)
+/api/campaigns/[id]/sent (route)
+/api/campaigns/send (route)
+/api/dev/enqueue-demo (route)
+/api/dev/queue-health (route)
+/api/diag/smtp (route)
+/api/email/open (route)
+/api/email/schedules (route)
+/api/email/settings (route)
+/api/email/summary (route)
+/api/me (route)
+/api/ping (route)
+/api/recipients/delete (route)
+/api/recipients/get/[id] (route)
+/api/recipients/import (route)
+/api/recipients/search (route)
+/api/recipients/toggle (route)
+/api/recipients/upsert (route)
+/api/settings (route)
+/api/settings/brand (route)
+/api/settings/company (route)
+/api/unsubscribe (route)
+/auth/login (page)
+/campaigns (page)
+/campaigns/[id] (page)
+/campaigns/[id]/send (page)
+/campaigns/new (page)
+/dashboard (page)
+/email (page)
+/email/schedules (page)
+/email/settings (page)
+/form-outreach (page)
+/job-boards (page)
+/recipients (page)
+/recipients/[id]/edit (page)
+/recipients/new (page)
+/recipients/upload (page)
+/scout (page)
+/settings (page)
+/settings/company (page)
+/settings/org (page)
+
+## Specific endpoints exist? (source files)
+OK  : src/app/api/auth/login/route.ts
+OK  : src/app/api/campaigns/send/route.ts
+OK  : src/app/api/campaigns/[id]/send/route.ts
+OK  : src/app/auth/login/page.tsx
+
+## Middleware head (first 100 lines)
+import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
+
+const PUBLIC = [
+  "/auth/login",
+  "/auth/signup",
+  "/api/healthz",
+  "/api/auth",
+  "/api/unsubscribe",
+];
+
+// Supabase(SSR)のクッキーを検出（新旧どちらの名前でもOK）
+function hasSupabaseSession(req: NextRequest) {
+  const all = req.cookies.getAll();
+  // 新形式: sb-<projectRef>-auth-token
+  const newStyle = all.find((c) => /^sb-[^-]+-auth-token$/.test(c.name));
+  // 旧形式の保険
+  const legacy =
+    req.cookies.get("sb-access-token") || req.cookies.get("sb-refresh-token");
+  return Boolean(newStyle || legacy);
+}
+
+export function middleware(req: NextRequest) {
+  const isPublic = PUBLIC.some((p) => req.nextUrl.pathname.startsWith(p));
+  if (!isPublic && !hasSupabaseSession(req)) {
+    const url = req.nextUrl.clone();
+    url.pathname = "/auth/login";
+    return NextResponse.redirect(url);
+  }
+  return NextResponse.next();
+}
+
+export const config = { matcher: ["/((?!_next|.*\\..*).*)"] };
+
+## Build & built app routes (from .next)
+/api/auth/login
+/api/auth/set
+/api/campaigns
+/api/campaigns/[id]/deliveries
+/api/campaigns/[id]/enqueue
+/api/campaigns/[id]/schedule
+/api/campaigns/[id]/send
+/api/campaigns/[id]/sent
+/api/campaigns/send
+/api/dev/enqueue-demo
+/api/dev/queue-health
+/api/diag/smtp
+/api/email/open
+/api/email/schedules
+/api/email/settings
+/api/email/summary
+/api/me
+/api/ping
+/api/recipients/delete
+/api/recipients/get/[id]
+/api/recipients/import
+/api/recipients/search
+/api/recipients/toggle
+/api/recipients/upsert
+/api/settings
+/api/settings/brand
+/api/settings/company
+/api/unsubscribe
+/favicon.ico
