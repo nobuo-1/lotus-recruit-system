@@ -1,36 +1,34 @@
-// web/src/middleware.ts
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
-const PUBLIC_PREFIXES = [
+const PUBLIC = [
   "/auth/login",
   "/auth/signup",
   "/api/healthz",
-  "/api/auth", // 認証系
+  "/api/auth",
   "/api/unsubscribe",
-  "/api/ping",
-
-  // ← ここを追加：配信API/受信者検索/スケジュール等は
-  //    ログイン前のプリフライトやフロントからの POST をブロックしない
-  "/api/campaigns",
-  "/api/recipients",
-  "/api/email",
 ];
 
+// Supabase(SSR)のクッキーを検出（新旧どちらの名前でもOK）
 function hasSupabaseSession(req: NextRequest) {
   const all = req.cookies.getAll();
+  // 新形式: sb-<projectRef>-auth-token
   const newStyle = all.find((c) => /^sb-[^-]+-auth-token$/.test(c.name));
+  // 旧形式の保険
   const legacy =
     req.cookies.get("sb-access-token") || req.cookies.get("sb-refresh-token");
   return Boolean(newStyle || legacy);
 }
 
 export function middleware(req: NextRequest) {
-  const path = req.nextUrl.pathname;
+  const pathname = req.nextUrl.pathname;
 
-  // API は CORS/プリフライトの都合もあるので prefix で緩く許可
-  const isPublic = PUBLIC_PREFIXES.some((p) => path.startsWith(p));
+  // ★ API はミドルウェア対象外（各 API 内で 401/403 判定済み）
+  if (pathname.startsWith("/api/")) {
+    return NextResponse.next();
+  }
 
+  const isPublic = PUBLIC.some((p) => pathname.startsWith(p));
   if (!isPublic && !hasSupabaseSession(req)) {
     const url = req.nextUrl.clone();
     url.pathname = "/auth/login";
@@ -39,5 +37,5 @@ export function middleware(req: NextRequest) {
   return NextResponse.next();
 }
 
-// _next, 静的ファイルを除外
-export const config = { matcher: ["/((?!_next|.*\\..*).*)"] };
+// ★ ここがポイント: /api を完全に除外
+export const config = { matcher: ["/((?!_next|.*\\..*|api).*)"] };
