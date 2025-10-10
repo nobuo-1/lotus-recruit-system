@@ -169,7 +169,8 @@ export async function POST(req: Request) {
     const { data: camp, error: campErr } = await admin
       .from("campaigns")
       .select(
-        "id, tenant_id, name, subject, body_html, html, text, from_email, status"
+        // ← ここを安全な列だけに
+        "id, tenant_id, subject, body_html, html, from_email, status"
       )
       .eq("id", campaignId)
       .maybeSingle();
