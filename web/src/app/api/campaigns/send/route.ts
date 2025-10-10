@@ -26,6 +26,14 @@ export async function OPTIONS() {
   });
 }
 
+/** ルート生存確認用（関数に届いているかを判別するための保険） */
+export async function GET() {
+  return NextResponse.json({ error: "method not allowed" }, { status: 405 });
+}
+export async function HEAD() {
+  return new NextResponse(null, { status: 405 });
+}
+
 /** /email/settings を user→tenant→tenants の順でフェッチ */
 async function loadSenderConfigForCurrentUser() {
   const sb = await supabaseServer();
