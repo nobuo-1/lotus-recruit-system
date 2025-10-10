@@ -5,6 +5,9 @@ export const dynamic = "force-dynamic";
 import Link from "next/link";
 import { supabaseServer } from "@/lib/supabaseServer";
 
+// 追加
+import { formatJpDateTime } from "@/lib/formatDate";
+
 type Schedule = {
   campaign_id: string;
   scheduled_at: string | null;
@@ -57,9 +60,10 @@ function nextScheduleText(schedules: Schedule[]) {
   );
   const first = future[0];
   const rest = future.length - 1;
-  return `${new Date(first.scheduled_at as string).toLocaleString()}${
-    rest > 0 ? `  +${rest}` : ""
-  }`;
+  // ★ JST + 曜日
+  const when = formatJpDateTime(first.scheduled_at);
+
+  return `${when}${rest > 0 ? `  +${rest}` : ""}`;
 }
 
 export default async function CampaignsPage() {
@@ -182,9 +186,7 @@ export default async function CampaignsPage() {
                   <td className="px-3 py-3">{status}</td>
                   <td className="px-3 py-3">{nextText}</td>
                   <td className="px-3 py-3">
-                    {r.created_at
-                      ? new Date(r.created_at).toLocaleString()
-                      : ""}
+                    {formatJpDateTime(r.created_at)}
                   </td>
                   <td className="px-3 py-3">
                     <div className="flex gap-2">

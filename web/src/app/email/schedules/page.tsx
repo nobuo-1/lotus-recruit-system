@@ -1,8 +1,8 @@
 "use client";
-import React from "react";
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import AppHeader from "@/components/AppHeader";
+import { formatJpDateTime } from "@/lib/formatDate";
 
 type Row = {
   id: string;
@@ -11,8 +11,8 @@ type Row = {
   status: string | null; // scheduled/queued/sent/cancelled など
 };
 
-function safe(v: any) {
-  return v ?? "";
+function safe<T>(v: T | null | undefined, fallback = ""): T | string {
+  return (v ?? fallback) as any;
 }
 
 export default function SchedulesPage() {
@@ -50,7 +50,6 @@ export default function SchedulesPage() {
               予約中のメール配信を確認します
             </p>
           </div>
-          {/* 追加：メール配信トップへ */}
           <Link
             href="/email"
             className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
@@ -73,9 +72,7 @@ export default function SchedulesPage() {
                 <tr key={r.id} className="border-t border-neutral-200">
                   <td className="px-3 py-3">{safe(r.campaign_title)}</td>
                   <td className="px-3 py-3 text-neutral-600">
-                    {r.scheduled_at
-                      ? new Date(r.scheduled_at).toLocaleString()
-                      : ""}
+                    {formatJpDateTime(r.scheduled_at)}
                   </td>
                   <td className="px-3 py-3">{safe(r.status)}</td>
                 </tr>

@@ -1,17 +1,15 @@
-// web/src/app/campaigns/[id]/page.tsx
 import React from "react";
 import { supabaseServer } from "@/lib/supabaseServer";
 import Link from "next/link";
+import { formatJpDateTime } from "@/lib/formatDate";
 
 export default async function CampaignDetailPage({
-  // ★ Next.js 15+: params は Promise になる
+  // Next.js 15: params は Promise
   params,
 }: {
   params: Promise<{ id: string }>;
 }) {
-  // ★ Promise を await で展開
   const { id } = await params;
-
   const supabase = await supabaseServer();
 
   // 認証 + テナント
@@ -94,9 +92,7 @@ export default async function CampaignDetailPage({
           <div>
             <div className="text-sm text-neutral-500">作成日</div>
             <div className="text-neutral-900">
-              {camp?.created_at
-                ? new Date(camp.created_at).toLocaleString()
-                : "-"}
+              {formatJpDateTime(camp?.created_at)}
             </div>
           </div>
           <div className="md:col-span-2">
@@ -154,9 +150,7 @@ export default async function CampaignDetailPage({
                     </td>
                     <td className="px-3 py-3 text-center">{job}</td>
                     <td className="px-3 py-3 text-center">{r.status ?? ""}</td>
-                    <td className="px-3 py-3">
-                      {r.sent_at ? new Date(r.sent_at).toLocaleString() : ""}
-                    </td>
+                    <td className="px-3 py-3">{formatJpDateTime(r.sent_at)}</td>
                   </tr>
                 );
               })}
