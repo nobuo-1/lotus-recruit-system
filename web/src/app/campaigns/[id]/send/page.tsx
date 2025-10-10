@@ -175,15 +175,12 @@ export default function SendPage() {
       payload.scheduleAt = dt.toISOString();
     }
 
-    const post = (url: string) =>
-      fetch(url, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-
-    let res = await post("/api/campaigns/send");
-    if (res.status === 404) res = await post("/api/email/schedules");
+    // ★ 送信APIへの POST だけにする（フォールバックPOSTは削除）
+    const res = await fetch("/api/campaigns/send", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
 
     const t = await res.text();
     setMsg(`${res.status}: ${t}`);
