@@ -103,7 +103,7 @@ function buildUnsubscribeUrl(token?: string | null) {
   return `${appUrl}/api/unsubscribe?token=${encodeURIComponent(token)}`;
 }
 
-/** 既存テンプレに入っている“手書きフッター＋{{UNSUB_URL}}”を丸ごと除去 */
+/** 既存テンプレに入っている“手書きフッター＋{{UNSUB_URL}} など”を丸ごと除去（安全版） */
 function stripLegacyFooter(
   html: string,
   company: string,
@@ -112,10 +112,11 @@ function stripLegacyFooter(
 ) {
   let out = html || "";
 
-  // 置換対象となるアンsubscribeトークン表記の候補
-  const TOKEN = String.raw`(?:\{\{\s*UNSUB_URL\s*\}\}|$begin:math:display$\\[\\s*UNSUB_URL\\s*$end:math:display$\]|__UNSUB_URL__|%%UNSUB_URL%%)`;
+  // 角括弧 [[UNSUB_URL]] は Math/MD 系が介入すると壊れやすいのでサポートをやめる
+  // 代表的な 3 形式のみを対象にする（これで十分運用可能）
+  const TOKEN = String.raw`(?:\{\{\s*UNSUB_URL\s*\}\}|__UNSUB_URL__|%%UNSUB_URL%%)`;
 
-  // 「会社名」「住所」「お問い合わせ」「配信停止: {{UNSUB_URL}}」の並びを弱結合で一括除去
+  // 要素ブロックを緩めに定義
   const block = (s: string) =>
     String.raw`(?:\s*(?:<div[^>]*>|<p[^>]*>)\s*${s}\s*(?:</div>|</p>)\s*)?`;
 
@@ -130,18 +131,31 @@ function stripLegacyFooter(
     : "";
   const unsub = String.raw`\s*(?:<div[^>]*>|<p[^>]*>)\s*配信停止[:：]?\s*${TOKEN}\s*(?:</div>|</p>)\s*`;
 
-  const legacyRe = new RegExp(`${comp}${addr}${sup}${unsub}`, "i");
-  out = out.replace(legacyRe, "");
+  // 1) 大きな塊での一括除去（try/catchで安全化）
+  try {
+    const legacyRe = new RegExp(`${comp}${addr}${sup}${unsub}`, "i");
+    out = out.replace(legacyRe, "");
+  } catch {
+    // 正規表現構築に失敗したらスキップ（後段の素朴除去で掃除）
+  }
 
-  // 念のため、残っている {{UNSUB_URL}} を含む行（div/p/素の行）も除去
-  const tokenLine = new RegExp(
-    String.raw`\s*(?:<div[^>]*>|<p[^>]*>)?[^<\n]*${TOKEN}[^<\n]*(?:</div>|</p>)?\s*`,
-    "ig"
-  );
-  out = out.replace(tokenLine, "");
+  // 2) 念のため、UNSUB トークンを含む行（div/p/素）を個別掃除
+  try {
+    const tokenLine = new RegExp(
+      String.raw`\s*(?:<div[^>]*>|<p[^>]*>)?[^<\n]*${TOKEN}[^<\n]*(?:</div>|</p>)?\s*`,
+      "ig"
+    );
+    out = out.replace(tokenLine, "");
+  } catch {
+    // 続行
+  }
 
-  // プレーンに残ったトークンも空文字化
-  out = out.replace(new RegExp(TOKEN, "ig"), "");
+  // 3) プレーンに残ったトークンも空文字化
+  try {
+    out = out.replace(new RegExp(TOKEN, "ig"), "");
+  } catch {
+    // 続行
+  }
 
   return out;
 }
