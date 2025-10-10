@@ -7,6 +7,8 @@ import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
 import { emailQueue } from "@/server/queue";
 import type { DirectEmailJob } from "@/server/queue";
+// 追加
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 type Payload = {
   campaignId: string;
@@ -161,15 +163,29 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "no tenant" }, { status: 400 });
 
     // ③ キャンペーン本文（body_html / html どちらでも）
-    const { data: camp } = await sb
+    // 既存の supabaseServer() ではなく、読み取りだけ admin で取得（RLSバイパス）
+    // 取得後にサーバ側で tenant を厳密チェックする
+    const admin = supabaseAdmin();
+    const { data: camp, error: campErr } = await admin
       .from("campaigns")
       .select(
         "id, tenant_id, name, subject, body_html, html, text, from_email, status"
       )
       .eq("id", campaignId)
       .maybeSingle();
-    if (!camp || (camp as any).tenant_id !== tenantId)
+
+    if (campErr) {
+      console.error("[send] admin select error:", campErr);
+      return NextResponse.json({ error: "select failed" }, { status: 500 });
+    }
+    if (!camp) {
+      // 物理的に無い
       return NextResponse.json({ error: "not found" }, { status: 404 });
+    }
+    // サーバ側で “あなたのテナントのレコードか” を厳格チェック
+    if ((camp as any).tenant_id !== tenantId) {
+      return NextResponse.json({ error: "forbidden" }, { status: 403 });
+    }
 
     const htmlBody =
       ((camp as any).html as string | null) ??
