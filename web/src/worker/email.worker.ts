@@ -17,15 +17,18 @@ function parseCampaignAndRecipient(source: string | number | undefined) {
 
 const worker = new Worker<EmailJob>(
   "email",
-  async (job: Job<EmailJob>) => {
-    const data = job.data;
+  async (job) => {
+    const data = job.data as any;
+
+    // ★ 追加: ヘルスチェック用ジョブ
+    if (data?.kind === "noop") {
+      console.log("[email.noop]", { jobId: job.id });
+      return { ok: true, kind: "noop" };
+    }
 
     if (!isDirectEmailJob(data)) {
-      console.warn("[email.skip]", {
-        jobId: job.id,
-        kind: (data as any)?.kind,
-      });
-      return { messageId: "skipped", kind: (data as any)?.kind ?? "unknown" };
+      console.warn("[email.skip]", { jobId: job.id, kind: data?.kind });
+      return { messageId: "skipped", kind: data?.kind ?? "unknown" };
     }
 
     // ---- 送信 ----

@@ -1,38 +1,27 @@
 import { NextResponse } from "next/server";
-import { supabaseServer } from "@/lib/supabaseServer";
-import { emailQueue, type DirectEmailJob } from "@/server/queue";
+import { emailQueue } from "@/server/queue";
 
-export async function POST(_req: Request) {
-  // 認証ユーザー（ログイン必須）
-  const supabase = await supabaseServer();
-  const { data: userRes } = await supabase.auth.getUser();
-  const email = userRes?.user?.email;
-  if (!email) {
+export const dynamic = "force-dynamic";
+
+function assertDevToken(req: Request) {
+  const want = process.env.DEV_ADMIN_TOKEN;
+  if (!want) return true; // トークン未設定なら無認可でも通す（手元検証向け）
+  const got =
+    req.headers.get("x-dev-token") ||
+    req.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
+  return got && got === want;
+}
+
+/** キューに “noop” を1件だけ投入（メール送信はしない） */
+export async function POST(req: Request) {
+  if (!assertDevToken(req)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
-
-  // DirectEmailJob で必要なフィールドを構築（kind は必須）
-  const job: DirectEmailJob = {
-    kind: "direct_email",
-    to: email,
-    subject: "Lotus: 配信テスト",
-    html: `<p>これは Mailpit 経由の配信テストです。</p>
-           <p>日時：${new Date().toLocaleString()}</p>`,
-    text: `これは Mailpit 経由の配信テストです。 ${new Date().toLocaleString()}`,
-    // 以下は任意（テナントのブランド/差出人上書きが不要なら省略でOK）
-    // tenantId: undefined,
-    // fromOverride: undefined,
-    // brandCompany: undefined,
-    // brandAddress: undefined,
-    // brandSupport: undefined,
-    // unsubscribeToken: undefined,
-  };
-
-  // ワーカー側の実装に合わせて "direct_email" キュー名で投入
-  await emailQueue.add("direct_email", job, {
-    removeOnComplete: 1000,
-    removeOnFail: 1000,
+  const jobId = `noop:${Date.now()}`;
+  await emailQueue.add("noop", { kind: "noop", note: "health-check" } as any, {
+    jobId,
+    removeOnComplete: 100,
+    removeOnFail: 100,
   });
-
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({ ok: true, jobId });
 }
