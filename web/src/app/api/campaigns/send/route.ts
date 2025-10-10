@@ -5,10 +5,9 @@ export const revalidate = 0;
 
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { emailQueue } from "@/server/queue";
 import type { DirectEmailJob } from "@/server/queue";
-// 追加
-import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 type Payload = {
   campaignId: string;
@@ -28,7 +27,7 @@ export async function OPTIONS() {
   });
 }
 
-/** ルート生存確認用（関数に届いているかを判別するための保険） */
+/** ルート生存確認（GET/HEADは405） */
 export async function GET() {
   return NextResponse.json({ error: "method not allowed" }, { status: 405 });
 }
@@ -135,6 +134,17 @@ const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
   ""
 );
 
+// 簡易HTML→プレーンテキスト（text未保存DB向け）
+function htmlToText(html: string) {
+  return html
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|li|h[1-6]|tr)>/gi, "\n")
+    .replace(/<style[\s\S]*?<\/style>|<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 export async function POST(req: Request) {
   try {
     // ① 入力
@@ -162,48 +172,47 @@ export async function POST(req: Request) {
     if (!tenantId)
       return NextResponse.json({ error: "no tenant" }, { status: 400 });
 
-    // ③ キャンペーン本文（body_html / html どちらでも）
-    // 既存の supabaseServer() ではなく、読み取りだけ admin で取得（RLSバイパス）
-    // 取得後にサーバ側で tenant を厳密チェックする
+    // ③ キャンペーン本文
+    // newページでは「文章」でも「HTML」でも最終的に body_html に保存しているため
+    // ここでは body_html のみ取得すればOK。存在しない html 列は問い合わせない。
     const admin = supabaseAdmin();
     const { data: camp, error: campErr } = await admin
       .from("campaigns")
-      .select(
-        // ← ここを安全な列だけに
-        "id, tenant_id, subject, body_html, html, from_email, status"
-      )
+      .select("id, tenant_id, subject, body_html, from_email, status")
       .eq("id", campaignId)
       .maybeSingle();
 
     if (campErr) {
-      console.error("[send] admin select error:", campErr);
-      return NextResponse.json({ error: "select failed" }, { status: 500 });
+      console.error("[send] campaigns.select error:", campErr);
+      return NextResponse.json(
+        { error: "db(campaigns): " + campErr.message },
+        { status: 500 }
+      );
     }
-    if (!camp) {
-      // 物理的に無い
+    if (!camp)
       return NextResponse.json({ error: "not found" }, { status: 404 });
-    }
-    // サーバ側で “あなたのテナントのレコードか” を厳格チェック
     if ((camp as any).tenant_id !== tenantId) {
       return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
 
-    const htmlBody =
-      ((camp as any).html as string | null) ??
-      ((camp as any).body_html as string | null) ??
-      "";
+    const htmlBody = ((camp as any).body_html as string | null) ?? "";
+    const textBody = htmlBody ? htmlToText(htmlBody) : undefined;
 
-    // ④ 受信者（**DB差異に強い最小カラム**）
+    // ④ 受信者（最小カラム）
     const { data: recs, error: rErr } = await sb
       .from("recipients")
       .select("id, email, unsubscribe_token, unsubscribed_at")
       .in("id", recipientIds)
       .eq("tenant_id", tenantId);
 
-    if (rErr)
-      return NextResponse.json({ error: rErr.message }, { status: 400 });
+    if (rErr) {
+      console.error("[send] recipients.select error:", rErr);
+      return NextResponse.json(
+        { error: "db(recipients): " + rErr.message },
+        { status: 500 }
+      );
+    }
 
-    // 余計なカラム（disabled, is_active, consent）が無い環境でも安全にフィルタ
     const recipients = (recs ?? []).filter((r: any) => {
       if (!r?.email) return false;
       if (r?.unsubscribed_at) return false;
@@ -244,7 +253,7 @@ export async function POST(req: Request) {
       scheduleAt = new Date(ts).toISOString();
     }
 
-    // ⑦ deliveries upsert（大きい場合は分割）
+    // ⑦ deliveries upsert（分割）
     if (scheduleAt) {
       for (const part of chunk(
         targets.map((r) => ({
@@ -285,8 +294,8 @@ export async function POST(req: Request) {
         .eq("id", campaignId);
     }
 
-    // ⑧ delivery_id ←→ recipient_id map（開封ピクセル）
-    const { data: dels } = await sb
+    // ⑧ delivery_id ←→ recipient_id map（開封ピクセル用）
+    const { data: dels, error: dErr } = await sb
       .from("deliveries")
       .select("id, recipient_id")
       .eq("tenant_id", tenantId)
@@ -295,6 +304,14 @@ export async function POST(req: Request) {
         "recipient_id",
         targets.map((t) => t.id)
       );
+
+    if (dErr) {
+      console.error("[send] deliveries.select error:", dErr);
+      return NextResponse.json(
+        { error: "db(deliveries): " + dErr.message },
+        { status: 500 }
+      );
+    }
 
     const idMap = new Map<string, string>();
     (dels ?? []).forEach((d) =>
@@ -306,7 +323,7 @@ export async function POST(req: Request) {
       ((camp as any).from_email as string | undefined) ||
       undefined;
 
-    // ⑨ BullMQ投入（Renderのワーカーが direct_email を処理）
+    // ⑨ キュー投入（Renderワーカーが direct_email を処理）
     let queued = 0;
     for (const r of targets) {
       const deliveryId = idMap.get(String(r.id)) ?? "";
@@ -320,7 +337,7 @@ export async function POST(req: Request) {
         to: String(r.email),
         subject: String((camp as any).subject ?? ""),
         html: htmlWithPixel,
-        text: ((camp as any).text as string | null) ?? undefined,
+        text: textBody, // DBにtext列が無いのでHTMLから生成
         tenantId,
         unsubscribeToken: (r as any).unsubscribe_token ?? undefined,
         fromOverride,
