@@ -51,19 +51,16 @@ export default function SendPage() {
   const params = useParams<{ id: string }>();
   const id = (params?.id as string) || "";
 
-  // いま（ローカル）と2年後
   const now = new Date();
   const minDateISO = localDateISO(now);
   const twoYears = new Date(now);
   twoYears.setFullYear(now.getFullYear() + 2);
   const maxDateISO = localDateISO(twoYears);
 
-  // 候補 & 選択
   const [all, setAll] = useState<Recipient[]>([]);
-  const [already, setAlready] = useState<Set<string>>(new Set()); // 既送信(予約含む)
+  const [already, setAlready] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
-  // フィルタ
   const [q, setQ] = useState("");
   const [ageMin, setAgeMin] = useState<string>("");
   const [ageMax, setAgeMax] = useState<string>("");
@@ -77,7 +74,6 @@ export default function SendPage() {
     [large]
   );
 
-  // 予約/即時
   const [mode, setMode] = useState<"now" | "reserve">("now");
   const [reserveDate, setReserveDate] = useState<string>(minDateISO);
   const [reserveHour, setReserveHour] = useState<number>(now.getHours());
@@ -87,14 +83,12 @@ export default function SendPage() {
 
   const [msg, setMsg] = useState("");
 
-  // 候補取得（アクティブのみ）
   const load = async () => {
     const res = await fetch("/api/recipients/search?active=1");
     const j = await res.json();
     setAll(j?.rows ?? []);
   };
 
-  // 既送信/予約済みの recipient_id を取得して除外
   const loadAlready = async () => {
     if (!id) return;
     const r = await fetch(`/api/campaigns/${id}/sent`, { cache: "no-store" });
@@ -107,7 +101,6 @@ export default function SendPage() {
     loadAlready();
   }, [id]);
 
-  // クライアントサイドフィルタ + 既送信除外
   const list = useMemo(() => {
     return all.filter((r) => {
       if (already.has(r.id)) return false;
@@ -123,7 +116,6 @@ export default function SendPage() {
     });
   }, [all, already, q, gender, pref, large, small, ageMin, ageMax]);
 
-  // --- 一括選択 ---
   const allSelected = list.length > 0 && list.every((r) => selected.has(r.id));
   const toggleAll = () => {
     const next = new Set(selected);
@@ -158,7 +150,7 @@ export default function SendPage() {
 
     if (mode === "reserve") {
       const [yy, mm, dd] = reserveDate.split("-").map((s) => +s);
-      const dt = new Date(yy, mm - 1, dd, reserveHour, reserveMinute, 0, 0); // ローカル基準
+      const dt = new Date(yy, mm - 1, dd, reserveHour, reserveMinute, 0, 0);
       const min = now;
       const max = new Date(
         twoYears.getFullYear(),
@@ -175,7 +167,6 @@ export default function SendPage() {
       payload.scheduleAt = dt.toISOString();
     }
 
-    // ★ 送信APIへの POST だけにする（フォールバックPOSTは削除）
     const res = await fetch("/api/campaigns/send", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -194,17 +185,18 @@ export default function SendPage() {
 
   return (
     <main className="mx-auto max-w-6xl p-6">
-      <div className="mb-4 flex items-center justify-between">
+      {/* ヘッダー：スマホは縦積み */}
+      <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
-          <h1 className="text-2xl font-semibold text-neutral-900">
+          <h1 className="whitespace-nowrap text-2xl font-semibold text-neutral-900">
             配信先選択
           </h1>
           <p className="text-sm text-neutral-500">
             配信先の選択と配信タイミングを設定
           </p>
         </div>
-        <div className="flex items-center gap-3">
-          <label className="flex items-center gap-2 rounded-xl border border-neutral-200 px-3 py-2">
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+          <label className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-3 py-2 whitespace-nowrap">
             <input
               type="radio"
               name="mode"
@@ -213,7 +205,7 @@ export default function SendPage() {
             />
             今すぐ配信
           </label>
-          <label className="flex items-center gap-2 rounded-xl border border-neutral-200 px-3 py-2">
+          <label className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-3 py-2 whitespace-nowrap">
             <input
               type="radio"
               name="mode"
@@ -370,19 +362,23 @@ export default function SendPage() {
                   />
                 </td>
                 <td className="px-3 py-3">{r.name ?? ""}</td>
-                <td className="px-3 py-3 text-neutral-600">{r.email ?? ""}</td>
-                <td className="px-3 py-3 text-center">
+                <td className="px-3 py-3 text-neutral-600 whitespace-nowrap">
+                  {r.email ?? ""}
+                </td>
+                <td className="px-3 py-3 text-center whitespace-nowrap">
                   {ageFromBirthday(r.birthday) ?? ""}
                 </td>
-                <td className="px-3 py-3 text-center">
+                <td className="px-3 py-3 text-center whitespace-nowrap">
                   {r.gender === "male"
                     ? "男性"
                     : r.gender === "female"
                     ? "女性"
                     : ""}
                 </td>
-                <td className="px-3 py-3 text-center">{r.region ?? ""}</td>
-                <td className="px-3 py-3 text-center">
+                <td className="px-3 py-3 text-center whitespace-nowrap">
+                  {r.region ?? ""}
+                </td>
+                <td className="px-3 py-3 text-center break-words">
                   {formatJob(r.job_category_large, r.job_category_small)}
                 </td>
               </tr>
@@ -401,10 +397,11 @@ export default function SendPage() {
         </table>
       </div>
 
+      {/* 送信ボタン：スマホは幅いっぱい */}
       <div className="mt-6 flex justify-end">
         <button
           onClick={onSend}
-          className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
+          className="w-full rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 sm:w-auto"
         >
           {mode === "now" ? "今すぐ配信" : "予約を確定"}
         </button>

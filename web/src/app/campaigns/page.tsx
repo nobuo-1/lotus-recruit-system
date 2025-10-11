@@ -1,17 +1,14 @@
-// web/src/app/campaigns/page.tsx
 import React from "react";
 export const dynamic = "force-dynamic";
 
 import Link from "next/link";
 import { supabaseServer } from "@/lib/supabaseServer";
-
-// 追加
 import { formatJpDateTime } from "@/lib/formatDate";
 
 type Schedule = {
   campaign_id: string;
   scheduled_at: string | null;
-  status: string | null; // scheduled / queued / sent / cancelled など
+  status: string | null;
 };
 
 type CampaignRow = {
@@ -19,7 +16,7 @@ type CampaignRow = {
   tenant_id: string;
   name: string | null;
   subject: string | null;
-  status: string | null; // draft / queued など
+  status: string | null;
   created_at: string | null;
 };
 
@@ -60,9 +57,7 @@ function nextScheduleText(schedules: Schedule[]) {
   );
   const first = future[0];
   const rest = future.length - 1;
-  // ★ JST + 曜日
   const when = formatJpDateTime(first.scheduled_at);
-
   return `${when}${rest > 0 ? `  +${rest}` : ""}`;
 }
 
@@ -123,37 +118,35 @@ export default async function CampaignsPage() {
         arr.push(s);
         byCamp.set(s.campaign_id, arr);
       });
-    } catch {
-      // テーブルが未作成でも落ちない
-    }
+    } catch {}
   }
 
   return (
     <main className="mx-auto max-w-6xl p-6">
-      <div className="mb-6 flex items-center justify-between">
+      {/* ヘッダー：スマホ縦積み */}
+      <div className="mb-6 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
-          <h1 className="text-2xl font-semibold text-neutral-900">
+          <h1 className="whitespace-nowrap text-2xl font-semibold text-neutral-900">
             キャンペーン一覧
           </h1>
           <p className="text-sm text-neutral-500">作成したキャンペーンの一覧</p>
         </div>
-        <div className="flex gap-2">
-          {/* ← 追加：メール配信トップへ */}
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
           <Link
             href="/email"
-            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
+            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
           >
             メール配信トップ
           </Link>
           <Link
             href="/email/schedules"
-            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
+            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
           >
             メール予約リスト
           </Link>
           <Link
             href="/campaigns/new"
-            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
+            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
           >
             新規作成
           </Link>
@@ -189,16 +182,16 @@ export default async function CampaignsPage() {
                     {formatJpDateTime(r.created_at)}
                   </td>
                   <td className="px-3 py-3">
-                    <div className="flex gap-2">
+                    <div className="flex flex-wrap gap-2">
                       <Link
                         href={`/campaigns/${r.id}`}
-                        className="rounded-xl border border-neutral-200 px-3 py-1 hover:bg-neutral-50"
+                        className="rounded-xl border border-neutral-200 px-3 py-1 hover:bg-neutral-50 whitespace-nowrap"
                       >
                         詳細
                       </Link>
                       <Link
                         href={`/campaigns/${r.id}/send`}
-                        className="rounded-xl border border-neutral-200 px-3 py-1 hover:bg-neutral-50"
+                        className="rounded-xl border border-neutral-200 px-3 py-1 hover:bg-neutral-50 whitespace-nowrap"
                       >
                         送信
                       </Link>

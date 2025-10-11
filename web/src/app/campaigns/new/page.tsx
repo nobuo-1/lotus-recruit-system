@@ -12,7 +12,6 @@ export default function CampaignNewPage() {
   const [msg, setMsg] = useState("");
   const [fromEmail, setFromEmail] = useState("");
 
-  // 差出人の事前入力（テナント設定）
   useEffect(() => {
     (async () => {
       try {
@@ -21,17 +20,13 @@ export default function CampaignNewPage() {
           const j: Settings = await res.json();
           setFromEmail(String(j?.from_email ?? ""));
         }
-      } catch {
-        /* no-op */
-      }
+      } catch {}
     })();
   }, []);
 
   const onSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
-
-    // 本文
     const plain = (fd.get("body_plain") as string) ?? "";
     const htmlInput = (fd.get("body_html") as string) ?? "";
 
@@ -66,23 +61,24 @@ export default function CampaignNewPage() {
 
   return (
     <main className="mx-auto max-w-3xl p-6">
-      <div className="mb-4 flex items-center justify-between">
+      {/* ヘッダー：スマホ縦積み */}
+      <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
-          <h1 className="text-2xl font-semibold text-neutral-900">
+          <h1 className="whitespace-nowrap text-2xl font-semibold text-neutral-900">
             キャンペーン作成
           </h1>
           <p className="text-sm text-neutral-500">配信用の内容を登録します</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
           <Link
             href="/email"
-            className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
+            className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
           >
             メール配信トップへ
           </Link>
           <Link
             href="/campaigns"
-            className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
+            className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
           >
             キャンペーン一覧へ
           </Link>
@@ -126,9 +122,9 @@ export default function CampaignNewPage() {
         </div>
 
         {/* 本文モード切替 */}
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <span className="text-sm text-neutral-500">本文入力形式</span>
-          <label className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-3 py-1">
+          <label className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-3 py-1 whitespace-nowrap">
             <input
               type="radio"
               name="bodymode"
@@ -137,7 +133,7 @@ export default function CampaignNewPage() {
             />
             文章
           </label>
-          <label className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-3 py-1">
+          <label className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-3 py-1 whitespace-nowrap">
             <input
               type="radio"
               name="bodymode"
@@ -150,7 +146,6 @@ export default function CampaignNewPage() {
 
         <div>
           <div className="text-sm text-neutral-500">{labelForBody}</div>
-
           {mode === "plain" ? (
             <textarea
               name="body_plain"
@@ -168,10 +163,10 @@ export default function CampaignNewPage() {
           )}
         </div>
 
-        <div className="flex justify-end">
+        <div className="flex justify-end sm:justify-end">
           <button
             type="submit"
-            className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
+            className="w-full rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 sm:w-auto"
           >
             保存
           </button>

@@ -4,7 +4,6 @@ import Link from "next/link";
 import { formatJpDateTime } from "@/lib/formatDate";
 
 export default async function CampaignDetailPage({
-  // Next.js 15: params は Promise
   params,
 }: {
   params: Promise<{ id: string }>;
@@ -12,7 +11,6 @@ export default async function CampaignDetailPage({
   const { id } = await params;
   const supabase = await supabaseServer();
 
-  // 認証 + テナント
   const { data: u } = await supabase.auth.getUser();
   if (!u?.user) {
     return (
@@ -29,14 +27,12 @@ export default async function CampaignDetailPage({
     .maybeSingle();
   const tenantId = prof?.tenant_id as string | undefined;
 
-  // キャンペーン
   const { data: camp } = await supabase
     .from("campaigns")
     .select("id, name, subject, body_html, status, created_at")
     .eq("id", id)
     .maybeSingle();
 
-  // 送信先一覧（deliveries 経由で recipients をJOIN）
   const { data: rows } = await supabase
     .from("deliveries")
     .select(
@@ -50,25 +46,26 @@ export default async function CampaignDetailPage({
 
   return (
     <main className="mx-auto max-w-6xl p-6">
-      <div className="mb-4 flex items-center justify-between">
+      {/* ヘッダー：スマホ縦積み */}
+      <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
-          <h1 className="text-2xl font-semibold text-neutral-900">
+          <h1 className="whitespace-nowrap text-2xl font-semibold text-neutral-900">
             キャンペーン詳細
           </h1>
           <p className="text-sm text-neutral-500">
             送信内容と送信先を確認できます
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
           <Link
             href={`/campaigns/${id}/send`}
-            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
+            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
           >
             {buttonLabel}
           </Link>
           <Link
             href="/campaigns"
-            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
+            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
           >
             一覧に戻る
           </Link>
@@ -135,20 +132,20 @@ export default async function CampaignDetailPage({
                     className="border-t border-neutral-200"
                   >
                     <td className="px-3 py-3">{rec.name ?? ""}</td>
-                    <td className="px-3 py-3 text-neutral-600">
+                    <td className="px-3 py-3 text-neutral-600 whitespace-nowrap">
                       {rec.email ?? ""}
                     </td>
-                    <td className="px-3 py-3 text-center">
+                    <td className="px-3 py-3 text-center whitespace-nowrap">
                       {rec.region ?? ""}
                     </td>
-                    <td className="px-3 py-3 text-center">
+                    <td className="px-3 py-3 text-center whitespace-nowrap">
                       {rec.gender === "male"
                         ? "男性"
                         : rec.gender === "female"
                         ? "女性"
                         : ""}
                     </td>
-                    <td className="px-3 py-3 text-center">{job}</td>
+                    <td className="px-3 py-3 text-center break-words">{job}</td>
                     <td className="px-3 py-3 text-center">{r.status ?? ""}</td>
                     <td className="px-3 py-3">{formatJpDateTime(r.sent_at)}</td>
                   </tr>
