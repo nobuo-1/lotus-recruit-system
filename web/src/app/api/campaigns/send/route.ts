@@ -145,6 +145,46 @@ function htmlToText(html: string) {
     .trim();
 }
 
+// ---- 追加: 差し込みヘルパー ----
+
+// HTMLへ挿入時のエスケープ
+function escapeHtml(s: string) {
+  return String(s)
+    .replaceAll(/&/g, "&amp;")
+    .replaceAll(/</g, "&lt;")
+    .replaceAll(/>/g, "&gt;")
+    .replaceAll(/"/g, "&quot;")
+    .replaceAll(/'/g, "&#39;");
+}
+
+// テキストへ挿入時はエスケープ不要（そのまま）
+function identity(s: string) {
+  return String(s);
+}
+
+// htmlToText でタグは剥がせますが HTML エンティティは残るので、主要なものをデコード
+function decodeHtmlEntities(s: string) {
+  return s
+    .replaceAll(/&amp;/g, "&")
+    .replaceAll(/&lt;/g, "<")
+    .replaceAll(/&gt;/g, ">")
+    .replaceAll(/&quot;/g, '"')
+    .replaceAll(/&#39;/g, "'");
+}
+
+// 共通：{{NAME}}, {{EMAIL}} を置換する
+function personalizeTemplate(
+  input: string,
+  vars: { name?: string | null; email?: string | null },
+  encode: (s: string) => string // HTMLは escapeHtml、TEXTは identity
+) {
+  const name = (vars.name ?? "").trim() || "ご担当者";
+  const email = (vars.email ?? "").trim();
+  return input
+    .replaceAll(/\{\{\s*NAME\s*\}\}/g, encode(name))
+    .replaceAll(/\{\{\s*EMAIL\s*\}\}/g, encode(email));
+}
+
 export async function POST(req: Request) {
   try {
     // ① 入力
@@ -201,7 +241,7 @@ export async function POST(req: Request) {
     // ④ 受信者（最小カラム）
     const { data: recs, error: rErr } = await sb
       .from("recipients")
-      .select("id, email, unsubscribe_token, unsubscribed_at")
+      .select("id, name, email, unsubscribe_token, unsubscribed_at")
       .in("id", recipientIds)
       .eq("tenant_id", tenantId);
 
@@ -330,14 +370,33 @@ export async function POST(req: Request) {
       const pixelUrl = `${appUrl}/api/email/open?id=${encodeURIComponent(
         deliveryId
       )}`;
-      const htmlWithPixel = injectOpenPixel(htmlBody ?? "", pixelUrl);
+
+      // 1) 件名にも差し込み
+      const subjectRaw = String((camp as any).subject ?? "");
+      const subjectPersonalized = personalizeTemplate(
+        subjectRaw,
+        { name: r.name, email: r.email },
+        identity
+      );
+
+      // 2) HTML本文：差し込み → 開封ピクセル注入
+      const htmlFilled = personalizeTemplate(
+        htmlBody ?? "",
+        { name: r.name, email: r.email },
+        escapeHtml
+      );
+      const htmlWithPixel = injectOpenPixel(htmlFilled, pixelUrl);
+
+      // 3) テキスト本文：HTML差し込み後に text 化し、エンティティを戻す
+      const textFromHtml = htmlToText(htmlFilled); // タグ除去
+      const textPersonalized = decodeHtmlEntities(textFromHtml); // &amp; 等を戻す
 
       const job: DirectEmailJob = {
         kind: "direct_email",
         to: String(r.email),
-        subject: String((camp as any).subject ?? ""),
-        html: htmlWithPixel,
-        text: textBody, // DBにtext列が無いのでHTMLから生成
+        subject: subjectPersonalized, // ← 件名も個別化
+        html: htmlWithPixel, // ← HTML個別化＋ピクセル
+        text: textPersonalized, // ← テキスト個別化（HTML→text変換）
         tenantId,
         unsubscribeToken: (r as any).unsubscribe_token ?? undefined,
         fromOverride,

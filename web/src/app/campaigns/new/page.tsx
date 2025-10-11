@@ -20,7 +20,9 @@ export default function CampaignNewPage() {
           const j: Settings = await res.json();
           setFromEmail(String(j?.from_email ?? ""));
         }
-      } catch {}
+      } catch {
+        /* no-op */
+      }
     })();
   }, []);
 
@@ -72,13 +74,13 @@ export default function CampaignNewPage() {
         <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
           <Link
             href="/email"
-            className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
+            className="whitespace-nowrap rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
           >
             メール配信トップへ
           </Link>
           <Link
             href="/campaigns"
-            className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
+            className="whitespace-nowrap rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
           >
             キャンペーン一覧へ
           </Link>
@@ -99,15 +101,23 @@ export default function CampaignNewPage() {
               required
             />
           </div>
+
           <div>
             <div className="text-sm text-neutral-500">件名</div>
             <input
               name="subject"
               className="mt-1 w-full rounded-lg border border-neutral-300 px-3 py-2"
-              placeholder="メール件名"
+              placeholder="メール件名（例: {{NAME}} 様へのご案内）"
               required
             />
+            {/* ▼ 差し込みヒント（TSエラーにならない書き方） */}
+            <p className="mt-1 text-xs text-neutral-500">
+              差し込み可: <code className="font-mono">{"{{NAME}}"}</code>,{" "}
+              <code className="font-mono">{"{{EMAIL}}"}</code> （例:{" "}
+              <code className="font-mono">{"{{NAME}}"}</code> 様）
+            </p>
           </div>
+
           <div className="md:col-span-2">
             <div className="text-sm text-neutral-500">差出人メール</div>
             <input
@@ -146,6 +156,7 @@ export default function CampaignNewPage() {
 
         <div>
           <div className="text-sm text-neutral-500">{labelForBody}</div>
+
           {mode === "plain" ? (
             <textarea
               name="body_plain"
@@ -161,6 +172,15 @@ export default function CampaignNewPage() {
               required
             />
           )}
+
+          {/* ▼ 本文の差し込みヒント（TSエラーにならない書き方） */}
+          <p className="mt-2 text-xs text-neutral-500">
+            差し込み可: <code className="font-mono">{"{{NAME}}"}</code>,{" "}
+            <code className="font-mono">{"{{EMAIL}}"}</code>
+            （例: <code className="font-mono">{"{{NAME}}"}</code> 様）
+            <br />
+            ※「文章」モードでも保存時にHTML化され、送信時に自動で個別化されます。
+          </p>
         </div>
 
         <div className="flex justify-end sm:justify-end">
