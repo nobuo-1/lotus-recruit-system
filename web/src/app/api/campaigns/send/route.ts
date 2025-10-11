@@ -1,113 +1,512 @@
-// web/src/worker/email.worker.ts
-import "../env";
-import { Worker, type Job } from "bullmq";
-import { redis, type EmailJob, isDirectEmailJob } from "@/server/queue";
-import { sendMail } from "@/server/mailer";
+// web/src/app/api/campaigns/send/route.ts
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
+import { NextResponse } from "next/server";
+import { supabaseServer } from "@/lib/supabaseServer";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { emailQueue } from "@/server/queue";
+import type { DirectEmailJob } from "@/server/queue";
 
-const admin = supabaseAdmin();
+type Payload = {
+  campaignId: string;
+  recipientIds: string[];
+  scheduleAt?: string | null; // 未来ISO→予約 / 省略→即時
+};
 
-/** jobId: camp:CID:rcpt:RID:timestamp → { campaignId, recipientId } */
-// 既存そのまま
-function parseCampaignAndRecipient(source: string | number | undefined) {
-  const s = String(source ?? "");
-  const m = s.match(/^camp:([^:]+):rcpt:([^:]+):/);
-  return m ? { campaignId: m[1], recipientId: m[2] } : null;
+/** CORS/プリフライト（405対策） */
+export async function OPTIONS() {
+  return new NextResponse(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    },
+  });
 }
 
-const worker = new Worker<EmailJob>(
-  "email",
-  async (job) => {
-    const data = job.data as any;
+/** ルート生存確認（GET/HEADは405） */
+export async function GET() {
+  return NextResponse.json({ error: "method not allowed" }, { status: 405 });
+}
+export async function HEAD() {
+  return new NextResponse(null, { status: 405 });
+}
 
-    // ★ 追加: ヘルスチェック用ジョブ
-    if (data?.kind === "noop") {
-      console.log("[email.noop]", { jobId: job.id });
-      return { ok: true, kind: "noop" };
-    }
+/** /email/settings を user→tenant→tenants の順でフェッチ */
+async function loadSenderConfigForCurrentUser() {
+  const sb = await supabaseServer();
+  const { data: u } = await sb.auth.getUser();
+  const user = u?.user;
 
-    if (!isDirectEmailJob(data)) {
-      console.warn("[email.skip]", { jobId: job.id, kind: data?.kind });
-      return { messageId: "skipped", kind: data?.kind ?? "unknown" };
-    }
-
-    // ---- 送信 ----
-    const info = await sendMail({
-      to: data.to,
-      subject: data.subject,
-      html: data.html,
-      text: data.text,
-      unsubscribeToken: data.unsubscribeToken,
-      fromOverride: data.fromOverride,
-      brandCompany: data.brandCompany,
-      brandAddress: data.brandAddress,
-      brandSupport: data.brandSupport,
-    });
-
-    // ---- DB 更新 ----
-    // まず job.id（= API で指定した jobId）を試す。だめなら job.name からも救済。
-    let meta = parseCampaignAndRecipient(job.id);
-    if (!meta) {
-      meta = parseCampaignAndRecipient(job.name as any);
-    }
-
-    if (!meta) {
-      console.warn("[email.warn.meta-missing]", {
-        jobId: job.id,
-        name: job.name,
-      });
-    } else {
-      const nowIso = new Date().toISOString();
-
-      await admin
-        .from("deliveries")
-        .update({ status: "sent", sent_at: nowIso })
-        .eq("campaign_id", meta.campaignId)
-        .eq("recipient_id", meta.recipientId);
-
-      await admin // 一覧の見た目用
-        .from("campaigns")
-        .update({ status: "queued" })
-        .eq("id", meta.campaignId);
-
-      await admin
-        .from("email_schedules")
-        .update({ status: "queued" })
-        .eq("campaign_id", meta.campaignId)
-        .lte("scheduled_at", nowIso)
-        .eq("status", "scheduled");
-    }
-
-    console.log("[email.sent]", {
-      to: data.to,
-      messageId: info?.messageId,
-      jobId: job.id,
-      jobName: job.name,
-      tenantId: (data as any).tenantId,
-    });
-
-    return { messageId: info?.messageId, kind: data.kind };
-  },
-  {
-    connection: redis,
-    concurrency: Number(process.env.EMAIL_WORKER_CONCURRENCY ?? 5),
-    limiter: {
-      max: Number(process.env.EMAIL_RATE_MAX ?? 30),
-      duration: Number(process.env.EMAIL_RATE_DURATION_MS ?? 60_000),
-    },
+  if (!user) {
+    return {
+      tenantId: undefined as string | undefined,
+      cfg: {} as {
+        fromOverride?: string;
+        brandCompany?: string;
+        brandAddress?: string;
+        brandSupport?: string;
+      },
+    };
   }
+
+  const { data: prof } = await sb
+    .from("profiles")
+    .select("tenant_id")
+    .eq("id", user.id)
+    .maybeSingle();
+  const tenantId = (prof?.tenant_id as string | undefined) ?? undefined;
+
+  let from_address: string | undefined;
+  let brand_company: string | undefined;
+  let brand_address: string | undefined;
+  let brand_support: string | undefined;
+
+  const byUser = await sb
+    .from("email_settings")
+    .select("from_address,brand_company,brand_address,brand_support")
+    .eq("user_id", user.id)
+    .maybeSingle();
+  if (byUser.data) {
+    ({ from_address, brand_company, brand_address, brand_support } =
+      byUser.data as any);
+  }
+
+  if ((!from_address || !brand_company) && tenantId) {
+    const byTenant = await sb
+      .from("email_settings")
+      .select("from_address,brand_company,brand_address,brand_support")
+      .eq("tenant_id", tenantId)
+      .maybeSingle();
+    if (byTenant.data) {
+      from_address = from_address || (byTenant.data as any).from_address;
+      brand_company = brand_company || (byTenant.data as any).brand_company;
+      brand_address = brand_address || (byTenant.data as any).brand_address;
+      brand_support = brand_support || (byTenant.data as any).brand_support;
+    }
+  }
+
+  if (tenantId) {
+    const { data: t } = await sb
+      .from("tenants")
+      .select("company_name, company_address, support_email, from_email")
+      .eq("id", tenantId)
+      .maybeSingle();
+    if (t) {
+      from_address = from_address || (t as any).from_email || undefined;
+      brand_company = brand_company || (t as any).company_name || undefined;
+      brand_address = brand_address || (t as any).company_address || undefined;
+      brand_support = brand_support || (t as any).support_email || undefined;
+    }
+  }
+
+  return {
+    tenantId,
+    cfg: {
+      fromOverride: from_address || undefined,
+      brandCompany: brand_company || undefined,
+      brandAddress: brand_address || undefined,
+      brandSupport: brand_support || undefined,
+    },
+  };
+}
+
+/** HTML末尾に開封ピクセルを1回だけ注入（※最終末尾に来るよう最後に実行） */
+function injectOpenPixel(html: string, url: string) {
+  const pixel = `<img src="${url}" alt="" width="1" height="1" style="display:none;max-width:1px;max-height:1px;" />`;
+  return /<\/body\s*>/i.test(html)
+    ? html.replace(/<\/body\s*>/i, `${pixel}\n</body>`)
+    : `${html}\n${pixel}`;
+}
+
+function chunk<T>(arr: T[], size: number): T[][] {
+  const a = [...arr];
+  const out: T[][] = [];
+  while (a.length) out.push(a.splice(0, size));
+  return out;
+}
+
+const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
+  /\/+$/,
+  ""
 );
 
-worker.on("completed", (job, result) => {
-  console.log("[email.done]", { jobId: job.id, result });
-});
-worker.on("failed", (job, err) => {
-  console.error("[email.fail]", { jobId: job?.id, err: err?.message });
-});
+// 簡易HTML→プレーンテキスト（text未保存DB向け）
+function htmlToText(html: string) {
+  return html
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|li|h[1-6]|tr)>/gi, "\n")
+    .replace(/<style[\s\S]*?<\/style>|<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
 
-process.on("SIGINT", async () => {
-  console.log("Shutting down email worker...");
-  await worker.close();
-  await redis.quit();
-  process.exit(0);
-});
+// ---- 差し込みヘルパー ----
+
+// HTMLへ挿入時のエスケープ
+function escapeHtml(s: string) {
+  return String(s)
+    .replaceAll(/&/g, "&amp;")
+    .replaceAll(/</g, "&lt;")
+    .replaceAll(/>/g, "&gt;")
+    .replaceAll(/"/g, "&quot;")
+    .replaceAll(/'/g, "&#39;");
+}
+
+// テキストへ挿入時はエスケープ不要（そのまま）
+function identity(s: string) {
+  return String(s);
+}
+
+// htmlToText でタグは剥がせますが HTML エンティティは残るので、主要なものをデコード
+function decodeHtmlEntities(s: string) {
+  return s
+    .replaceAll(/&amp;/g, "&")
+    .replaceAll(/&lt;/g, "<")
+    .replaceAll(/&gt;/g, ">")
+    .replaceAll(/&quot;/g, '"')
+    .replaceAll(/&#39;/g, "'");
+}
+
+// 共通：{{NAME}}, {{EMAIL}} を置換する
+function personalizeTemplate(
+  input: string,
+  vars: { name?: string | null; email?: string | null },
+  encode: (s: string) => string // HTMLは escapeHtml、TEXTは identity
+) {
+  const name = (vars.name ?? "").trim() || "ご担当者";
+  const email = (vars.email ?? "").trim();
+  return input
+    .replaceAll(/\{\{\s*NAME\s*\}\}/g, encode(name))
+    .replaceAll(/\{\{\s*EMAIL\s*\}\}/g, encode(email));
+}
+
+// ---- 可視フッター（主張しない薄グレー） ----
+function buildFooterHTML(opts: {
+  brandCompany?: string;
+  brandAddress?: string;
+  brandSupport?: string;
+  unsubscribeUrl: string;
+}) {
+  const { brandCompany, brandAddress, brandSupport, unsubscribeUrl } = opts;
+  const company = brandCompany ?? "";
+  const address = brandAddress ?? "";
+  const support = brandSupport ?? "";
+
+  return `
+    <div style="margin-top:24px;padding-top:16px;border-top:1px solid #e5e7eb;color:#6b7280;font-size:12px;line-height:1.6;">
+      ${
+        company
+          ? `<div style="font-weight:600;color:#4b5563;">${company}</div>`
+          : ""
+      }
+      ${address ? `<div>${address}</div>` : ""}
+      ${
+        support
+          ? `<div>お問い合わせ: <a href="mailto:${support}" style="color:#6b7280;text-decoration:underline;">${support}</a></div>`
+          : ""
+      }
+      <div>配信停止: <a href="${unsubscribeUrl}" style="color:#6b7280;text-decoration:underline;">こちら</a></div>
+    </div>
+  `.trim();
+}
+
+function buildFooterText(opts: {
+  brandCompany?: string;
+  brandAddress?: string;
+  brandSupport?: string;
+  unsubscribeUrl: string;
+}) {
+  const { brandCompany, brandAddress, brandSupport, unsubscribeUrl } = opts;
+  const lines = [
+    "",
+    "----------------------------------------",
+    brandCompany ? `${brandCompany}` : "",
+    brandAddress ? `${brandAddress}` : "",
+    brandSupport ? `お問い合わせ: ${brandSupport}` : "",
+    `配信停止: ${unsubscribeUrl}`,
+  ].filter(Boolean);
+  return lines.join("\n");
+}
+
+// body末尾にフッターを入れる（</body>直前に差し込む）
+function appendFooterToHTML(html: string, footerHTML: string) {
+  if (!html) return footerHTML;
+  const close = /<\/body\s*>/i;
+  return close.test(html)
+    ? html.replace(close, `${footerHTML}\n</body>`)
+    : `${html}\n${footerHTML}`;
+}
+
+export async function POST(req: Request) {
+  try {
+    // ① 入力
+    const body = (await req.json().catch(() => ({}))) as Partial<Payload>;
+    const campaignId = String(body.campaignId ?? "");
+    const recipientIds = Array.isArray(body.recipientIds)
+      ? body.recipientIds
+      : [];
+    const scheduleAtISO = body.scheduleAt ?? null;
+
+    if (!campaignId || recipientIds.length === 0) {
+      return NextResponse.json(
+        { error: "campaignId と recipientIds は必須です" },
+        { status: 400 }
+      );
+    }
+
+    // ② 認証・tenant
+    const sb = await supabaseServer();
+    const { data: u } = await sb.auth.getUser();
+    if (!u?.user)
+      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+
+    const { tenantId, cfg } = await loadSenderConfigForCurrentUser();
+    if (!tenantId)
+      return NextResponse.json({ error: "no tenant" }, { status: 400 });
+
+    // ③ キャンペーン本文
+    const admin = supabaseAdmin();
+    const { data: camp, error: campErr } = await admin
+      .from("campaigns")
+      .select("id, tenant_id, subject, body_html, from_email, status")
+      .eq("id", campaignId)
+      .maybeSingle();
+
+    if (campErr) {
+      console.error("[send] campaigns.select error:", campErr);
+      return NextResponse.json(
+        { error: "db(campaigns): " + campErr.message },
+        { status: 500 }
+      );
+    }
+    if (!camp)
+      return NextResponse.json({ error: "not found" }, { status: 404 });
+    if ((camp as any).tenant_id !== tenantId) {
+      return NextResponse.json({ error: "forbidden" }, { status: 403 });
+    }
+
+    const htmlBody = ((camp as any).body_html as string | null) ?? "";
+    const textBody = htmlBody ? htmlToText(htmlBody) : undefined;
+
+    // ④ 受信者（最小カラム）
+    const { data: recs, error: rErr } = await sb
+      .from("recipients")
+      .select("id, name, email, unsubscribe_token, unsubscribed_at")
+      .in("id", recipientIds)
+      .eq("tenant_id", tenantId);
+
+    if (rErr) {
+      console.error("[send] recipients.select error:", rErr);
+      return NextResponse.json(
+        { error: "db(recipients): " + rErr.message },
+        { status: 500 }
+      );
+    }
+
+    const recipients = (recs ?? []).filter((r: any) => {
+      if (!r?.email) return false;
+      if (r?.unsubscribed_at) return false;
+      return true;
+    });
+
+    if (recipients.length === 0)
+      return NextResponse.json({ error: "no recipients" }, { status: 400 });
+
+    // ⑤ 重複配信防止
+    const { data: already } = await sb
+      .from("deliveries")
+      .select("recipient_id")
+      .eq("tenant_id", tenantId)
+      .eq("campaign_id", campaignId)
+      .in("status", ["scheduled", "queued", "sent"]);
+    const exclude = new Set((already ?? []).map((d: any) => d.recipient_id));
+    const targets = recipients.filter((r) => !exclude.has(r.id));
+    if (targets.length === 0)
+      return NextResponse.json({
+        ok: true,
+        queued: 0,
+        skipped: recipientIds.length,
+      });
+
+    // ⑥ 予約 or 即時
+    const now = Date.now();
+    let delay = 0;
+    let scheduleAt: string | null = null;
+    if (scheduleAtISO) {
+      const ts = Date.parse(scheduleAtISO);
+      if (Number.isNaN(ts))
+        return NextResponse.json(
+          { error: "scheduleAt が不正です" },
+          { status: 400 }
+        );
+      delay = Math.max(0, ts - now);
+      scheduleAt = new Date(ts).toISOString();
+    }
+
+    // ⑦ deliveries upsert（分割）
+    if (scheduleAt) {
+      for (const part of chunk(
+        targets.map((r) => ({
+          tenant_id: tenantId,
+          campaign_id: campaignId,
+          recipient_id: r.id,
+          status: "scheduled" as const,
+          scheduled_at: scheduleAt,
+        })),
+        500
+      )) {
+        await sb.from("deliveries").upsert(part, {
+          onConflict: "campaign_id,recipient_id",
+        });
+      }
+      await sb
+        .from("campaigns")
+        .update({ status: "scheduled" })
+        .eq("id", campaignId);
+    } else {
+      for (const part of chunk(
+        targets.map((r) => ({
+          tenant_id: tenantId,
+          campaign_id: campaignId,
+          recipient_id: r.id,
+          status: "queued" as const,
+          scheduled_at: null as any,
+        })),
+        500
+      )) {
+        await sb.from("deliveries").upsert(part, {
+          onConflict: "campaign_id,recipient_id",
+        });
+      }
+      await sb
+        .from("campaigns")
+        .update({ status: "queued" })
+        .eq("id", campaignId);
+    }
+
+    // ⑧ delivery_id ←→ recipient_id map（開封ピクセル用）
+    const { data: dels, error: dErr } = await sb
+      .from("deliveries")
+      .select("id, recipient_id")
+      .eq("tenant_id", tenantId)
+      .eq("campaign_id", campaignId)
+      .in(
+        "recipient_id",
+        targets.map((t) => t.id)
+      );
+
+    if (dErr) {
+      console.error("[send] deliveries.select error:", dErr);
+      return NextResponse.json(
+        { error: "db(deliveries): " + dErr.message },
+        { status: 500 }
+      );
+    }
+
+    const idMap = new Map<string, string>();
+    (dels ?? []).forEach((d) =>
+      idMap.set(String(d.recipient_id), String(d.id))
+    );
+
+    const fromOverride =
+      (cfg.fromOverride as string | undefined) ||
+      ((camp as any).from_email as string | undefined) ||
+      undefined;
+
+    // ⑨ キュー投入（Renderワーカーが direct_email を処理）
+    let queued = 0;
+    for (const r of targets) {
+      const deliveryId = idMap.get(String(r.id)) ?? "";
+      const pixelUrl = `${appUrl}/api/email/open?id=${encodeURIComponent(
+        deliveryId
+      )}`;
+
+      // 受信者ごとの解除URL（トークンがあればそれを使う）
+      const unsubscribeUrl = (r as any).unsubscribe_token
+        ? `${appUrl}/unsubscribe?token=${encodeURIComponent(
+            (r as any).unsubscribe_token
+          )}`
+        : `${appUrl}/unsubscribe?email=${encodeURIComponent(
+            String(r.email ?? "")
+          )}`;
+
+      // 件名にも差し込み
+      const subjectRaw = String((camp as any).subject ?? "");
+      const subjectPersonalized = personalizeTemplate(
+        subjectRaw,
+        { name: r.name, email: r.email },
+        identity
+      );
+
+      // HTML本文：差し込み → フッターを付与 → 開封ピクセルを最終末尾
+      const htmlFilled = personalizeTemplate(
+        htmlBody ?? "",
+        { name: r.name, email: r.email },
+        escapeHtml
+      );
+      const footerHTML = buildFooterHTML({
+        brandCompany: cfg.brandCompany,
+        brandAddress: cfg.brandAddress,
+        brandSupport: cfg.brandSupport,
+        unsubscribeUrl,
+      });
+      const htmlWithFooter = appendFooterToHTML(htmlFilled, footerHTML);
+      const htmlFinal = injectOpenPixel(htmlWithFooter, pixelUrl);
+
+      // テキスト本文：差し込み（HTML→text変換）＋テキストフッター
+      const textFromHtml = htmlToText(htmlFilled); // タグ除去
+      const textPersonalizedNoFooter = decodeHtmlEntities(textFromHtml); // &amp; 等を戻す
+      const footerText = buildFooterText({
+        brandCompany: cfg.brandCompany,
+        brandAddress: cfg.brandAddress,
+        brandSupport: cfg.brandSupport,
+        unsubscribeUrl,
+      });
+      const textFinal =
+        (textPersonalizedNoFooter
+          ? `${textPersonalizedNoFooter}\n${footerText}`
+          : footerText) || undefined;
+
+      const job: DirectEmailJob = {
+        kind: "direct_email",
+        to: String(r.email),
+        subject: subjectPersonalized,
+        html: htmlFinal,
+        text: textFinal,
+        tenantId,
+        unsubscribeToken: (r as any).unsubscribe_token ?? undefined,
+        fromOverride,
+        brandCompany: cfg.brandCompany,
+        brandAddress: cfg.brandAddress,
+        brandSupport: cfg.brandSupport,
+      };
+
+      const jobId = `camp:${campaignId}:rcpt:${r.id}:${Date.now()}`;
+      await emailQueue.add("direct_email", job, {
+        jobId,
+        delay,
+        removeOnComplete: 1000,
+        removeOnFail: 1000,
+      });
+      queued++;
+    }
+
+    return NextResponse.json({
+      ok: true,
+      queued,
+      scheduled: scheduleAt ?? null,
+      fromOverride: fromOverride ?? null,
+    });
+  } catch (e: any) {
+    console.error("POST /api/campaigns/send error", e);
+    return NextResponse.json(
+      { error: e?.message || "server error" },
+      { status: 500 }
+    );
+  }
+}
