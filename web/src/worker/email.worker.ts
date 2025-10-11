@@ -1,26 +1,29 @@
 // web/src/worker/email.worker.ts
 import "../env";
-import { Worker, type Job } from "bullmq";
+import { Worker } from "bullmq";
 import { redis, type EmailJob, isDirectEmailJob } from "@/server/queue";
 import { sendMail } from "@/server/mailer";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 const admin = supabaseAdmin();
 
-/** jobId: camp:CID:rcpt:RID:timestamp → { campaignId, recipientId } */
-// 既存そのまま
 function parseCampaignAndRecipient(source: string | number | undefined) {
   const s = String(source ?? "");
   const m = s.match(/^camp:([^:]+):rcpt:([^:]+):/);
   return m ? { campaignId: m[1], recipientId: m[2] } : null;
 }
 
+const APP_URL = (process.env.APP_URL || "http://localhost:3000").replace(
+  /\/+$/,
+  ""
+);
+
 const worker = new Worker<EmailJob>(
   "email",
   async (job) => {
     const data = job.data as any;
 
-    // ★ 追加: ヘルスチェック用ジョブ
+    // ヘルスチェック
     if (data?.kind === "noop") {
       console.log("[email.noop]", { jobId: job.id });
       return { ok: true, kind: "noop" };
@@ -30,6 +33,21 @@ const worker = new Worker<EmailJob>(
       console.warn("[email.skip]", { jobId: job.id, kind: data?.kind });
       return { messageId: "skipped", kind: data?.kind ?? "unknown" };
     }
+
+    // ---- Gmail「解除」対応ヘッダー作成（One-Click対応） ----
+    const listUnsubscribeUrl = data.unsubscribeToken
+      ? `${APP_URL}/unsubscribe?token=${encodeURIComponent(
+          data.unsubscribeToken
+        )}`
+      : `${APP_URL}/unsubscribe`;
+
+    const supportMail =
+      (data.brandSupport as string | undefined) || "support@example.com";
+
+    const listHeaders = {
+      "List-Unsubscribe": `<${listUnsubscribeUrl}>, <mailto:${supportMail}>`,
+      "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+    };
 
     // ---- 送信 ----
     const info = await sendMail({
@@ -42,10 +60,11 @@ const worker = new Worker<EmailJob>(
       brandCompany: data.brandCompany,
       brandAddress: data.brandAddress,
       brandSupport: data.brandSupport,
-    });
+      // 型の厳しさを避けるため as any（既存 sendMail 定義を崩さずヘッダを渡す）
+      headers: listHeaders,
+    } as any);
 
     // ---- DB 更新 ----
-    // まず job.id（= API で指定した jobId）を試す。だめなら job.name からも救済。
     let meta = parseCampaignAndRecipient(job.id);
     if (!meta) {
       meta = parseCampaignAndRecipient(job.name as any);
