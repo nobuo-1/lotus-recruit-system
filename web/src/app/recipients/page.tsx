@@ -328,7 +328,7 @@ export default function RecipientsPage() {
                       title="編集"
                       aria-label="編集"
                     >
-                      <Pencil className="h-4 w-4" aria-hidden="true" />
+                      <Pencil className="h-3 w-3" aria-hidden="true" />
                       <span className="sr-only">編集</span>
                     </Link>
 
@@ -340,7 +340,7 @@ export default function RecipientsPage() {
                       aria-label="削除"
                       type="button"
                     >
-                      <Trash2 className="h-4 w-4" aria-hidden="true" />
+                      <Trash2 className="h-3 w-3" aria-hidden="true" />
                       <span className="sr-only">削除</span>
                     </button>
                   </div>
