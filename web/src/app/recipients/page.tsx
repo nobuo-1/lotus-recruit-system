@@ -307,7 +307,7 @@ export default function RecipientsPage() {
                     ? "女性"
                     : ""}
                 </td>
-                <td className="px-2.8 py-2.8 text-center text-neutral-600">
+                <td className="px-2.8 py-2.8 text-center text-neutral-600 whitespace-nowrap">
                   {ageFromBirthday(r.birthday)}
                 </td>
                 <td className="px-2.8 py-2.8 text-center text-neutral-600 whitespace-nowrap">
@@ -316,7 +316,7 @@ export default function RecipientsPage() {
                 <td className="px-2.8 py-2.8 text-center text-neutral-600 break-words">
                   {formatJob(r.job_category_large, r.job_category_small)}
                 </td>
-                <td className="px-2.2 py-2.2 text-center">
+                <td className="px-2.2 py-2.2 text-center whitespace-nowrap">
                   <Toggle
                     checked={!!r.is_active}
                     onChange={(n) => toggleActive(r.id, n)}
