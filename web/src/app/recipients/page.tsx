@@ -2,11 +2,11 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-
 import Link from "next/link";
 import Toggle from "@/components/Toggle";
 import { PREFECTURES } from "@/constants/prefectures";
 import { JOB_CATEGORIES, JOB_LARGE } from "@/constants/jobCategories";
+import { Pencil, Trash2 } from "lucide-react"; // ← 追加
 
 type Row = {
   id: string;
@@ -321,17 +321,27 @@ export default function RecipientsPage() {
                 </td>
                 <td className="px-3 py-3 text-center">
                   <div className="flex items-center justify-center gap-2">
+                    {/* 編集：アイコンボタン */}
                     <Link
                       href={`/recipients/${r.id}/edit`}
-                      className="rounded-lg border border-neutral-200 px-3 py-1 hover:bg-neutral-50"
+                      className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-neutral-200 hover:bg-neutral-50"
+                      title="編集"
+                      aria-label="編集"
                     >
-                      編集
+                      <Pencil className="h-4 w-4" aria-hidden="true" />
+                      <span className="sr-only">編集</span>
                     </Link>
+
+                    {/* 削除：アイコンボタン（赤系テキスト） */}
                     <button
                       onClick={() => onDelete(r.id)}
-                      className="rounded-lg border border-neutral-200 px-3 py-1 text-red-600 hover:bg-neutral-50"
+                      className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-neutral-200 text-red-600 hover:bg-red-50"
+                      title="削除"
+                      aria-label="削除"
+                      type="button"
                     >
-                      削除
+                      <Trash2 className="h-4 w-4" aria-hidden="true" />
+                      <span className="sr-only">削除</span>
                     </button>
                   </div>
                 </td>
