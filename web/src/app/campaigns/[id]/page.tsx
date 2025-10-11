@@ -111,7 +111,7 @@ export default async function CampaignDetailPage({
           送信先一覧（{sentCount} 件）
         </div>
         <div className="overflow-x-auto">
-          <table className="min-w-[900px] w-full text-sm">
+          <table className="min-w-[1180px] w-full text-sm">
             <thead className="bg-neutral-50 text-neutral-600">
               <tr>
                 <th className="px-3 py-3 text-left">名前</th>
