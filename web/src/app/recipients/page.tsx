@@ -319,7 +319,7 @@ export default function RecipientsPage() {
                     label="active"
                   />
                 </td>
-                <td className="px-2.8 py-2.8 text-center">
+                <td className="px-3.3 py-2.8 text-center">
                   <div className="flex items-center justify-center gap-2">
                     {/* 編集：アイコンボタン */}
                     <Link
