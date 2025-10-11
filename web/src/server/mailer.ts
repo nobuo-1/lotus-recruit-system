@@ -208,8 +208,8 @@ export async function sendMail(args: SendArgs) {
   const address = args.brandAddress || fallbackAddress;
   const support = args.brandSupport || fallbackSupport;
 
-  // 表示上の From
-  const displayFromAddress = args.fromOverride || defaultFrom;
+  // 表示上の From アドレスは常に既定の送信ドメインを使う
+  const displayFromAddress = defaultFrom;
   const fromHeader =
     company && displayFromAddress
       ? { name: company, address: displayFromAddress }
