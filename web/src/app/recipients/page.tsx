@@ -267,7 +267,7 @@ export default function RecipientsPage() {
       </div>
 
       <div className="overflow-x-auto rounded-2xl border border-neutral-200">
-        <table className="min-w-[1280px] w-full text-sm">
+        <table className="min-w-[1080px] w-full text-sm">
           <thead className="bg-neutral-50 text-neutral-600">
             <tr>
               <th className="px-3 py-3 text-left">名前</th>
