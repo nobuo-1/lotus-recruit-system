@@ -1,3 +1,4 @@
+// web/src/app/email/settings/page.tsx
 "use client";
 import React from "react";
 import { useEffect, useState } from "react";
@@ -20,7 +21,6 @@ export default function EmailSettingsPage() {
   });
   const [msg, setMsg] = useState("");
 
-  // 初期値の取得
   useEffect(() => {
     (async () => {
       try {
@@ -52,12 +52,12 @@ export default function EmailSettingsPage() {
 
   return (
     <>
-      {/* 共通ヘッダー & 戻るボタン */}
       <AppHeader showBack />
       <main className="mx-auto max-w-3xl p-6">
-        <div className="mb-4 flex items-center justify-between">
+        {/* ヘッダー行：スマホは縦積み */}
+        <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
           <div>
-            <h1 className="text-2xl font-semibold text-neutral-900">
+            <h1 className="whitespace-nowrap text-2xl font-semibold text-neutral-900">
               メール用設定
             </h1>
             <p className="text-sm text-neutral-500">
@@ -66,7 +66,7 @@ export default function EmailSettingsPage() {
           </div>
           <Link
             href="/email"
-            className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
+            className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
           >
             メール配信トップへ
           </Link>

@@ -58,7 +58,6 @@ export default function EmailLanding() {
     [data?.openRate]
   );
 
-  // ヘッダー（ロゴ＋戻る）
   const Header = () => (
     <header className="sticky top-0 z-40 border-b border-neutral-200 bg-white/80 backdrop-blur">
       <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-4">
@@ -105,52 +104,55 @@ export default function EmailLanding() {
     <>
       <Header />
       <main className="mx-auto max-w-6xl p-6">
-        <div className="flex items-center justify-between">
-          <div>
+        {/* ヘッダー行（スマホは縦積み、md+は従来どおり横並び） */}
+        <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+          {/* 左側：タイトル＋説明＋設定 */}
+          <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <h1 className="text-2xl font-semibold text-neutral-900">
+              <h1 className="whitespace-nowrap text-2xl font-semibold text-neutral-900">
                 メール配信
               </h1>
-              {/* ★ ここを /email/settings に修正し、アイコン付きに */}
               <Link
                 href="/email/settings"
-                className="inline-flex items-center gap-1.5 rounded-xl border border-neutral-200 px-3 py-1.5 text-sm hover:bg-neutral-50"
+                className="inline-flex items-center gap-1.5 rounded-xl border border-neutral-200 px-3 py-1.5 text-sm hover:bg-neutral-50 whitespace-nowrap"
               >
                 <Settings
                   className="h-4 w-4 text-neutral-600"
                   strokeWidth={1.6}
                 />
-                メール用設定
+                <span className="whitespace-nowrap">メール用設定</span>
               </Link>
             </div>
             <p className="mt-1 text-sm text-neutral-500">
               キャンペーンの作成・配信とKPIの確認
             </p>
           </div>
-          <div className="flex gap-2">
+
+          {/* 右側：操作ボタン群（スマホでは下に縦積み） */}
+          <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
             <Link
               href="/campaigns/new"
-              className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
+              className="inline-flex items-center justify-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
             >
               <PlusCircle
                 className="h-5 w-5 text-neutral-600"
                 strokeWidth={1.5}
               />
-              新規キャンペーン
+              <span className="whitespace-nowrap">新規キャンペーン</span>
             </Link>
             <Link
               href="/campaigns"
-              className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
+              className="inline-flex items-center justify-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
             >
               <List className="h-5 w-5 text-neutral-600" strokeWidth={1.5} />
-              キャンペーン一覧
+              <span className="whitespace-nowrap">キャンペーン一覧</span>
             </Link>
             <Link
               href="/recipients"
-              className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
+              className="inline-flex items-center justify-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
             >
               <Users className="h-5 w-5 text-neutral-600" strokeWidth={1.5} />
-              求職者リスト
+              <span className="whitespace-nowrap">求職者リスト</span>
             </Link>
           </div>
         </div>
@@ -168,11 +170,7 @@ export default function EmailLanding() {
         </div>
 
         {/* 折れ線グラフ（期間切替） */}
-        <ChartBlock
-          range={range}
-          setRange={setRange}
-          series={data?.series ?? []}
-        />
+        <ChartBlock range={range} setRange={setRange} series={series} />
 
         {msg && (
           <pre className="mt-3 whitespace-pre-wrap text-xs text-neutral-500">
@@ -199,7 +197,7 @@ function ChartBlock({
         <div className="text-sm text-neutral-500">
           直近{labelOf(range)}の配信数
         </div>
-        <div className="flex gap-1">
+        <div className="flex flex-wrap gap-1">
           {(["7d", "14d", "1m", "3m", "6m", "1y"] as RangeKey[]).map((r) => (
             <button
               key={r}
