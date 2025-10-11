@@ -289,42 +289,42 @@ export default function RecipientsPage() {
                     <span>{safe(r.name)}</span>
                     {r.consent === "opt_out" && (
                       <span className="inline-block w-fit rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-xs text-red-600">
-                        配信停止申請
+                        配信停止
                       </span>
                     )}
                   </div>
                 </td>
                 <td className="px-3 py-3 text-neutral-600">{safe(r.email)}</td>
                 <td className="px-3 py-3 text-neutral-600">{safe(r.phone)}</td>
-                <td className="px-3 py-3 text-center text-neutral-600">
+                <td className="px-2.8 py-2.8 text-center text-neutral-600">
                   {r.gender === "male"
                     ? "男性"
                     : r.gender === "female"
                     ? "女性"
                     : ""}
                 </td>
-                <td className="px-3 py-3 text-center text-neutral-600">
+                <td className="px-2.8 py-2.8 text-center text-neutral-600">
                   {ageFromBirthday(r.birthday)}
                 </td>
-                <td className="px-3 py-3 text-center text-neutral-600">
+                <td className="px-2.8 py-2.8 text-center text-neutral-600">
                   {safe(r.region)}
                 </td>
-                <td className="px-3 py-3 text-center text-neutral-600">
+                <td className="px-2.8 py-2.8 text-center text-neutral-600">
                   {formatJob(r.job_category_large, r.job_category_small)}
                 </td>
-                <td className="px-3 py-3 text-center">
+                <td className="px-2.8 py-2.8 text-center">
                   <Toggle
                     checked={!!r.is_active}
                     onChange={(n) => toggleActive(r.id, n)}
                     label="active"
                   />
                 </td>
-                <td className="px-3 py-3 text-center">
+                <td className="px-2.8 py-2.8 text-center">
                   <div className="flex items-center justify-center gap-2">
                     {/* 編集：アイコンボタン */}
                     <Link
                       href={`/recipients/${r.id}/edit`}
-                      className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-neutral-200 hover:bg-neutral-50"
+                      className="inline-flex h-6 w-6 items-center justify-center rounded-lg border border-neutral-200 hover:bg-neutral-50"
                       title="編集"
                       aria-label="編集"
                     >
@@ -335,7 +335,7 @@ export default function RecipientsPage() {
                     {/* 削除：アイコンボタン（赤系テキスト） */}
                     <button
                       onClick={() => onDelete(r.id)}
-                      className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-neutral-200 text-red-600 hover:bg-red-50"
+                      className="inline-flex h-6 w-6 items-center justify-center rounded-lg border border-neutral-200 text-red-600 hover:bg-red-50"
                       title="削除"
                       aria-label="削除"
                       type="button"
