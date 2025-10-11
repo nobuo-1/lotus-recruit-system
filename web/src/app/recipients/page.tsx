@@ -288,15 +288,19 @@ export default function RecipientsPage() {
                   <div className="flex flex-col gap-1">
                     <span>{safe(r.name)}</span>
                     {r.consent === "opt_out" && (
-                      <span className="inline-block w-fit rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-xs text-red-600">
+                      <span className="inline-block w-fit rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-xs text-red-600 whitespace-nowrap">
                         配信停止
                       </span>
                     )}
                   </div>
                 </td>
-                <td className="px-3 py-3 text-neutral-600">{safe(r.email)}</td>
-                <td className="px-3 py-3 text-neutral-600">{safe(r.phone)}</td>
-                <td className="px-2.8 py-2.8 text-center text-neutral-600">
+                <td className="px-3 py-3 text-neutral-600 whitespace-nowrap">
+                  {safe(r.email)}
+                </td>
+                <td className="px-3 py-3 text-neutral-600 whitespace-nowrap">
+                  {safe(r.phone)}
+                </td>
+                <td className="px-2.8 py-2.8 text-center text-neutral-600 whitespace-nowrap">
                   {r.gender === "male"
                     ? "男性"
                     : r.gender === "female"
@@ -306,10 +310,10 @@ export default function RecipientsPage() {
                 <td className="px-2.8 py-2.8 text-center text-neutral-600">
                   {ageFromBirthday(r.birthday)}
                 </td>
-                <td className="px-2.8 py-2.8 text-center text-neutral-600">
+                <td className="px-2.8 py-2.8 text-center text-neutral-600 whitespace-nowrap">
                   {safe(r.region)}
                 </td>
-                <td className="px-2.8 py-2.8 text-center text-neutral-600">
+                <td className="px-2.8 py-2.8 text-center text-neutral-600 break-words">
                   {formatJob(r.job_category_large, r.job_category_small)}
                 </td>
                 <td className="px-2.2 py-2.2 text-center">
