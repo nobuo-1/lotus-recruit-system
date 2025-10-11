@@ -5,11 +5,11 @@ import type SMTPTransport from "nodemailer/lib/smtp-transport";
 /* ========= Env & defaults ========= */
 const host = process.env.SMTP_HOST!;
 const port = Number(process.env.SMTP_PORT!);
-const user = process.env.SMTP_USER || ""; // 認証（任意）
-const pass = process.env.SMTP_PASS || ""; // 認証（任意）
+const user = process.env.SMTP_USER || "";
+const pass = process.env.SMTP_PASS || "";
 
 // 技術的送信者（MAIL FROM / Sender ヘッダ）は no-reply 固定
-const defaultFrom = process.env.FROM_EMAIL!; // 例: no-reply@lotus-d-transformation.com
+const defaultFrom = process.env.FROM_EMAIL!; // 例: no-reply@your-domain
 
 const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
   /\/+$/,
@@ -49,25 +49,25 @@ export type SendArgs = {
   brandCompany?: string;
   brandAddress?: string;
   brandSupport?: string;
+
+  // 追跡ピクセル注入のため
+  deliveryId?: string;
 };
 
 // 可能ならコネクションはモジュールスコープで再利用
 const transporter = nodemailer.createTransport({
-  pool: true, // 複数通送る時にコネクション再利用
+  pool: true,
   maxConnections: 3,
   maxMessages: 50,
   host,
   port,
-  secure: port === 465, // 465=implicit TLS / 587=STARTTLS
+  secure: port === 465,
   requireTLS,
   auth: user && pass ? { user, pass } : undefined,
   tls: {
-    servername: host, // SNI
+    servername: host,
     minVersion: "TLSv1.2",
-    // 自己署名などを許容したい場合は以下をコメントアウト解除
-    // rejectUnauthorized: false,
   },
-  // 任意: DKIM 署名（鍵があれば自動で付与）
   ...(dkimDomain && dkimSelector && dkimKey
     ? {
         dkim: {
@@ -112,11 +112,7 @@ function stripLegacyFooter(
 ) {
   let out = html || "";
 
-  // 角括弧 [[UNSUB_URL]] は Math/MD 系が介入すると壊れやすいのでサポートをやめる
-  // 代表的な 3 形式のみを対象にする（これで十分運用可能）
   const TOKEN = String.raw`(?:\{\{\s*UNSUB_URL\s*\}\}|__UNSUB_URL__|%%UNSUB_URL%%)`;
-
-  // 要素ブロックを緩めに定義
   const block = (s: string) =>
     String.raw`(?:\s*(?:<div[^>]*>|<p[^>]*>)\s*${s}\s*(?:</div>|</p>)\s*)?`;
 
@@ -131,31 +127,22 @@ function stripLegacyFooter(
     : "";
   const unsub = String.raw`\s*(?:<div[^>]*>|<p[^>]*>)\s*配信停止[:：]?\s*${TOKEN}\s*(?:</div>|</p>)\s*`;
 
-  // 1) 大きな塊での一括除去（try/catchで安全化）
   try {
     const legacyRe = new RegExp(`${comp}${addr}${sup}${unsub}`, "i");
     out = out.replace(legacyRe, "");
-  } catch {
-    // 正規表現構築に失敗したらスキップ（後段の素朴除去で掃除）
-  }
+  } catch {}
 
-  // 2) 念のため、UNSUB トークンを含む行（div/p/素）を個別掃除
   try {
     const tokenLine = new RegExp(
       String.raw`\s*(?:<div[^>]*>|<p[^>]*>)?[^<\n]*${TOKEN}[^<\n]*(?:</div>|</p>)?\s*`,
       "ig"
     );
     out = out.replace(tokenLine, "");
-  } catch {
-    // 続行
-  }
+  } catch {}
 
-  // 3) プレーンに残ったトークンも空文字化
   try {
     out = out.replace(new RegExp(TOKEN, "ig"), "");
-  } catch {
-    // 続行
-  }
+  } catch {}
 
   return out;
 }
@@ -212,30 +199,41 @@ function injectFooterOnce(html: string, footer: string) {
   return `${src}\n${footer}`;
 }
 
+/** 開封ピクセルを最終末尾に注入（フッターの“後”） */
+function injectOpenPixelLast(html: string, url: string) {
+  const pixel = `<img src="${url}" alt="" width="1" height="1" style="display:none;max-width:1px;max-height:1px" />`;
+  const close = /<\/body\s*>/i;
+  return close.test(html)
+    ? html.replace(close, `${pixel}\n</body>`)
+    : `${html}\n${pixel}`;
+}
+
 export async function sendMail(args: SendArgs) {
   // ブランド情報（テナント優先 → フォールバック）
   const company = args.brandCompany || fallbackCompany;
   const address = args.brandAddress || fallbackAddress;
   const support = args.brandSupport || fallbackSupport;
 
-  // 表示上の From（ヘッダ）は fromOverride を優先、無ければ no-reply
+  // 表示上の From（ヘッダ）
   const displayFromAddress = args.fromOverride || defaultFrom;
   const fromHeader =
     company && displayFromAddress
       ? { name: company, address: displayFromAddress }
       : displayFromAddress;
 
-  // 技術的送信者（MAIL FROM / Sender / SPF）は no-reply 固定
+  // 技術的送信者（SPF/バウンス整合）
   const senderHeader = defaultFrom;
 
   // 返信先は fromOverride を優先（無ければ未設定）
   const replyToHeader = args.fromOverride || undefined;
 
-  // 配信停止URL & ヘッダ（RFC 8058 One-Click）
+  // 配信停止URL & List-Unsubscribe（Gmailの「解除」用）
   const unsubscribeUrl = buildUnsubscribeUrl(args.unsubscribeToken ?? null);
   const headers: Record<string, string> = {};
   if (unsubscribeUrl) {
-    headers["List-Unsubscribe"] = `<${unsubscribeUrl}>`;
+    // URL + mailto の両方を提示（「解除」バッジ出現率UP）
+    const mailto = support ? `, <mailto:${support}>` : "";
+    headers["List-Unsubscribe"] = `<${unsubscribeUrl}>${mailto}`;
     headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click";
   }
 
@@ -243,14 +241,22 @@ export async function sendMail(args: SendArgs) {
   const sanitizedHtml = stripLegacyFooter(args.html, company, address, support);
 
   // --- ② 自動フッターを1回だけ注入 ---
-  const finalHtml = unsubscribeUrl
+  const htmlWithFooter = unsubscribeUrl
     ? injectFooterOnce(
         sanitizedHtml,
         footerHtml(unsubscribeUrl, company, address, support)
       )
     : sanitizedHtml;
 
-  // --- ③ テキスト本文もクリーンアップしてフッターを追記 ---
+  // --- ③ 開封ピクセルは最終末尾（フッターの後） ---
+  const pixelUrl = args.deliveryId
+    ? `${appUrl}/api/email/open?id=${encodeURIComponent(args.deliveryId)}`
+    : undefined;
+  const finalHtml = pixelUrl
+    ? injectOpenPixelLast(htmlWithFooter, pixelUrl)
+    : htmlWithFooter;
+
+  // --- ④ テキスト本文もクリーンアップしてフッターを追記 ---
   const cleanedText = (args.text ?? "").replace(
     /\{\{\s*UNSUB_URL\s*\}\}|\[\[\s*UNSUB_URL\s*\]\]|__UNSUB_URL__|%%UNSUB_URL%%/gi,
     ""
@@ -262,20 +268,16 @@ export async function sendMail(args: SendArgs) {
       : "");
 
   const info = await transporter.sendMail({
-    // 表示上の From（ブランド名 + 表示アドレス）
     from: fromHeader,
-    // 実送信者（ヘッダに Sender として入る）
     sender: senderHeader,
-    // 返信先（指定アドレスに返信される）
     replyTo: replyToHeader,
     to: args.to,
     subject: args.subject,
     html: finalHtml,
     text: finalText || undefined,
     headers,
-    // ★技術的送信（MAIL FROM）は no-reply 固定（SPF/バウンス整合）
     envelope: { from: senderHeader, to: args.to },
   });
 
-  return info; // .messageId などをワーカー側で参照
+  return info;
 }

@@ -15,7 +15,7 @@ type Payload = {
   scheduleAt?: string | null; // 未来ISO→予約 / 省略→即時
 };
 
-/** CORS/プリフライト（405対策） */
+/** CORS/プリフライト */
 export async function OPTIONS() {
   return new NextResponse(null, {
     status: 204,
@@ -114,26 +114,6 @@ async function loadSenderConfigForCurrentUser() {
   };
 }
 
-/** HTML末尾に開封ピクセルを1回だけ注入（※最終末尾に来るよう最後に実行） */
-function injectOpenPixel(html: string, url: string) {
-  const pixel = `<img src="${url}" alt="" width="1" height="1" style="display:none;max-width:1px;max-height:1px;" />`;
-  return /<\/body\s*>/i.test(html)
-    ? html.replace(/<\/body\s*>/i, `${pixel}\n</body>`)
-    : `${html}\n${pixel}`;
-}
-
-function chunk<T>(arr: T[], size: number): T[][] {
-  const a = [...arr];
-  const out: T[][] = [];
-  while (a.length) out.push(a.splice(0, size));
-  return out;
-}
-
-const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
-  /\/+$/,
-  ""
-);
-
 // 簡易HTML→プレーンテキスト（text未保存DB向け）
 function htmlToText(html: string) {
   return html
@@ -145,24 +125,7 @@ function htmlToText(html: string) {
     .trim();
 }
 
-// ---- 差し込みヘルパー ----
-
-// HTMLへ挿入時のエスケープ
-function escapeHtml(s: string) {
-  return String(s)
-    .replaceAll(/&/g, "&amp;")
-    .replaceAll(/</g, "&lt;")
-    .replaceAll(/>/g, "&gt;")
-    .replaceAll(/"/g, "&quot;")
-    .replaceAll(/'/g, "&#39;");
-}
-
-// テキストへ挿入時はエスケープ不要（そのまま）
-function identity(s: string) {
-  return String(s);
-}
-
-// htmlToText でタグは剥がせますが HTML エンティティは残るので、主要なものをデコード
+// htmlToText の後に主要エンティティを戻す
 function decodeHtmlEntities(s: string) {
   return s
     .replaceAll(/&amp;/g, "&")
@@ -173,73 +136,34 @@ function decodeHtmlEntities(s: string) {
 }
 
 // 共通：{{NAME}}, {{EMAIL}} を置換する
+function escapeHtml(s: string) {
+  return String(s)
+    .replaceAll(/&/g, "&amp;")
+    .replaceAll(/</g, "&lt;")
+    .replaceAll(/>/g, "&gt;")
+    .replaceAll(/"/g, "&quot;")
+    .replaceAll(/'/g, "&#39;");
+}
+function identity(s: string) {
+  return String(s);
+}
 function personalizeTemplate(
   input: string,
   vars: { name?: string | null; email?: string | null },
-  encode: (s: string) => string // HTMLは escapeHtml、TEXTは identity
+  encode: (s: string) => string
 ) {
   const name = (vars.name ?? "").trim() || "ご担当者";
   const email = (vars.email ?? "").trim();
-  return input
+  return (input || "")
     .replaceAll(/\{\{\s*NAME\s*\}\}/g, encode(name))
     .replaceAll(/\{\{\s*EMAIL\s*\}\}/g, encode(email));
 }
 
-// ---- 可視フッター（主張しない薄グレー） ----
-function buildFooterHTML(opts: {
-  brandCompany?: string;
-  brandAddress?: string;
-  brandSupport?: string;
-  unsubscribeUrl: string;
-}) {
-  const { brandCompany, brandAddress, brandSupport, unsubscribeUrl } = opts;
-  const company = brandCompany ?? "";
-  const address = brandAddress ?? "";
-  const support = brandSupport ?? "";
-
-  return `
-    <div style="margin-top:24px;padding-top:16px;border-top:1px solid #e5e7eb;color:#6b7280;font-size:12px;line-height:1.6;">
-      ${
-        company
-          ? `<div style="font-weight:600;color:#4b5563;">${company}</div>`
-          : ""
-      }
-      ${address ? `<div>${address}</div>` : ""}
-      ${
-        support
-          ? `<div>お問い合わせ: <a href="mailto:${support}" style="color:#6b7280;text-decoration:underline;">${support}</a></div>`
-          : ""
-      }
-      <div>配信停止: <a href="${unsubscribeUrl}" style="color:#6b7280;text-decoration:underline;">こちら</a></div>
-    </div>
-  `.trim();
-}
-
-function buildFooterText(opts: {
-  brandCompany?: string;
-  brandAddress?: string;
-  brandSupport?: string;
-  unsubscribeUrl: string;
-}) {
-  const { brandCompany, brandAddress, brandSupport, unsubscribeUrl } = opts;
-  const lines = [
-    "",
-    "----------------------------------------",
-    brandCompany ? `${brandCompany}` : "",
-    brandAddress ? `${brandAddress}` : "",
-    brandSupport ? `お問い合わせ: ${brandSupport}` : "",
-    `配信停止: ${unsubscribeUrl}`,
-  ].filter(Boolean);
-  return lines.join("\n");
-}
-
-// body末尾にフッターを入れる（</body>直前に差し込む）
-function appendFooterToHTML(html: string, footerHTML: string) {
-  if (!html) return footerHTML;
-  const close = /<\/body\s*>/i;
-  return close.test(html)
-    ? html.replace(close, `${footerHTML}\n</body>`)
-    : `${html}\n${footerHTML}`;
+function chunk<T>(arr: T[], size: number): T[][] {
+  const a = [...arr];
+  const out: T[][] = [];
+  while (a.length) out.push(a.splice(0, size));
+  return out;
 }
 
 export async function POST(req: Request) {
@@ -291,7 +215,6 @@ export async function POST(req: Request) {
     }
 
     const htmlBody = ((camp as any).body_html as string | null) ?? "";
-    const textBody = htmlBody ? htmlToText(htmlBody) : undefined;
 
     // ④ 受信者（最小カラム）
     const { data: recs, error: rErr } = await sb
@@ -389,7 +312,7 @@ export async function POST(req: Request) {
         .eq("id", campaignId);
     }
 
-    // ⑧ delivery_id ←→ recipient_id map（開封ピクセル用）
+    // ⑧ delivery_id ←→ recipient_id map（開封ピクセル用に deliveryId を渡す）
     const { data: dels, error: dErr } = await sb
       .from("deliveries")
       .select("id, recipient_id")
@@ -418,24 +341,12 @@ export async function POST(req: Request) {
       ((camp as any).from_email as string | undefined) ||
       undefined;
 
-    // ⑨ キュー投入（Renderワーカーが direct_email を処理）
+    // ⑨ キュー投入
     let queued = 0;
     for (const r of targets) {
       const deliveryId = idMap.get(String(r.id)) ?? "";
-      const pixelUrl = `${appUrl}/api/email/open?id=${encodeURIComponent(
-        deliveryId
-      )}`;
 
-      // 受信者ごとの解除URL（トークンがあればそれを使う）
-      const unsubscribeUrl = (r as any).unsubscribe_token
-        ? `${appUrl}/unsubscribe?token=${encodeURIComponent(
-            (r as any).unsubscribe_token
-          )}`
-        : `${appUrl}/unsubscribe?email=${encodeURIComponent(
-            String(r.email ?? "")
-          )}`;
-
-      // 件名にも差し込み
+      // 件名/本文の差し込み（ここではフッターを付けない）
       const subjectRaw = String((camp as any).subject ?? "");
       const subjectPersonalized = personalizeTemplate(
         subjectRaw,
@@ -443,48 +354,31 @@ export async function POST(req: Request) {
         identity
       );
 
-      // HTML本文：差し込み → フッターを付与 → 開封ピクセルを最終末尾
       const htmlFilled = personalizeTemplate(
         htmlBody ?? "",
         { name: r.name, email: r.email },
         escapeHtml
       );
-      const footerHTML = buildFooterHTML({
-        brandCompany: cfg.brandCompany,
-        brandAddress: cfg.brandAddress,
-        brandSupport: cfg.brandSupport,
-        unsubscribeUrl,
-      });
-      const htmlWithFooter = appendFooterToHTML(htmlFilled, footerHTML);
-      const htmlFinal = injectOpenPixel(htmlWithFooter, pixelUrl);
 
-      // テキスト本文：差し込み（HTML→text変換）＋テキストフッター
-      const textFromHtml = htmlToText(htmlFilled); // タグ除去
-      const textPersonalizedNoFooter = decodeHtmlEntities(textFromHtml); // &amp; 等を戻す
-      const footerText = buildFooterText({
-        brandCompany: cfg.brandCompany,
-        brandAddress: cfg.brandAddress,
-        brandSupport: cfg.brandSupport,
-        unsubscribeUrl,
-      });
-      const textFinal =
-        (textPersonalizedNoFooter
-          ? `${textPersonalizedNoFooter}\n${footerText}`
-          : footerText) || undefined;
+      // テキスト本文は HTML→text 化（フッターは mailer 側が付与）
+      const textFromHtml = htmlToText(htmlFilled);
+      const textPersonalized = decodeHtmlEntities(textFromHtml) || undefined;
 
       const job: DirectEmailJob = {
         kind: "direct_email",
         to: String(r.email),
         subject: subjectPersonalized,
-        html: htmlFinal,
-        text: textFinal,
+        html: htmlFilled, // ← フッターなし
+        text: textPersonalized, // ← フッターなし
         tenantId,
         unsubscribeToken: (r as any).unsubscribe_token ?? undefined,
         fromOverride,
         brandCompany: cfg.brandCompany,
         brandAddress: cfg.brandAddress,
         brandSupport: cfg.brandSupport,
-      };
+        // 開封ピクセルは mailer 側で最終末尾に付けるため deliveryId を渡す
+        deliveryId,
+      } as any;
 
       const jobId = `camp:${campaignId}:rcpt:${r.id}:${Date.now()}`;
       await emailQueue.add("direct_email", job, {

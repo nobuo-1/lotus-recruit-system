@@ -1,5 +1,4 @@
 // web/src/worker/email.worker.ts
-import "../env";
 import { Worker } from "bullmq";
 import { redis, type EmailJob, isDirectEmailJob } from "@/server/queue";
 import { sendMail } from "@/server/mailer";
@@ -7,16 +6,12 @@ import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 const admin = supabaseAdmin();
 
+/** jobId: camp:CID:rcpt:RID:timestamp → { campaignId, recipientId } */
 function parseCampaignAndRecipient(source: string | number | undefined) {
   const s = String(source ?? "");
   const m = s.match(/^camp:([^:]+):rcpt:([^:]+):/);
   return m ? { campaignId: m[1], recipientId: m[2] } : null;
 }
-
-const APP_URL = (process.env.APP_URL || "http://localhost:3000").replace(
-  /\/+$/,
-  ""
-);
 
 const worker = new Worker<EmailJob>(
   "email",
@@ -34,22 +29,7 @@ const worker = new Worker<EmailJob>(
       return { messageId: "skipped", kind: data?.kind ?? "unknown" };
     }
 
-    // ---- Gmail「解除」対応ヘッダー作成（One-Click対応） ----
-    const listUnsubscribeUrl = data.unsubscribeToken
-      ? `${APP_URL}/unsubscribe?token=${encodeURIComponent(
-          data.unsubscribeToken
-        )}`
-      : `${APP_URL}/unsubscribe`;
-
-    const supportMail =
-      (data.brandSupport as string | undefined) || "support@example.com";
-
-    const listHeaders = {
-      "List-Unsubscribe": `<${listUnsubscribeUrl}>, <mailto:${supportMail}>`,
-      "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
-    };
-
-    // ---- 送信 ----
+    // 送信（解除ヘッダーやフッターは mailer.ts に集約）
     const info = await sendMail({
       to: data.to,
       subject: data.subject,
@@ -60,9 +40,8 @@ const worker = new Worker<EmailJob>(
       brandCompany: data.brandCompany,
       brandAddress: data.brandAddress,
       brandSupport: data.brandSupport,
-      // 型の厳しさを避けるため as any（既存 sendMail 定義を崩さずヘッダを渡す）
-      headers: listHeaders,
-    } as any);
+      deliveryId: data.deliveryId, // ← ピクセル用
+    });
 
     // ---- DB 更新 ----
     let meta = parseCampaignAndRecipient(job.id);
