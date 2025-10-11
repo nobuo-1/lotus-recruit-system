@@ -9,14 +9,15 @@ const user = process.env.SMTP_USER || "";
 const pass = process.env.SMTP_PASS || "";
 
 // 技術的送信者（MAIL FROM / Sender ヘッダ）は no-reply 固定
-const defaultFrom = process.env.FROM_EMAIL!; // 例: no-reply@your-domain
+const defaultFrom = process.env.FROM_EMAIL!; // 例: no-reply@example.com
 
-const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
+const rawAppUrl = (process.env.APP_URL || "http://localhost:3000").replace(
   /\/+$/,
   ""
 );
+// Gmail 解除UIは https を強く好むため、ヘッダー用URLは https を優先
+const appUrlHttps = rawAppUrl.replace(/^http:\/\//i, "https://");
 
-// 任意: DKIM（用意がある場合のみ有効化）
 const dkimDomain = process.env.DKIM_DOMAIN || "";
 const dkimSelector = process.env.DKIM_SELECTOR || "";
 const dkimKey =
@@ -25,7 +26,6 @@ const dkimKey =
     ? Buffer.from(process.env.DKIM_PRIVATE_KEY_B64, "base64").toString("utf8")
     : "");
 
-// TLS 要件（既定: true）
 const requireTLS =
   (process.env.SMTP_REQUIRE_TLS ?? "true").toLowerCase() !== "false";
 
@@ -44,17 +44,15 @@ export type SendArgs = {
   text?: string;
   unsubscribeToken?: string;
 
-  // テナント/ユーザー設定の上書き（表示用From）
   fromOverride?: string;
   brandCompany?: string;
   brandAddress?: string;
   brandSupport?: string;
 
-  // 追跡ピクセル注入のため
+  /** route/worker から任意で渡される配信ID（開封ピクセルURL は header 側では使わない） */
   deliveryId?: string;
 };
 
-// 可能ならコネクションはモジュールスコープで再利用
 const transporter = nodemailer.createTransport({
   pool: true,
   maxConnections: 3,
@@ -79,7 +77,7 @@ const transporter = nodemailer.createTransport({
     : {}),
 } as SMTPTransport.Options);
 
-// ---------- helpers ----------
+/* ---------- helpers ---------- */
 function escapeHtml(s: string) {
   return s.replace(
     /[&<>"']/g,
@@ -93,17 +91,22 @@ function escapeHtml(s: string) {
       }[m]!)
   );
 }
-
 function escapeRegex(s: string) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function buildUnsubscribeUrl(token?: string | null) {
-  if (!token) return null;
-  return `${appUrl}/api/unsubscribe?token=${encodeURIComponent(token)}`;
+function buildUnsubUrlForHeader(token?: string | null) {
+  // Gmail の解除UI検出用（One-Click URL は https 推奨）
+  if (!token) return `${appUrlHttps}/unsubscribe`;
+  return `${appUrlHttps}/api/unsubscribe?token=${encodeURIComponent(token)}`;
+}
+function buildUnsubUrlForBody(token?: string | null) {
+  // 本文のリンク（http でもOKだが https を維持）
+  if (!token) return `${appUrlHttps}/unsubscribe`;
+  return `${appUrlHttps}/unsubscribe?token=${encodeURIComponent(token)}`;
 }
 
-/** 既存テンプレに入っている“手書きフッター＋{{UNSUB_URL}} など”を丸ごと除去（安全版） */
+/** 旧テンプレ由来のフッター（会社名/住所/問い合わせ/配信停止）が本文中にある場合は除去 */
 function stripLegacyFooter(
   html: string,
   company: string,
@@ -112,42 +115,42 @@ function stripLegacyFooter(
 ) {
   let out = html || "";
 
-  const TOKEN = String.raw`(?:\{\{\s*UNSUB_URL\s*\}\}|__UNSUB_URL__|%%UNSUB_URL%%)`;
-  const block = (s: string) =>
-    String.raw`(?:\s*(?:<div[^>]*>|<p[^>]*>)\s*${s}\s*(?:</div>|</p>)\s*)?`;
+  // 我々の新フッター（過去に付いたもの）を安全に除去（重複防止）
+  out = out.replace(/<!--EMAIL_FOOTER_START-->[\s\S]*?<\/table>\s*/i, "");
+  out = out.replace(
+    /data-email-footer[\s\S]*?<\/td>[\s\S]*?<\/tr>[\s\S]*?<\/table>\s*/i,
+    ""
+  );
 
-  const comp = block(escapeRegex(company));
-  const addr = address ? block(escapeRegex(address)) : "";
-  const sup = support
-    ? block(
-        String.raw`(?:お問い合わせ[:：]?\s*(?:<a[^>]*>)?${escapeRegex(
-          support
-        )}(?:</a>)?)`
-      )
-    : "";
-  const unsub = String.raw`\s*(?:<div[^>]*>|<p[^>]*>)\s*配信停止[:：]?\s*${TOKEN}\s*(?:</div>|</p>)\s*`;
-
-  try {
-    const legacyRe = new RegExp(`${comp}${addr}${sup}${unsub}`, "i");
-    out = out.replace(legacyRe, "");
-  } catch {}
-
-  try {
-    const tokenLine = new RegExp(
-      String.raw`\s*(?:<div[^>]*>|<p[^>]*>)?[^<\n]*${TOKEN}[^<\n]*(?:</div>|</p>)?\s*`,
+  // “配信停止” を含むブロック（div/p/table直下）を緩めに掃除
+  out = out.replace(
+    new RegExp(
+      String.raw`(?:<div[^>]*>|<p[^>]*>|<table[^>]*>)[\s\S]{0,400}配信停止[\s\S]*?(?:</div>|</p>|</table>)`,
       "ig"
-    );
-    out = out.replace(tokenLine, "");
-  } catch {}
+    ),
+    ""
+  );
 
-  try {
-    out = out.replace(new RegExp(TOKEN, "ig"), "");
-  } catch {}
+  // 会社名・住所・問い合わせ を並べたブロック（旧レイアウト）も掃除
+  const comp = company ? String.raw`(?:${escapeRegex(company)})` : "";
+  const addr = address ? String.raw`(?:${escapeRegex(address)})` : "";
+  const sup = support
+    ? String.raw`(?:${escapeRegex(support)}|mailto:${escapeRegex(support)})`
+    : "";
+  if (comp || addr || sup) {
+    out = out.replace(
+      new RegExp(
+        String.raw`(?:<div[^>]*>|<p[^>]*>|<table[^>]*>)[\s\S]{0,400}(?:${comp}[\s\S]{0,200})?(?:${addr}[\s\S]{0,200})?(?:${sup}[\s\S]{0,200})?[\s\S]{0,400}(?:</div>|</p>|</table>)`,
+        "ig"
+      ),
+      ""
+    );
+  }
 
   return out;
 }
 
-/** 薄いグレーのフッター（HTML）。重複検知用マーカーを必ず含める */
+/** 薄いグレーのフッター（本文末尾に 1 回だけ） */
 function footerHtml(
   url: string,
   company: string,
@@ -156,7 +159,9 @@ function footerHtml(
 ) {
   const addressHtml = address ? `<div>${escapeHtml(address)}</div>` : "";
   const supportHtml = support
-    ? `<div>お問い合わせ: <a href="mailto:${escapeHtml(support)}">${escapeHtml(
+    ? `<div>お問い合わせ: <a href="mailto:${escapeHtml(
+        support
+      )}" style="color:#6b7280;text-decoration:underline;">${escapeHtml(
         support
       )}</a></div>`
     : "";
@@ -164,15 +169,14 @@ function footerHtml(
 <table role="presentation" width="100%" style="margin-top:24px;border-top:1px solid #e5e5e5">
   <tr>
     <td data-email-footer style="font:12px/1.6 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#666;padding-top:12px">
-      <div>${escapeHtml(company)}</div>
+      <div style="font-weight:600;color:#4b5563;">${escapeHtml(company)}</div>
       ${addressHtml}
       ${supportHtml}
-      <div>配信停止(クリックで即時反映されるためご注意ください): <a href="${url}" target="_blank" rel="noopener">こちら</a></div>
+      <div>配信停止: <a href="${url}" target="_blank" rel="noopener" style="color:#6b7280;text-decoration:underline;">こちら</a></div>
     </td>
   </tr>
 </table>`;
 }
-
 function footerText(
   url: string,
   company: string,
@@ -189,32 +193,22 @@ function footerText(
   return lines.join("\n");
 }
 
-/** HTML末尾（できれば </body> の直前）にフッターを「1回だけ」注入する */
+/** HTML末尾（できれば </body> の直前）にフッターを「1回だけ」注入 */
 function injectFooterOnce(html: string, footer: string) {
   const src = html || "";
   if (src.includes(FOOTER_MARK) || /data-email-footer/.test(src)) return src;
-
   const bodyClose = /<\/body\s*>/i;
-  if (bodyClose.test(src)) return src.replace(bodyClose, `${footer}\n</body>`);
-  return `${src}\n${footer}`;
-}
-
-/** 開封ピクセルを最終末尾に注入（フッターの“後”） */
-function injectOpenPixelLast(html: string, url: string) {
-  const pixel = `<img src="${url}" alt="" width="1" height="1" style="display:none;max-width:1px;max-height:1px" />`;
-  const close = /<\/body\s*>/i;
-  return close.test(html)
-    ? html.replace(close, `${pixel}\n</body>`)
-    : `${html}\n${pixel}`;
+  return bodyClose.test(src)
+    ? src.replace(bodyClose, `${footer}\n</body>`)
+    : `${src}\n${footer}`;
 }
 
 export async function sendMail(args: SendArgs) {
-  // ブランド情報（テナント優先 → フォールバック）
   const company = args.brandCompany || fallbackCompany;
   const address = args.brandAddress || fallbackAddress;
   const support = args.brandSupport || fallbackSupport;
 
-  // 表示上の From（ヘッダ）
+  // 表示上の From
   const displayFromAddress = args.fromOverride || defaultFrom;
   const fromHeader =
     company && displayFromAddress
@@ -224,48 +218,39 @@ export async function sendMail(args: SendArgs) {
   // 技術的送信者（SPF/バウンス整合）
   const senderHeader = defaultFrom;
 
-  // 返信先は fromOverride を優先（無ければ未設定）
+  // 返信先は fromOverride を優先
   const replyToHeader = args.fromOverride || undefined;
 
-  // 配信停止URL & List-Unsubscribe（Gmailの「解除」用）
-  const unsubscribeUrl = buildUnsubscribeUrl(args.unsubscribeToken ?? null);
+  // Gmail 解除UI（URL + mailto + One-Click）
+  const unsubHeaderUrl = buildUnsubUrlForHeader(args.unsubscribeToken);
+  const unsubMailto = support ? `mailto:${support}` : undefined;
+
   const headers: Record<string, string> = {};
-  if (unsubscribeUrl) {
-    // URL + mailto の両方を提示（「解除」バッジ出現率UP）
-    const mailto = support ? `, <mailto:${support}>` : "";
-    headers["List-Unsubscribe"] = `<${unsubscribeUrl}>${mailto}`;
+  if (unsubHeaderUrl) {
+    headers["List-Unsubscribe"] = unsubMailto
+      ? `<${unsubHeaderUrl}>, <${unsubMailto}>`
+      : `<${unsubHeaderUrl}>`;
     headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click";
   }
 
-  // --- ① 既存“手書きフッター”を削除 ---
+  // 既存の“手書きフッター”や旧自動フッターを除去
   const sanitizedHtml = stripLegacyFooter(args.html, company, address, support);
 
-  // --- ② 自動フッターを1回だけ注入 ---
-  const htmlWithFooter = unsubscribeUrl
-    ? injectFooterOnce(
-        sanitizedHtml,
-        footerHtml(unsubscribeUrl, company, address, support)
-      )
-    : sanitizedHtml;
-
-  // --- ③ 開封ピクセルは最終末尾（フッターの後） ---
-  const pixelUrl = args.deliveryId
-    ? `${appUrl}/api/email/open?id=${encodeURIComponent(args.deliveryId)}`
-    : undefined;
-  const finalHtml = pixelUrl
-    ? injectOpenPixelLast(htmlWithFooter, pixelUrl)
-    : htmlWithFooter;
-
-  // --- ④ テキスト本文もクリーンアップしてフッターを追記 ---
-  const cleanedText = (args.text ?? "").replace(
-    /\{\{\s*UNSUB_URL\s*\}\}|\[\[\s*UNSUB_URL\s*\]\]|__UNSUB_URL__|%%UNSUB_URL%%/gi,
-    ""
+  // 本文のフッター（本文末尾に 1 回だけ）
+  const bodyUnsubUrl = buildUnsubUrlForBody(args.unsubscribeToken);
+  const finalHtml = injectFooterOnce(
+    sanitizedHtml,
+    footerHtml(bodyUnsubUrl, company, address, support)
   );
-  const finalText =
-    cleanedText.trim() +
-    (unsubscribeUrl
-      ? `\n\n${footerText(unsubscribeUrl, company, address, support)}`
-      : "");
+
+  // テキスト本文もフッターを追記
+  const text = (args.text ?? "").trim();
+  const finalText = `${text ? text + "\n\n" : ""}${footerText(
+    bodyUnsubUrl,
+    company,
+    address,
+    support
+  )}`;
 
   const info = await transporter.sendMail({
     from: fromHeader,

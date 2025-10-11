@@ -15,7 +15,6 @@ type Payload = {
   scheduleAt?: string | null; // 未来ISO→予約 / 省略→即時
 };
 
-/** CORS/プリフライト */
 export async function OPTIONS() {
   return new NextResponse(null, {
     status: 204,
@@ -26,8 +25,6 @@ export async function OPTIONS() {
     },
   });
 }
-
-/** ルート生存確認（GET/HEADは405） */
 export async function GET() {
   return NextResponse.json({ error: "method not allowed" }, { status: 405 });
 }
@@ -40,7 +37,6 @@ async function loadSenderConfigForCurrentUser() {
   const sb = await supabaseServer();
   const { data: u } = await sb.auth.getUser();
   const user = u?.user;
-
   if (!user) {
     return {
       tenantId: undefined as string | undefined,
@@ -114,7 +110,27 @@ async function loadSenderConfigForCurrentUser() {
   };
 }
 
-// 簡易HTML→プレーンテキスト（text未保存DB向け）
+/** HTML末尾に開封ピクセルを1回だけ注入（最終末尾でOK） */
+function injectOpenPixel(html: string, url: string) {
+  const pixel = `<img src="${url}" alt="" width="1" height="1" style="display:none;max-width:1px;max-height:1px;" />`;
+  return /<\/body\s*>/i.test(html)
+    ? html.replace(/<\/body\s*>/i, `${pixel}\n</body>`)
+    : `${html}\n${pixel}`;
+}
+
+function chunk<T>(arr: T[], size: number): T[][] {
+  const a = [...arr];
+  const out: T[][] = [];
+  while (a.length) out.push(a.splice(0, size));
+  return out;
+}
+
+const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
+  /\/+$/,
+  ""
+);
+
+// 簡易HTML→プレーンテキスト
 function htmlToText(html: string) {
   return html
     .replace(/<br\s*\/?>/gi, "\n")
@@ -125,17 +141,7 @@ function htmlToText(html: string) {
     .trim();
 }
 
-// htmlToText の後に主要エンティティを戻す
-function decodeHtmlEntities(s: string) {
-  return s
-    .replaceAll(/&amp;/g, "&")
-    .replaceAll(/&lt;/g, "<")
-    .replaceAll(/&gt;/g, ">")
-    .replaceAll(/&quot;/g, '"')
-    .replaceAll(/&#39;/g, "'");
-}
-
-// 共通：{{NAME}}, {{EMAIL}} を置換する
+// 差し込みヘルパー
 function escapeHtml(s: string) {
   return String(s)
     .replaceAll(/&/g, "&amp;")
@@ -147,6 +153,14 @@ function escapeHtml(s: string) {
 function identity(s: string) {
   return String(s);
 }
+function decodeHtmlEntities(s: string) {
+  return s
+    .replaceAll(/&amp;/g, "&")
+    .replaceAll(/&lt;/g, "<")
+    .replaceAll(/&gt;/g, ">")
+    .replaceAll(/&quot;/g, '"')
+    .replaceAll(/&#39;/g, "'");
+}
 function personalizeTemplate(
   input: string,
   vars: { name?: string | null; email?: string | null },
@@ -154,21 +168,13 @@ function personalizeTemplate(
 ) {
   const name = (vars.name ?? "").trim() || "ご担当者";
   const email = (vars.email ?? "").trim();
-  return (input || "")
+  return input
     .replaceAll(/\{\{\s*NAME\s*\}\}/g, encode(name))
     .replaceAll(/\{\{\s*EMAIL\s*\}\}/g, encode(email));
 }
 
-function chunk<T>(arr: T[], size: number): T[][] {
-  const a = [...arr];
-  const out: T[][] = [];
-  while (a.length) out.push(a.splice(0, size));
-  return out;
-}
-
 export async function POST(req: Request) {
   try {
-    // ① 入力
     const body = (await req.json().catch(() => ({}))) as Partial<Payload>;
     const campaignId = String(body.campaignId ?? "");
     const recipientIds = Array.isArray(body.recipientIds)
@@ -183,7 +189,6 @@ export async function POST(req: Request) {
       );
     }
 
-    // ② 認証・tenant
     const sb = await supabaseServer();
     const { data: u } = await sb.auth.getUser();
     if (!u?.user)
@@ -193,14 +198,13 @@ export async function POST(req: Request) {
     if (!tenantId)
       return NextResponse.json({ error: "no tenant" }, { status: 400 });
 
-    // ③ キャンペーン本文
+    // キャンペーン
     const admin = supabaseAdmin();
     const { data: camp, error: campErr } = await admin
       .from("campaigns")
       .select("id, tenant_id, subject, body_html, from_email, status")
       .eq("id", campaignId)
       .maybeSingle();
-
     if (campErr) {
       console.error("[send] campaigns.select error:", campErr);
       return NextResponse.json(
@@ -215,14 +219,14 @@ export async function POST(req: Request) {
     }
 
     const htmlBody = ((camp as any).body_html as string | null) ?? "";
+    const textBody = htmlBody ? htmlToText(htmlBody) : undefined;
 
-    // ④ 受信者（最小カラム）
+    // 受信者
     const { data: recs, error: rErr } = await sb
       .from("recipients")
       .select("id, name, email, unsubscribe_token, unsubscribed_at")
       .in("id", recipientIds)
       .eq("tenant_id", tenantId);
-
     if (rErr) {
       console.error("[send] recipients.select error:", rErr);
       return NextResponse.json(
@@ -230,17 +234,14 @@ export async function POST(req: Request) {
         { status: 500 }
       );
     }
-
-    const recipients = (recs ?? []).filter((r: any) => {
-      if (!r?.email) return false;
-      if (r?.unsubscribed_at) return false;
-      return true;
-    });
-
-    if (recipients.length === 0)
+    const recipients = (recs ?? []).filter(
+      (r: any) => r?.email && !r?.unsubscribed_at
+    );
+    if (recipients.length === 0) {
       return NextResponse.json({ error: "no recipients" }, { status: 400 });
+    }
 
-    // ⑤ 重複配信防止
+    // 重複防止
     const { data: already } = await sb
       .from("deliveries")
       .select("recipient_id")
@@ -256,22 +257,23 @@ export async function POST(req: Request) {
         skipped: recipientIds.length,
       });
 
-    // ⑥ 予約 or 即時
+    // 予約 or 即時
     const now = Date.now();
     let delay = 0;
     let scheduleAt: string | null = null;
     if (scheduleAtISO) {
       const ts = Date.parse(scheduleAtISO);
-      if (Number.isNaN(ts))
+      if (Number.isNaN(ts)) {
         return NextResponse.json(
           { error: "scheduleAt が不正です" },
           { status: 400 }
         );
+      }
       delay = Math.max(0, ts - now);
       scheduleAt = new Date(ts).toISOString();
     }
 
-    // ⑦ deliveries upsert（分割）
+    // deliveries upsert
     if (scheduleAt) {
       for (const part of chunk(
         targets.map((r) => ({
@@ -283,9 +285,9 @@ export async function POST(req: Request) {
         })),
         500
       )) {
-        await sb.from("deliveries").upsert(part, {
-          onConflict: "campaign_id,recipient_id",
-        });
+        await sb
+          .from("deliveries")
+          .upsert(part, { onConflict: "campaign_id,recipient_id" });
       }
       await sb
         .from("campaigns")
@@ -302,9 +304,9 @@ export async function POST(req: Request) {
         })),
         500
       )) {
-        await sb.from("deliveries").upsert(part, {
-          onConflict: "campaign_id,recipient_id",
-        });
+        await sb
+          .from("deliveries")
+          .upsert(part, { onConflict: "campaign_id,recipient_id" });
       }
       await sb
         .from("campaigns")
@@ -312,7 +314,7 @@ export async function POST(req: Request) {
         .eq("id", campaignId);
     }
 
-    // ⑧ delivery_id ←→ recipient_id map（開封ピクセル用に deliveryId を渡す）
+    // delivery_id map（開封ピクセル）
     const { data: dels, error: dErr } = await sb
       .from("deliveries")
       .select("id, recipient_id")
@@ -322,7 +324,6 @@ export async function POST(req: Request) {
         "recipient_id",
         targets.map((t) => t.id)
       );
-
     if (dErr) {
       console.error("[send] deliveries.select error:", dErr);
       return NextResponse.json(
@@ -330,7 +331,6 @@ export async function POST(req: Request) {
         { status: 500 }
       );
     }
-
     const idMap = new Map<string, string>();
     (dels ?? []).forEach((d) =>
       idMap.set(String(d.recipient_id), String(d.id))
@@ -341,12 +341,15 @@ export async function POST(req: Request) {
       ((camp as any).from_email as string | undefined) ||
       undefined;
 
-    // ⑨ キュー投入
+    // キュー投入
     let queued = 0;
     for (const r of targets) {
       const deliveryId = idMap.get(String(r.id)) ?? "";
+      const pixelUrl = `${appUrl}/api/email/open?id=${encodeURIComponent(
+        deliveryId
+      )}`;
 
-      // 件名/本文の差し込み（ここではフッターを付けない）
+      // 件名差し込み
       const subjectRaw = String((camp as any).subject ?? "");
       const subjectPersonalized = personalizeTemplate(
         subjectRaw,
@@ -354,31 +357,32 @@ export async function POST(req: Request) {
         identity
       );
 
+      // HTML差し込み（※フッターは mailer.ts 側で付与）
       const htmlFilled = personalizeTemplate(
         htmlBody ?? "",
         { name: r.name, email: r.email },
         escapeHtml
       );
+      const htmlFinal = injectOpenPixel(htmlFilled, pixelUrl);
 
-      // テキスト本文は HTML→text 化（フッターは mailer 側が付与）
+      // TEXT差し込み（※フッターは mailer.ts 側で付与）
       const textFromHtml = htmlToText(htmlFilled);
-      const textPersonalized = decodeHtmlEntities(textFromHtml) || undefined;
+      const textPersonalized = decodeHtmlEntities(textFromHtml);
 
       const job: DirectEmailJob = {
         kind: "direct_email",
         to: String(r.email),
         subject: subjectPersonalized,
-        html: htmlFilled, // ← フッターなし
-        text: textPersonalized, // ← フッターなし
+        html: htmlFinal,
+        text: textPersonalized,
         tenantId,
         unsubscribeToken: (r as any).unsubscribe_token ?? undefined,
         fromOverride,
         brandCompany: cfg.brandCompany,
         brandAddress: cfg.brandAddress,
         brandSupport: cfg.brandSupport,
-        // 開封ピクセルは mailer 側で最終末尾に付けるため deliveryId を渡す
-        deliveryId,
-      } as any;
+        deliveryId, // 参考用
+      };
 
       const jobId = `camp:${campaignId}:rcpt:${r.id}:${Date.now()}`;
       await emailQueue.add("direct_email", job, {
