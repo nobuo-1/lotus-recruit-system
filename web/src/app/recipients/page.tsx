@@ -267,7 +267,7 @@ export default function RecipientsPage() {
       </div>
 
       <div className="overflow-x-auto rounded-2xl border border-neutral-200">
-        <table className="min-w-[980px] w-full text-sm">
+        <table className="min-w-[1080px] w-full text-sm">
           <thead className="bg-neutral-50 text-neutral-600">
             <tr>
               <th className="px-3 py-3 text-left">名前</th>
@@ -312,7 +312,7 @@ export default function RecipientsPage() {
                 <td className="px-2.8 py-2.8 text-center text-neutral-600">
                   {formatJob(r.job_category_large, r.job_category_small)}
                 </td>
-                <td className="px-2.8 py-2.8 text-center">
+                <td className="px-2.2 py-2.2 text-center">
                   <Toggle
                     checked={!!r.is_active}
                     onChange={(n) => toggleActive(r.id, n)}
@@ -340,7 +340,7 @@ export default function RecipientsPage() {
                       aria-label="削除"
                       type="button"
                     >
-                      <Trash2 className="h-3 w-3" aria-hidden="true" />
+                      <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
                       <span className="sr-only">削除</span>
                     </button>
                   </div>
