@@ -57,6 +57,7 @@ function decodeHtmlEntities(s: string) {
     .replaceAll("&quot;", '"')
     .replaceAll("&#39;", "'");
 }
+
 function personalize(
   input: string,
   vars: { name?: string | null; email?: string | null },
@@ -69,7 +70,30 @@ function personalize(
     .replaceAll(/\{\{\s*EMAIL\s*\}\}/g, encode(email));
 }
 
-/** 残骸フッターを掃除（hr罫線型/コメントマーカー/カスタム属性） */
+/** 入力が“HTMLっぽい”かの簡易判定（HTMLならそのまま扱う） */
+function isLikelyHtml(s: string) {
+  if (!s) return false;
+  return (
+    /<\s*(?:!DOCTYPE|html|head|body|p|div|span|table|br|h[1-6]|section|article|img|a)\b/i.test(
+      s
+    ) || /<\/\s*[a-z][\s\S]*?>/i.test(s)
+  );
+}
+
+/** テキスト入力をHTML化：1行目のみ太字、以降は通常。*/
+function toHtmlFromPlainTextFirstLineBold(raw: string) {
+  const t = (raw ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const escaped = escapeHtml(t);
+  const nl = escaped.indexOf("\n");
+  if (nl === -1) {
+    return `<strong>${escaped}</strong>`;
+  }
+  const first = escaped.slice(0, nl);
+  const rest = escaped.slice(nl + 1);
+  return `<strong>${first}</strong>\n${rest}`.replace(/\n/g, "<br />");
+}
+
+/** 残骸フッター掃除 */
 function stripLegacyFooter(html: string) {
   if (!html) return "";
   let out = html;
@@ -86,15 +110,15 @@ function stripLegacyFooter(html: string) {
   return out;
 }
 
-/** メール本文全体を“1枚のカード”に包む（本文 + メタ情報） */
+/** 本文+メタを“1枚カード”に統合（サイズ階層を適用） */
 function buildCardHtml(opts: {
-  innerHtml: string; // 差し込み済みの本文（HTML）
+  innerHtml: string; // 差し込み済み本文（HTML）
   company?: string;
   address?: string;
   support?: string;
   recipientEmail: string;
   unsubscribeUrl?: string | null;
-  deliveryId: string; // 表示必須（Gmail・人目にもユニーク）
+  deliveryId: string; // 表示必須
 }) {
   const {
     innerHtml,
@@ -106,43 +130,42 @@ function buildCardHtml(opts: {
     deliveryId,
   } = opts;
 
-  // 本文側の末尾に余計なhr/フッターが無いように掃除
   const clean = stripLegacyFooter(innerHtml);
 
-  const brandTop = company
-    ? `<div style="font-weight:700;color:#111827;font-size:16px;">${escapeHtml(
-        company
-      )}</div>`
-    : "";
+  // 本文は 16px、フッターは一段小さい 14px、会社/住所/配信停止は 13px、ID は 12px
+  const footerIntroStyle = "font-size:14px;color:#374151;"; // “このメールは〜宛に…”（フッター中で最大）
+  const footerMinorStyle = "font-size:13px;color:#4b5563;"; // 会社名/住所/配信停止/問い合わせ
+  const idStyle = "font-size:12px;opacity:.75;color:#4b5563;";
 
-  const addr = address
-    ? `<div style="margin-top:4px;">${escapeHtml(address)}</div>`
-    : "";
-
-  const who = `<div style="margin-top:8px;">このメールは ${
+  const who = `<div style="margin-top:8px;${footerIntroStyle}">このメールは ${
     company ? escapeHtml(company) : "弊社"
   } から <span style="white-space:nowrap">${escapeHtml(
     recipientEmail
   )}</span> 宛にお送りしています。</div>`;
-
+  const comp = company
+    ? `<div style="margin-top:6px;${footerMinorStyle}">${escapeHtml(
+        company
+      )}</div>`
+    : "";
+  const addr = address
+    ? `<div style="margin-top:2px;${footerMinorStyle}">${escapeHtml(
+        address
+      )}</div>`
+    : "";
   const sup = support
-    ? `<div style="margin-top:8px;">お問い合わせ: <a href="mailto:${escapeHtml(
+    ? `<div style="margin-top:6px;${footerMinorStyle}">お問い合わせ: <a href="mailto:${escapeHtml(
         support
       )}" style="color:#0a66c2;text-decoration:underline;">${escapeHtml(
         support
       )}</a></div>`
     : "";
-
   const unsub = unsubscribeUrl
-    ? `<div style="margin-top:8px;">配信停止: <a href="${unsubscribeUrl}" target="_blank" rel="noopener" style="color:#0a66c2;text-decoration:underline;">こちら</a></div>`
+    ? `<div style="margin-top:2px;${footerMinorStyle}">配信停止: <a href="${unsubscribeUrl}" target="_blank" rel="noopener" style="color:#0a66c2;text-decoration:underline;">こちら</a></div>`
     : "";
-
-  // ★必須表示：配信ID（固有値を視覚化）
-  const did = `<div style="margin-top:6px;opacity:.75;font-size:12px;">配信ID: ${escapeHtml(
+  const did = `<div style="margin-top:6px;${idStyle}">配信ID: ${escapeHtml(
     deliveryId
   )}</div>`;
 
-  // カード（“フッターっぽい薄灰背景と区切り線”を廃止、白地に影＋角丸）
   return `${CARD_MARK}
 <table role="presentation" width="100%" style="background:#f3f4f6;padding:16px 0;">
   <tr>
@@ -150,16 +173,14 @@ function buildCardHtml(opts: {
       <table role="presentation" width="100%" style="max-width:640px;border-radius:14px;background:#ffffff;box-shadow:0 4px 16px rgba(0,0,0,.08);border:1px solid #e5e7eb;">
         <tr>
           <td style="padding:20px;font:16px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111827;">
-            ${brandTop}
-            ${addr}
-            ${brandTop || addr ? `<div style="height:8px;"></div>` : ""}
-
-            <!-- 本文 -->
+            <!-- 本文（会社名/住所は先頭に出さない） -->
             <div>${clean}</div>
 
-            <!-- メタ情報（本文と一体） -->
+            <!-- メタ情報（本文と一体／サイズ階層つき） -->
             <div style="margin-top:20px;padding-top:12px;border-top:1px dashed #e5e7eb;">
               ${who}
+              ${comp}
+              ${addr}
               ${sup}
               ${unsub}
               ${did}
@@ -290,7 +311,6 @@ export async function POST(req: Request) {
     if (!tenantId)
       return NextResponse.json({ error: "no tenant" }, { status: 400 });
 
-    // キャンペーン本体
     const admin = supabaseAdmin();
     const { data: camp, error: campErr } = await admin
       .from("campaigns")
@@ -310,7 +330,6 @@ export async function POST(req: Request) {
     const htmlBodyRaw = ((camp as any).body_html as string | null) ?? "";
     const subjectRaw = String((camp as any).subject ?? "");
 
-    // 受信者
     const { data: recs, error: rErr } = await sb
       .from("recipients")
       .select("id, name, email, unsubscribe_token, unsubscribed_at")
@@ -328,7 +347,6 @@ export async function POST(req: Request) {
     if (recipients.length === 0)
       return NextResponse.json({ error: "no recipients" }, { status: 400 });
 
-    // 既送・予約済みを除外
     const { data: already } = await sb
       .from("deliveries")
       .select("recipient_id")
@@ -344,7 +362,6 @@ export async function POST(req: Request) {
         skipped: recipientIds.length,
       });
 
-    // 予約 or 即時
     const now = Date.now();
     let delay = 0;
     let scheduleAt: string | null = null;
@@ -359,7 +376,6 @@ export async function POST(req: Request) {
       scheduleAt = new Date(ts).toISOString();
     }
 
-    // deliveries upsert
     if (scheduleAt) {
       for (const part of chunk(
         targets.map((r) => ({
@@ -400,7 +416,6 @@ export async function POST(req: Request) {
         .eq("id", campaignId);
     }
 
-    // delivery_id 取得
     const { data: dels, error: dErr } = await sb
       .from("deliveries")
       .select("id, recipient_id")
@@ -426,7 +441,6 @@ export async function POST(req: Request) {
       ((camp as any).from_email as string | undefined) ||
       undefined;
 
-    // キュー投入
     let queued = 0;
     for (const r of targets) {
       const deliveryId = idMap.get(String(r.id)) ?? "";
@@ -446,12 +460,27 @@ export async function POST(req: Request) {
         identity
       );
 
-      // 本文（ユーザー入力）に差し込み → カード化
-      const htmlFilled = personalize(
-        htmlBodyRaw ?? "",
-        { name: r.name, email: r.email },
-        escapeHtml
-      );
+      // ===== 本文作成：HTML入力はそのまま、テキスト入力は1行目太字 =====
+      let htmlFilled: string;
+      if (isLikelyHtml(htmlBodyRaw)) {
+        // HTMLはそのまま（変数はエスケープして差し込み）
+        const htmlWithVars = personalize(
+          htmlBodyRaw,
+          { name: r.name, email: r.email },
+          escapeHtml
+        );
+        htmlFilled = htmlWithVars;
+      } else {
+        // テキスト → 変数差し込み（非エスケープ）→ エスケープ + 1行目太字 + 改行→<br>
+        const textWithVars = personalize(
+          htmlBodyRaw,
+          { name: r.name, email: r.email },
+          identity
+        );
+        htmlFilled = toHtmlFromPlainTextFirstLineBold(textWithVars);
+      }
+
+      // 1枚カード化（会社/住所は本文の先頭には出さない）
       const cardHtml = buildCardHtml({
         innerHtml: htmlFilled,
         company: cfg.brandCompany,
@@ -462,17 +491,22 @@ export async function POST(req: Request) {
         deliveryId,
       });
 
-      // ピクセルは最後に1度だけ
       const htmlFinal = injectOpenPixel(cardHtml, pixelUrl);
 
-      // プレーンテキスト（カードと同じ情報を反映）
-      const textBody = decodeHtmlEntities(htmlToText(htmlFilled));
+      // テキスト版（サイズ概念はないが情報は揃える）
+      const textBody = isLikelyHtml(htmlBodyRaw)
+        ? decodeHtmlEntities(htmlToText(htmlFilled))
+        : personalize(
+            htmlBodyRaw,
+            { name: r.name, email: r.email },
+            identity
+          ) || "";
       const textFooter = [
-        cfg.brandCompany || "",
-        cfg.brandAddress || "",
         `このメールは ${cfg.brandCompany || "弊社"} から ${String(
           r.email
         )} 宛にお送りしています。`,
+        cfg.brandCompany || "",
+        cfg.brandAddress || "",
         cfg.brandSupport ? `お問い合わせ: ${cfg.brandSupport}` : "",
         unsubUrl ? `配信停止: ${unsubUrl}` : "",
         `配信ID: ${deliveryId}`,
