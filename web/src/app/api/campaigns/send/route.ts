@@ -81,7 +81,14 @@ function isLikelyHtml(s: string) {
   );
 }
 
-/** テキスト入力→HTML：1行目だけ太字＋濃色。 */
+/** “リッチHTML”判定：該当時は無改変 */
+function isRichHtml(html: string) {
+  return /<(p|h[1-6]|table|thead|tbody|tr|td|th|ul|ol|li|blockquote|strong|b|em|i|section|article|header|footer)\b/i.test(
+    html || ""
+  );
+}
+
+/** プレーン→HTML：1行目だけ太字＋濃色 */
 function toHtmlFromPlainTextFirstLineBold(raw: string) {
   const t = (raw ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   if (!t.length) return "";
@@ -97,20 +104,12 @@ function toHtmlFromPlainTextFirstLineBold(raw: string) {
   return `<strong style="font-weight:700;color:#0b1220;">${firstHtml}</strong><br />${restHtml}`;
 }
 
-/** “リッチHTML”の判定（含まれていれば無改変） */
-function isRichHtml(html: string) {
-  const richTagRe =
-    /<(p|h[1-6]|table|thead|tbody|tr|td|th|ul|ol|li|blockquote|strong|b|em|i|section|article|header|footer)\b/i;
-  return richTagRe.test(html || "");
-}
-
-/** 軽量HTMLの1行目だけ太字＋濃色。ラッパー<div|span>がある場合にも対応。 */
+/** 軽量HTML（p/h/strong等なし）の1行目のみ太字化。div/spanラップにも対応 */
 function maybeBoldenFirstLineInLightHtml(html: string) {
   const src = html ?? "";
   if (!src.trim()) return src;
   if (isRichHtml(src)) return src;
 
-  // 先頭に単一の <div> か <span> がある場合は中身だけ加工
   const wrap = src.match(/^<\s*(div|span)\b[^>]*>/i);
   let prefix = "";
   let body = src;
@@ -136,13 +135,14 @@ function maybeBoldenFirstLineInLightHtml(html: string) {
   return `${prefix}<strong style="font-weight:700;color:#0b1220;">${first}</strong><br />${rest}${suffix}`;
 }
 
-/** 上の2つをまとめた本文HTMLビルダー */
+/** 入力に応じた本文HTML作成 */
 function buildBodyHtmlFromInput(input: string, inputIsHtml: boolean) {
-  if (inputIsHtml) return maybeBoldenFirstLineInLightHtml(input);
-  return toHtmlFromPlainTextFirstLineBold(input);
+  return inputIsHtml
+    ? maybeBoldenFirstLineInLightHtml(input)
+    : toHtmlFromPlainTextFirstLineBold(input);
 }
 
-/** 残骸フッター掃除 */
+/** 旧フッター除去 */
 function stripLegacyFooter(html: string) {
   if (!html) return "";
   let out = html;
@@ -159,20 +159,20 @@ function stripLegacyFooter(html: string) {
   return out;
 }
 
-/** 小さめ“情報チップ”（ダークモード無視のため色を強制） */
+/** 情報チップ（ダークモードでも同色） */
 function chip(html: string, extraStyle = "") {
   return `<span style="display:inline-block;margin:4px 6px 0 0;padding:4px 10px;border-radius:999px;background:#f9fafb !important;border:1px solid #e5e7eb !important;font-size:13px;line-height:1.6;color:#4b5563 !important;${extraStyle}">${html}</span>`;
 }
 
-/** 本文+メタを“1枚カード”に統合（ライト/ダーク同一見た目を強制） */
+/** 本文+メタを“1枚カード”に統合（ライト固定） */
 function buildCardHtml(opts: {
-  innerHtml: string; // 差し込み済み本文（HTML）
+  innerHtml: string;
   company?: string;
   address?: string;
   support?: string;
   recipientEmail: string;
   unsubscribeUrl?: string | null;
-  deliveryId: string; // 表示必須
+  deliveryId: string;
 }) {
   const {
     innerHtml,
@@ -186,11 +186,10 @@ function buildCardHtml(opts: {
 
   const clean = stripLegacyFooter(innerHtml);
 
-  // フッター内のサイズ階層
-  const explStyle = "font-size:14px;color:#374151;"; // “このメールは〜宛に…”
+  // フッターのサイズ階層
+  const explStyle = "font-size:14px;color:#374151;";
   const idStyle = "font-size:12px;opacity:.75;color:#4b5563;";
 
-  // 説明文（who）
   const who = `<div style="margin-top:12px;${explStyle}">
     このメールは ${company ? escapeHtml(company) : "弊社"} から
     <a href="mailto:${escapeHtml(
@@ -201,7 +200,6 @@ function buildCardHtml(opts: {
     宛にお送りしています。
   </div>`;
 
-  // 情報チップ（会社・住所・問い合わせ・配信設定）
   const chips: string[] = [];
   if (company) chips.push(chip(`運営：${escapeHtml(company)}`));
   if (address) chips.push(chip(`所在地：${escapeHtml(address)}`));
@@ -229,19 +227,19 @@ function buildCardHtml(opts: {
     deliveryId
   )}</div>`;
 
-  // ライト固定のため：bgcolor 属性＋明示背景色＋color-scheme を併用
+  // 重要：bgcolor属性＋背景色をあらゆる階層に明示し、color-schemeをlightに固定
   return `${CARD_MARK}
-<table role="presentation" width="100%" bgcolor="#f3f4f6" style="background:#f3f4f6; padding:16px 0; color-scheme: light; supported-color-schemes: light; -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;">
+<table role="presentation" width="100%" bgcolor="#f3f4f6" style="background:#f3f4f6 !important;padding:16px 0;color-scheme:light;supported-color-schemes:light;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;">
   <tr>
-    <td align="center" style="padding:0 12px;">
-      <table role="presentation" width="100%" bgcolor="#ffffff" style="max-width:640px; border-radius:14px; background:#ffffff !important; box-shadow:0 4px 16px rgba(0,0,0,.08); border:1px solid #e5e7eb; color-scheme: light; supported-color-schemes: light;">
+    <td align="center" bgcolor="#f3f4f6" style="padding:0 12px;background:#f3f4f6 !important;">
+      <table role="presentation" width="100%" bgcolor="#ffffff" style="max-width:640px;border-radius:14px;background:#ffffff !important;box-shadow:0 4px 16px rgba(0,0,0,.08);border:1px solid #e5e7eb;color-scheme:light;supported-color-schemes:light;">
         <tr>
-          <td bgcolor="#ffffff" style="padding:20px; background:#ffffff !important; font:16px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif; color:#111827 !important;">
-            <!-- 本文（テキスト/軽量HTMLは1行目が太字。リッチHTMLは無改変） -->
-            <div style="color:#111827 !important;">${clean}</div>
+          <td bgcolor="#ffffff" style="padding:20px;background:#ffffff !important;font:16px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111827 !important;">
+            <!-- 本文（プレーン/軽量HTMLは1行目太字。リッチHTMLは無改変） -->
+            <div bgcolor="#ffffff" style="background:#ffffff !important;color:#111827 !important;">${clean}</div>
 
-            <!-- メタ情報（説明文＋情報チップ＋ID） -->
-            <div style="margin-top:20px; padding-top:12px; border-top:1px dashed #e5e7eb;">
+            <!-- メタ情報 -->
+            <div bgcolor="#ffffff" style="background:#ffffff !important;margin-top:20px;padding-top:12px;border-top:1px dashed #e5e7eb;">
               ${who}
               ${chipsRow}
               ${did}
@@ -254,7 +252,7 @@ function buildCardHtml(opts: {
 </table>`;
 }
 
-/** HTML末尾に開封ピクセルを1回だけ注入 */
+/** 開封ピクセル注入 */
 function injectOpenPixel(html: string, url: string) {
   const pixel = `<img src="${url}" alt="" width="1" height="1" style="display:block;max-width:1px;max-height:1px;border:0;outline:none;" />`;
   return /<\/body\s*>/i.test(html)
@@ -521,7 +519,7 @@ export async function POST(req: Request) {
         identity
       );
 
-      // ===== 本文作成：HTML入力は軽量のみ1行目太字化、リッチはそのまま。テキスト入力はHTML化＋1行目太字 =====
+      // 本文：HTMLは軽量のみ1行目太字、リッチは無改変。テキストはHTML化＋1行目太字。
       const inputIsHtml = isLikelyHtml(htmlBodyRaw);
       const personalizedInput = personalize(
         htmlBodyRaw,
@@ -530,7 +528,7 @@ export async function POST(req: Request) {
       );
       const htmlFilled = buildBodyHtmlFromInput(personalizedInput, inputIsHtml);
 
-      // 1枚カード化（ダーク/ライト同一見た目）
+      // カード化（ライト固定）
       const cardHtml = buildCardHtml({
         innerHtml: htmlFilled,
         company: cfg.brandCompany,
