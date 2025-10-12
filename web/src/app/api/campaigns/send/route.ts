@@ -1,3 +1,4 @@
+// web/src/app/api/campaigns/send/route.ts
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -80,32 +81,65 @@ function isLikelyHtml(s: string) {
   );
 }
 
-/** ASCII英字のみ大文字化（日本語などは無変化） */
-function upperAsciiOnly(s: string) {
-  return s.replace(/[a-z]/g, (c) => c.toUpperCase());
-}
-
-/** テキスト入力をHTML化：1行目だけ太字＋少し濃い色、以降は通常。*/
+/** テキスト入力→HTML：1行目だけ太字＋濃色。 */
 function toHtmlFromPlainTextFirstLineBold(raw: string) {
   const t = (raw ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  // 空文対策
   if (!t.length) return "";
-
   const idx = t.indexOf("\n");
-  // 1行のみのとき
   if (idx === -1) {
     const firstEsc = escapeHtml(t);
-    return `<strong style="font-weight:1400;color:#0b1220;">${firstEsc}</strong>`;
+    return `<strong style="font-weight:700;color:#0b1220;">${firstEsc}</strong>`;
   }
-
-  // 1行目は太字＋少し濃い色、2行目以降は通常で<br>に
   const firstRaw = t.slice(0, idx);
   const restRaw = t.slice(idx + 1);
-
   const firstHtml = escapeHtml(firstRaw);
   const restHtml = escapeHtml(restRaw).replace(/\n/g, "<br />");
+  return `<strong style="font-weight:700;color:#0b1220;">${firstHtml}</strong><br />${restHtml}`;
+}
 
-  return `<strong style="font-weight:1400;color:#0b1220;">${firstHtml}</strong><br />${restHtml}`;
+/** “リッチHTML”の判定（含まれていれば無改変） */
+function isRichHtml(html: string) {
+  const richTagRe =
+    /<(p|h[1-6]|table|thead|tbody|tr|td|th|ul|ol|li|blockquote|strong|b|em|i|section|article|header|footer)\b/i;
+  return richTagRe.test(html || "");
+}
+
+/** 軽量HTMLの1行目だけ太字＋濃色。ラッパー<div|span>がある場合にも対応。 */
+function maybeBoldenFirstLineInLightHtml(html: string) {
+  const src = html ?? "";
+  if (!src.trim()) return src;
+  if (isRichHtml(src)) return src;
+
+  // 先頭に単一の <div> か <span> がある場合は中身だけ加工
+  const wrap = src.match(/^<\s*(div|span)\b[^>]*>/i);
+  let prefix = "";
+  let body = src;
+  let suffix = "";
+  if (wrap) {
+    prefix = wrap[0];
+    const closing = src.match(new RegExp(`</\\s*${wrap[1]}\\s*>$`, "i"));
+    if (closing) {
+      suffix = closing[0];
+      body = src.slice(prefix.length, src.length - suffix.length);
+    } else {
+      body = src.slice(prefix.length);
+    }
+  }
+
+  const normalized = body.replace(/<br\s*\/?>/gi, "<br />");
+  const idx = normalized.indexOf("<br />");
+  if (idx === -1) {
+    return `${prefix}<strong style="font-weight:700;color:#0b1220;">${normalized}</strong>${suffix}`;
+  }
+  const first = normalized.slice(0, idx);
+  const rest = normalized.slice(idx + "<br />".length);
+  return `${prefix}<strong style="font-weight:700;color:#0b1220;">${first}</strong><br />${rest}${suffix}`;
+}
+
+/** 上の2つをまとめた本文HTMLビルダー */
+function buildBodyHtmlFromInput(input: string, inputIsHtml: boolean) {
+  if (inputIsHtml) return maybeBoldenFirstLineInLightHtml(input);
+  return toHtmlFromPlainTextFirstLineBold(input);
 }
 
 /** 残骸フッター掃除 */
@@ -125,12 +159,12 @@ function stripLegacyFooter(html: string) {
   return out;
 }
 
-/** 小さめ“情報チップ”を作る（繰り返しフッター検出を外しやすい表現） */
+/** 小さめ“情報チップ”（ダークモード無視のため色を強制） */
 function chip(html: string, extraStyle = "") {
-  return `<span style="display:inline-block;margin:4px 6px 0 0;padding:4px 10px;border-radius:999px;background:#f9fafb;border:1px solid #e5e7eb;font-size:13px;line-height:1.6;color:#4b5563;${extraStyle}">${html}</span>`;
+  return `<span style="display:inline-block;margin:4px 6px 0 0;padding:4px 10px;border-radius:999px;background:#f9fafb !important;border:1px solid #e5e7eb !important;font-size:13px;line-height:1.6;color:#4b5563 !important;${extraStyle}">${html}</span>`;
 }
 
-/** 本文+メタを“1枚カード”に統合（サイズ階層を適用＆チップ化） */
+/** 本文+メタを“1枚カード”に統合（ライト/ダーク同一見た目を強制） */
 function buildCardHtml(opts: {
   innerHtml: string; // 差し込み済み本文（HTML）
   company?: string;
@@ -152,8 +186,8 @@ function buildCardHtml(opts: {
 
   const clean = stripLegacyFooter(innerHtml);
 
-  // 本文は 16px、説明文は 14px、チップは 13px、ID は 12px
-  const explStyle = "font-size:14px;color:#374151;"; // “このメールは〜宛に…”（フッター中で最大）
+  // フッター内のサイズ階層
+  const explStyle = "font-size:14px;color:#374151;"; // “このメールは〜宛に…”
   const idStyle = "font-size:12px;opacity:.75;color:#4b5563;";
 
   // 説明文（who）
@@ -195,18 +229,19 @@ function buildCardHtml(opts: {
     deliveryId
   )}</div>`;
 
+  // ライト固定のため：bgcolor 属性＋明示背景色＋color-scheme を併用
   return `${CARD_MARK}
-<table role="presentation" width="100%" style="background:#f3f4f6;padding:16px 0;">
+<table role="presentation" width="100%" bgcolor="#f3f4f6" style="background:#f3f4f6; padding:16px 0; color-scheme: light; supported-color-schemes: light; -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;">
   <tr>
     <td align="center" style="padding:0 12px;">
-      <table role="presentation" width="100%" style="max-width:640px;border-radius:14px;background:#ffffff;box-shadow:0 4px 16px rgba(0,0,0,.08);border:1px solid #e5e7eb;">
+      <table role="presentation" width="100%" bgcolor="#ffffff" style="max-width:640px; border-radius:14px; background:#ffffff !important; box-shadow:0 4px 16px rgba(0,0,0,.08); border:1px solid #e5e7eb; color-scheme: light; supported-color-schemes: light;">
         <tr>
-          <td style="padding:20px;font:16px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111827;">
-            <!-- 本文（テキスト入力は1行目が太字＋大文字化。HTML入力はそのまま） -->
-            <div>${clean}</div>
+          <td bgcolor="#ffffff" style="padding:20px; background:#ffffff !important; font:16px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif; color:#111827 !important;">
+            <!-- 本文（テキスト/軽量HTMLは1行目が太字。リッチHTMLは無改変） -->
+            <div style="color:#111827 !important;">${clean}</div>
 
             <!-- メタ情報（説明文＋情報チップ＋ID） -->
-            <div style="margin-top:20px;padding-top:12px;border-top:1px dashed #e5e7eb;">
+            <div style="margin-top:20px; padding-top:12px; border-top:1px dashed #e5e7eb;">
               ${who}
               ${chipsRow}
               ${did}
@@ -486,25 +521,16 @@ export async function POST(req: Request) {
         identity
       );
 
-      // ===== 本文作成：HTML入力はそのまま、テキスト入力は1行目太字＋大文字化 =====
-      let htmlFilled: string;
-      if (isLikelyHtml(htmlBodyRaw)) {
-        const htmlWithVars = personalize(
-          htmlBodyRaw,
-          { name: r.name, email: r.email },
-          escapeHtml
-        );
-        htmlFilled = htmlWithVars;
-      } else {
-        const textWithVars = personalize(
-          htmlBodyRaw,
-          { name: r.name, email: r.email },
-          identity
-        );
-        htmlFilled = toHtmlFromPlainTextFirstLineBold(textWithVars);
-      }
+      // ===== 本文作成：HTML入力は軽量のみ1行目太字化、リッチはそのまま。テキスト入力はHTML化＋1行目太字 =====
+      const inputIsHtml = isLikelyHtml(htmlBodyRaw);
+      const personalizedInput = personalize(
+        htmlBodyRaw,
+        { name: r.name, email: r.email },
+        inputIsHtml ? escapeHtml : identity
+      );
+      const htmlFilled = buildBodyHtmlFromInput(personalizedInput, inputIsHtml);
 
-      // 1枚カード化（メタは“情報チップ”で表現）
+      // 1枚カード化（ダーク/ライト同一見た目）
       const cardHtml = buildCardHtml({
         innerHtml: htmlFilled,
         company: cfg.brandCompany,
@@ -518,7 +544,7 @@ export async function POST(req: Request) {
       const htmlFinal = injectOpenPixel(cardHtml, pixelUrl);
 
       // テキスト版
-      const textBody = isLikelyHtml(htmlBodyRaw)
+      const textBody = inputIsHtml
         ? decodeHtmlEntities(htmlToText(htmlFilled))
         : personalize(
             htmlBodyRaw,
