@@ -95,7 +95,7 @@ function toHtmlFromPlainTextFirstLineBold(raw: string) {
   // 1行のみのとき
   if (idx === -1) {
     const firstEsc = escapeHtml(t);
-    return `<strong style="font-weight:700;color:#0b1220;">${firstEsc}</strong>`;
+    return `<strong style="font-weight:1400;color:#0b1220;">${firstEsc}</strong>`;
   }
 
   // 1行目は太字＋少し濃い色、2行目以降は通常で<br>に
@@ -105,7 +105,7 @@ function toHtmlFromPlainTextFirstLineBold(raw: string) {
   const firstHtml = escapeHtml(firstRaw);
   const restHtml = escapeHtml(restRaw).replace(/\n/g, "<br />");
 
-  return `<strong style="font-weight:700;color:#0b1220;">${firstHtml}</strong><br />${restHtml}`;
+  return `<strong style="font-weight:1400;color:#0b1220;">${firstHtml}</strong><br />${restHtml}`;
 }
 
 /** 残骸フッター掃除 */
