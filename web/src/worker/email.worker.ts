@@ -40,7 +40,6 @@ const worker = new Worker<EmailJob>(
       brandCompany: data.brandCompany,
       brandAddress: data.brandAddress,
       brandSupport: data.brandSupport,
-      deliveryId: data.deliveryId, // ← ピクセル用
     });
 
     // ---- DB 更新 ----

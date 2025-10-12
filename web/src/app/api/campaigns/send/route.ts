@@ -314,7 +314,7 @@ export async function POST(req: Request) {
         .eq("id", campaignId);
     }
 
-    // delivery_id map（開封ピクセル）
+    // delivery_id map（開封ピクセル用）
     const { data: dels, error: dErr } = await sb
       .from("deliveries")
       .select("id, recipient_id")
@@ -357,7 +357,7 @@ export async function POST(req: Request) {
         identity
       );
 
-      // HTML差し込み（※フッターは mailer.ts 側で付与）
+      // HTML差し込み（フッターは mailer.ts 側、ピクセルはここで1回）
       const htmlFilled = personalizeTemplate(
         htmlBody ?? "",
         { name: r.name, email: r.email },
@@ -365,7 +365,7 @@ export async function POST(req: Request) {
       );
       const htmlFinal = injectOpenPixel(htmlFilled, pixelUrl);
 
-      // TEXT差し込み（※フッターは mailer.ts 側で付与）
+      // TEXT差し込み（フッターは mailer.ts 側）
       const textFromHtml = htmlToText(htmlFilled);
       const textPersonalized = decodeHtmlEntities(textFromHtml);
 
@@ -381,7 +381,7 @@ export async function POST(req: Request) {
         brandCompany: cfg.brandCompany,
         brandAddress: cfg.brandAddress,
         brandSupport: cfg.brandSupport,
-        deliveryId, // 参考用
+        // deliveryId は送らない（型エラー回避 & mailer 側に不要）
       };
 
       const jobId = `camp:${campaignId}:rcpt:${r.id}:${Date.now()}`;
