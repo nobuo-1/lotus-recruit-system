@@ -85,21 +85,27 @@ function upperAsciiOnly(s: string) {
   return s.replace(/[a-z]/g, (c) => c.toUpperCase());
 }
 
-/** テキスト入力をHTML化：1行目は太字＋大文字化、以降は通常。*/
+/** テキスト入力をHTML化：1行目だけ太字＋少し濃い色、以降は通常。*/
 function toHtmlFromPlainTextFirstLineBold(raw: string) {
   const t = (raw ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  const nl = t.indexOf("\n");
-  if (nl === -1) {
-    const firstUpper = upperAsciiOnly(t);
-    const firstEsc = escapeHtml(firstUpper);
-    return `<strong style="text-transform:uppercase;">${firstEsc}</strong>`;
+  // 空文対策
+  if (!t.length) return "";
+
+  const idx = t.indexOf("\n");
+  // 1行のみのとき
+  if (idx === -1) {
+    const firstEsc = escapeHtml(t);
+    return `<strong style="font-weight:700;color:#0b1220;">${firstEsc}</strong>`;
   }
-  const firstRaw = t.slice(0, nl);
-  const restRaw = t.slice(nl + 1);
-  const firstUpper = upperAsciiOnly(firstRaw);
-  const htmlFirst = escapeHtml(firstUpper);
-  const htmlRest = escapeHtml(restRaw).replace(/\n/g, "<br />");
-  return `<strong style="text-transform:uppercase;">${htmlFirst}</strong><br />${htmlRest}`;
+
+  // 1行目は太字＋少し濃い色、2行目以降は通常で<br>に
+  const firstRaw = t.slice(0, idx);
+  const restRaw = t.slice(idx + 1);
+
+  const firstHtml = escapeHtml(firstRaw);
+  const restHtml = escapeHtml(restRaw).replace(/\n/g, "<br />");
+
+  return `<strong style="font-weight:700;color:#0b1220;">${firstHtml}</strong><br />${restHtml}`;
 }
 
 /** 残骸フッター掃除 */
@@ -526,9 +532,7 @@ export async function POST(req: Request) {
         cfg.brandCompany ? `運営：${cfg.brandCompany}` : "",
         cfg.brandAddress ? `所在地：${cfg.brandAddress}` : "",
         cfg.brandSupport ? `連絡先：${cfg.brandSupport}` : "",
-        unsubUrl
-          ? `配信設定の変更（ワンクリックで配信を止める）：${unsubUrl}`
-          : "",
+        unsubUrl ? `配信停止：${unsubUrl}` : "",
         `配信ID：${deliveryId}`,
       ]
         .filter(Boolean)
