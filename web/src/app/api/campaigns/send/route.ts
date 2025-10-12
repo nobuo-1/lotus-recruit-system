@@ -173,6 +173,67 @@ function personalizeTemplate(
     .replaceAll(/\{\{\s*EMAIL\s*\}\}/g, encode(email));
 }
 
+/* ==== 本文末尾に“常に見える”ブロック ==== */
+function buildInlineBrandHTML(opts: {
+  company?: string;
+  address?: string;
+  support?: string;
+  unsubscribeUrl: string;
+}) {
+  const { company, address, support, unsubscribeUrl } = opts;
+  return `
+<div style="margin-top:24px;padding-top:12px;border-top:1px solid #e5e7eb;font:14px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#4b5563">
+  ${
+    company
+      ? `<div style="font-weight:600;color:#374151">${escapeHtml(
+          company
+        )}</div>`
+      : ""
+  }
+  ${address ? `<div>${escapeHtml(address)}</div>` : ""}
+  ${
+    support
+      ? `<div>お問い合わせ: <a href="mailto:${escapeHtml(
+          support
+        )}" style="color:#4b5563;text-decoration:underline">${escapeHtml(
+          support
+        )}</a></div>`
+      : ""
+  }
+  <div>配信停止: <a href="${unsubscribeUrl}" style="color:#4b5563;text-decoration:underline">こちら</a></div>
+</div>`.trim();
+}
+
+function buildInlineBrandText(opts: {
+  company?: string;
+  address?: string;
+  support?: string;
+  unsubscribeUrl: string;
+}) {
+  const { company, address, support, unsubscribeUrl } = opts;
+  return [
+    "",
+    "――――――――――――――――――――――",
+    company || "",
+    address || "",
+    support ? `お問い合わせ: ${support}` : "",
+    `配信停止: ${unsubscribeUrl}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/** 旧テーブル型フッターを除去（詳細に隠れるやつ） */
+function stripOldAutoFooter(html: string) {
+  let out = html || "";
+  try {
+    // 以前の自動フッター（テーブル + data-email-footer / マーカー）
+    out = out.replace(/<!--EMAIL_FOOTER_START-->[\s\S]*?<\/table>\s*/i, "");
+    out = out.replace(/<td[^>]*data-email-footer[^>]*>[\s\S]*?<\/td>/gi, "");
+  } catch {}
+  return out;
+}
+
 export async function POST(req: Request) {
   try {
     const body = (await req.json().catch(() => ({}))) as Partial<Payload>;
@@ -219,7 +280,6 @@ export async function POST(req: Request) {
     }
 
     const htmlBody = ((camp as any).body_html as string | null) ?? "";
-    const textBody = htmlBody ? htmlToText(htmlBody) : undefined;
 
     // 受信者
     const { data: recs, error: rErr } = await sb
@@ -357,31 +417,63 @@ export async function POST(req: Request) {
         identity
       );
 
-      // HTML差し込み（フッターは mailer.ts 側、ピクセルはここで1回）
-      const htmlFilled = personalizeTemplate(
+      // 本文差し込み → 旧フッター除去 → 本文末尾ブロック追加 → ピクセル追加
+      const htmlFilledRaw = personalizeTemplate(
         htmlBody ?? "",
         { name: r.name, email: r.email },
         escapeHtml
       );
-      const htmlFinal = injectOpenPixel(htmlFilled, pixelUrl);
+      const htmlFilled = stripOldAutoFooter(htmlFilledRaw);
 
-      // TEXT差し込み（フッターは mailer.ts 側）
+      const unsubscribeUrl = (r as any).unsubscribe_token
+        ? `${appUrl}/api/unsubscribe?token=${encodeURIComponent(
+            (r as any).unsubscribe_token
+          )}`
+        : `${appUrl}/api/unsubscribe`;
+
+      const inlineBlock = buildInlineBrandHTML({
+        company: cfg.brandCompany,
+        address: cfg.brandAddress,
+        support: cfg.brandSupport,
+        unsubscribeUrl,
+      });
+
+      const htmlWithInline = /<\/body\s*>/i.test(htmlFilled)
+        ? htmlFilled.replace(/<\/body\s*>/i, `${inlineBlock}\n</body>`)
+        : `${htmlFilled}\n${inlineBlock}`;
+
+      const htmlFinal = injectOpenPixel(htmlWithInline, pixelUrl);
+
+      // TEXT 版（末尾に追記）
       const textFromHtml = htmlToText(htmlFilled);
       const textPersonalized = decodeHtmlEntities(textFromHtml);
+      const textFinal =
+        (textPersonalized
+          ? `${textPersonalized}${buildInlineBrandText({
+              company: cfg.brandCompany,
+              address: cfg.brandAddress,
+              support: cfg.brandSupport,
+              unsubscribeUrl,
+            })}`
+          : buildInlineBrandText({
+              company: cfg.brandCompany,
+              address: cfg.brandAddress,
+              support: cfg.brandSupport,
+              unsubscribeUrl,
+            })) || undefined;
 
       const job: DirectEmailJob = {
         kind: "direct_email",
         to: String(r.email),
         subject: subjectPersonalized,
         html: htmlFinal,
-        text: textPersonalized,
+        text: textFinal,
         tenantId,
         unsubscribeToken: (r as any).unsubscribe_token ?? undefined,
         fromOverride,
         brandCompany: cfg.brandCompany,
         brandAddress: cfg.brandAddress,
         brandSupport: cfg.brandSupport,
-        // deliveryId は送らない（型エラー回避 & mailer 側に不要）
       };
 
       const jobId = `camp:${campaignId}:rcpt:${r.id}:${Date.now()}`;
