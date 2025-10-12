@@ -6,6 +6,7 @@ import WheelDatePicker from "@/components/WheelDatePicker";
 import WheelTimePicker from "@/components/WheelTimePicker";
 import { PREFECTURES } from "@/constants/prefectures";
 import { JOB_CATEGORIES, JOB_LARGE } from "@/constants/jobCategories";
+import { toastSuccess, toastError } from "@/components/AppToast";
 
 type Recipient = {
   id: string;
@@ -177,8 +178,12 @@ export default function SendPage() {
     setMsg(`${res.status}: ${t}`);
 
     if (res.ok) {
+      toastSuccess(
+        mode === "now" ? "送信キューに追加しました" : "予約を作成しました"
+      );
       router.push(mode === "now" ? "/campaigns" : "/email/schedules");
     } else {
+      toastError(`送信/予約に失敗しました（${res.status}）`);
       alert(`送信/予約に失敗しました: ${res.status}\n${t}`);
     }
   };

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { PREFECTURES } from "@/constants/prefectures";
 import { JOB_CATEGORIES, JOB_LARGE } from "@/constants/jobCategories";
 import WheelDatePicker from "@/components/WheelDatePicker";
+import { toastSuccess, toastError } from "@/components/AppToast";
 
 export default function NewRecipientPage() {
   const router = useRouter();
@@ -44,8 +45,11 @@ export default function NewRecipientPage() {
     setSubmitting(false);
 
     if (res.ok) {
+      toastSuccess("保存しました");
       form?.reset();
       router.back();
+    } else {
+      toastError(`保存に失敗しました（${res.status}）`);
     }
   };
 

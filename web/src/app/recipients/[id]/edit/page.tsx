@@ -7,6 +7,7 @@ import AppHeader from "@/components/AppHeader";
 import { PREFECTURES } from "@/constants/prefectures";
 import { JOB_CATEGORIES, JOB_LARGE } from "@/constants/jobCategories";
 import { calcAgeFromBirthday } from "@/utils/date";
+import { toastSuccess, toastError } from "@/components/AppToast";
 
 export default function EditRecipientPage({
   params,
@@ -72,7 +73,12 @@ export default function EditRecipientPage({
     });
     const t = await res.text();
     setMsg(`${res.status}: ${t}`);
-    if (res.ok) router.push("/recipients");
+    if (res.ok) {
+      toastSuccess("保存しました");
+      router.push("/recipients");
+    } else {
+      toastError(`保存に失敗しました（${res.status}）`);
+    }
   };
 
   if (loading)

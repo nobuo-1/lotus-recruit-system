@@ -35,6 +35,19 @@ type Payload = {
   scheduleAt?: string | null;
 };
 
+/** 背景をライト固定（bgcolor + background-color + 背景画像(単色グラデ)） */
+function lockLight(hex: string) {
+  // 例: "#ffffff" / "#f3f4f6"
+  return (
+    [
+      `background-color:${hex} !important`,
+      // Gmail iOS の自動暗転を止めるために背景画像を併用（見た目は完全に同じ）
+      `background-image:linear-gradient(${hex}, ${hex}) !important`,
+      `background-repeat:repeat !important`,
+    ].join(";") + ";"
+  );
+}
+
 function chunk<T>(arr: T[], size: number): T[][] {
   const a = [...arr];
   const out: T[][] = [];
@@ -165,7 +178,7 @@ function chip(html: string, extra = "") {
   return `<span style="display:inline-block;margin:4px 6px 0 0;padding:4px 10px;border-radius:999px;background:#f9fafb !important;border:1px solid #e5e7eb !important;font-size:13px;line-height:1.6;color:#4b5563 !important;${extra}">${html}</span>`;
 }
 
-/** 1枚カード化（ライト固定：bgcolor + 背景画像タイル + !important） */
+/** 本文+メタを“1枚カード”に統合（見た目はそのまま、反転だけ抑止） */
 function buildCardHtml(opts: {
   innerHtml: string;
   company?: string;
@@ -184,8 +197,11 @@ function buildCardHtml(opts: {
     unsubscribeUrl,
     deliveryId,
   } = opts;
+
   const clean = stripLegacyFooter(innerHtml);
-  const explStyle = "font-size:14px;color:#374151;"; // フッター中で最大
+
+  // フッターのサイズ階層（＝変更前と同じ）
+  const explStyle = "font-size:14px;color:#374151;";
   const idStyle = "font-size:12px;opacity:.75;color:#4b5563;";
 
   const who = `<div style="margin-top:12px;${explStyle}">
@@ -224,16 +240,34 @@ function buildCardHtml(opts: {
     deliveryId
   )}</div>`;
 
+  // ★変更点：各レイヤーに lockLight() を“追加”するだけ（既存の色/角丸/影/余白は一切変更しない）
   return `${CARD_MARK}
-<table role="presentation" width="100%" bgcolor="#f3f4f6" background="${LIGHT_TILE}" style="${sLight} padding:16px 0; color-scheme:light; supported-color-schemes:light; -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;">
+<table role="presentation" width="100%" bgcolor="#f3f4f6"
+  style="background:#f3f4f6 !important;padding:16px 0;color-scheme:light;supported-color-schemes:light;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;${lockLight(
+    "#f3f4f6"
+  )}">
   <tr>
-    <td align="center" bgcolor="#f3f4f6" background="${LIGHT_TILE}" style="${sLight} padding:0 12px;">
-      <table role="presentation" width="100%" bgcolor="#ffffff" background="${WHITE_TILE}" style="max-width:640px; border-radius:14px; ${sWhite} box-shadow:0 4px 16px rgba(0,0,0,.08); border:1px solid #e5e7eb; color-scheme:light; supported-color-schemes:light;">
+    <td align="center" bgcolor="#f3f4f6" style="padding:0 12px;${lockLight(
+      "#f3f4f6"
+    )}">
+      <table role="presentation" width="100%" bgcolor="#ffffff"
+        style="max-width:640px;border-radius:14px;background:#ffffff !important;box-shadow:0 4px 16px rgba(0,0,0,.08);border:1px solid #e5e7eb;color-scheme:light;supported-color-schemes:light;${lockLight(
+          "#ffffff"
+        )}">
         <tr>
-          <td bgcolor="#ffffff" background="${WHITE_TILE}" style="${sWhite} padding:20px; font:16px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif; color:#111827 !important;">
-            <div bgcolor="#ffffff" style="${sWhite} color:#111827 !important;">${clean}</div>
+          <td bgcolor="#ffffff"
+              style="padding:20px;font:16px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111827 !important;${lockLight(
+                "#ffffff"
+              )}">
+            <!-- 本文（プレーン/軽量HTMLは1行目太字。リッチHTMLは無改変） -->
+            <div style="color:#111827 !important;${lockLight(
+              "#ffffff"
+            )}">${clean}</div>
 
-            <div bgcolor="#ffffff" style="${sWhite} margin-top:20px; padding-top:12px; border-top:1px dashed #e5e7eb;">
+            <!-- メタ情報 -->
+            <div style="margin-top:20px;padding-top:12px;border-top:1px dashed #e5e7eb;${lockLight(
+              "#ffffff"
+            )}">
               ${who}
               ${chipsRow}
               ${did}

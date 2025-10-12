@@ -2,6 +2,7 @@
 import React from "react";
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { toastSuccess, toastError } from "@/components/AppToast";
 
 type Settings = {
   from_email?: string | null;
@@ -54,6 +55,11 @@ export default function CampaignNewPage() {
     });
     const t = await res.text();
     setMsg(`${res.status}: ${t}`);
+    if (res.ok) {
+      toastSuccess("保存しました");
+    } else {
+      toastError(`保存に失敗しました（${res.status}）`);
+    }
   };
 
   const labelForBody = useMemo(
