@@ -80,17 +80,26 @@ function isLikelyHtml(s: string) {
   );
 }
 
-/** テキスト入力をHTML化：1行目のみ太字、以降は通常。*/
+/** ASCII英字のみ大文字化（日本語などは無変化） */
+function upperAsciiOnly(s: string) {
+  return s.replace(/[a-z]/g, (c) => c.toUpperCase());
+}
+
+/** テキスト入力をHTML化：1行目は太字＋大文字化、以降は通常。*/
 function toHtmlFromPlainTextFirstLineBold(raw: string) {
   const t = (raw ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  const escaped = escapeHtml(t);
-  const nl = escaped.indexOf("\n");
+  const nl = t.indexOf("\n");
   if (nl === -1) {
-    return `<strong>${escaped}</strong>`;
+    const firstUpper = upperAsciiOnly(t);
+    const firstEsc = escapeHtml(firstUpper);
+    return `<strong style="text-transform:uppercase;">${firstEsc}</strong>`;
   }
-  const first = escaped.slice(0, nl);
-  const rest = escaped.slice(nl + 1);
-  return `<strong>${first}</strong>\n${rest}`.replace(/\n/g, "<br />");
+  const firstRaw = t.slice(0, nl);
+  const restRaw = t.slice(nl + 1);
+  const firstUpper = upperAsciiOnly(firstRaw);
+  const htmlFirst = escapeHtml(firstUpper);
+  const htmlRest = escapeHtml(restRaw).replace(/\n/g, "<br />");
+  return `<strong style="text-transform:uppercase;">${htmlFirst}</strong><br />${htmlRest}`;
 }
 
 /** 残骸フッター掃除 */
@@ -110,7 +119,12 @@ function stripLegacyFooter(html: string) {
   return out;
 }
 
-/** 本文+メタを“1枚カード”に統合（サイズ階層を適用） */
+/** 小さめ“情報チップ”を作る（繰り返しフッター検出を外しやすい表現） */
+function chip(html: string, extraStyle = "") {
+  return `<span style="display:inline-block;margin:4px 6px 0 0;padding:4px 10px;border-radius:999px;background:#f9fafb;border:1px solid #e5e7eb;font-size:13px;line-height:1.6;color:#4b5563;${extraStyle}">${html}</span>`;
+}
+
+/** 本文+メタを“1枚カード”に統合（サイズ階層を適用＆チップ化） */
 function buildCardHtml(opts: {
   innerHtml: string; // 差し込み済み本文（HTML）
   company?: string;
@@ -132,37 +146,46 @@ function buildCardHtml(opts: {
 
   const clean = stripLegacyFooter(innerHtml);
 
-  // 本文は 16px、フッターは一段小さい 14px、会社/住所/配信停止は 13px、ID は 12px
-  const footerIntroStyle = "font-size:14px;color:#374151;"; // “このメールは〜宛に…”（フッター中で最大）
-  const footerMinorStyle = "font-size:13px;color:#4b5563;"; // 会社名/住所/配信停止/問い合わせ
+  // 本文は 16px、説明文は 14px、チップは 13px、ID は 12px
+  const explStyle = "font-size:14px;color:#374151;"; // “このメールは〜宛に…”（フッター中で最大）
   const idStyle = "font-size:12px;opacity:.75;color:#4b5563;";
 
-  const who = `<div style="margin-top:8px;${footerIntroStyle}">このメールは ${
-    company ? escapeHtml(company) : "弊社"
-  } から <span style="white-space:nowrap">${escapeHtml(
+  // 説明文（who）
+  const who = `<div style="margin-top:12px;${explStyle}">
+    このメールは ${company ? escapeHtml(company) : "弊社"} から
+    <a href="mailto:${escapeHtml(
+      recipientEmail
+    )}" style="color:#0a66c2;text-decoration:underline;">${escapeHtml(
     recipientEmail
-  )}</span> 宛にお送りしています。</div>`;
-  const comp = company
-    ? `<div style="margin-top:6px;${footerMinorStyle}">${escapeHtml(
-        company
-      )}</div>`
+  )}</a>
+    宛にお送りしています。
+  </div>`;
+
+  // 情報チップ（会社・住所・問い合わせ・配信設定）
+  const chips: string[] = [];
+  if (company) chips.push(chip(`運営：${escapeHtml(company)}`));
+  if (address) chips.push(chip(`所在地：${escapeHtml(address)}`));
+  if (support)
+    chips.push(
+      chip(
+        `連絡先：<a href="mailto:${escapeHtml(
+          support
+        )}" style="color:#0a66c2;text-decoration:underline;">${escapeHtml(
+          support
+        )}</a>`
+      )
+    );
+  if (unsubscribeUrl)
+    chips.push(
+      chip(
+        `<a href="${unsubscribeUrl}" target="_blank" rel="noopener" style="color:#0a66c2;text-decoration:underline;">配信設定の変更</a>`
+      )
+    );
+  const chipsRow = chips.length
+    ? `<div style="margin-top:8px;">${chips.join("")}</div>`
     : "";
-  const addr = address
-    ? `<div style="margin-top:2px;${footerMinorStyle}">${escapeHtml(
-        address
-      )}</div>`
-    : "";
-  const sup = support
-    ? `<div style="margin-top:6px;${footerMinorStyle}">お問い合わせ: <a href="mailto:${escapeHtml(
-        support
-      )}" style="color:#0a66c2;text-decoration:underline;">${escapeHtml(
-        support
-      )}</a></div>`
-    : "";
-  const unsub = unsubscribeUrl
-    ? `<div style="margin-top:2px;${footerMinorStyle}">配信停止: <a href="${unsubscribeUrl}" target="_blank" rel="noopener" style="color:#0a66c2;text-decoration:underline;">こちら</a></div>`
-    : "";
-  const did = `<div style="margin-top:6px;${idStyle}">配信ID: ${escapeHtml(
+
+  const did = `<div style="margin-top:8px;${idStyle}">配信ID: ${escapeHtml(
     deliveryId
   )}</div>`;
 
@@ -173,16 +196,13 @@ function buildCardHtml(opts: {
       <table role="presentation" width="100%" style="max-width:640px;border-radius:14px;background:#ffffff;box-shadow:0 4px 16px rgba(0,0,0,.08);border:1px solid #e5e7eb;">
         <tr>
           <td style="padding:20px;font:16px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111827;">
-            <!-- 本文（会社名/住所は先頭に出さない） -->
+            <!-- 本文（テキスト入力は1行目が太字＋大文字化。HTML入力はそのまま） -->
             <div>${clean}</div>
 
-            <!-- メタ情報（本文と一体／サイズ階層つき） -->
+            <!-- メタ情報（説明文＋情報チップ＋ID） -->
             <div style="margin-top:20px;padding-top:12px;border-top:1px dashed #e5e7eb;">
               ${who}
-              ${comp}
-              ${addr}
-              ${sup}
-              ${unsub}
+              ${chipsRow}
               ${did}
             </div>
           </td>
@@ -460,10 +480,9 @@ export async function POST(req: Request) {
         identity
       );
 
-      // ===== 本文作成：HTML入力はそのまま、テキスト入力は1行目太字 =====
+      // ===== 本文作成：HTML入力はそのまま、テキスト入力は1行目太字＋大文字化 =====
       let htmlFilled: string;
       if (isLikelyHtml(htmlBodyRaw)) {
-        // HTMLはそのまま（変数はエスケープして差し込み）
         const htmlWithVars = personalize(
           htmlBodyRaw,
           { name: r.name, email: r.email },
@@ -471,7 +490,6 @@ export async function POST(req: Request) {
         );
         htmlFilled = htmlWithVars;
       } else {
-        // テキスト → 変数差し込み（非エスケープ）→ エスケープ + 1行目太字 + 改行→<br>
         const textWithVars = personalize(
           htmlBodyRaw,
           { name: r.name, email: r.email },
@@ -480,7 +498,7 @@ export async function POST(req: Request) {
         htmlFilled = toHtmlFromPlainTextFirstLineBold(textWithVars);
       }
 
-      // 1枚カード化（会社/住所は本文の先頭には出さない）
+      // 1枚カード化（メタは“情報チップ”で表現）
       const cardHtml = buildCardHtml({
         innerHtml: htmlFilled,
         company: cfg.brandCompany,
@@ -493,7 +511,7 @@ export async function POST(req: Request) {
 
       const htmlFinal = injectOpenPixel(cardHtml, pixelUrl);
 
-      // テキスト版（サイズ概念はないが情報は揃える）
+      // テキスト版
       const textBody = isLikelyHtml(htmlBodyRaw)
         ? decodeHtmlEntities(htmlToText(htmlFilled))
         : personalize(
@@ -505,11 +523,13 @@ export async function POST(req: Request) {
         `このメールは ${cfg.brandCompany || "弊社"} から ${String(
           r.email
         )} 宛にお送りしています。`,
-        cfg.brandCompany || "",
-        cfg.brandAddress || "",
-        cfg.brandSupport ? `お問い合わせ: ${cfg.brandSupport}` : "",
-        unsubUrl ? `配信停止: ${unsubUrl}` : "",
-        `配信ID: ${deliveryId}`,
+        cfg.brandCompany ? `運営：${cfg.brandCompany}` : "",
+        cfg.brandAddress ? `所在地：${cfg.brandAddress}` : "",
+        cfg.brandSupport ? `連絡先：${cfg.brandSupport}` : "",
+        unsubUrl
+          ? `配信設定の変更（ワンクリックで配信を止める）：${unsubUrl}`
+          : "",
+        `配信ID：${deliveryId}`,
       ]
         .filter(Boolean)
         .join("\n");
