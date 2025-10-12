@@ -1,4 +1,3 @@
-// web/src/app/api/campaigns/send/route.ts
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -134,7 +133,7 @@ const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
 function htmlToText(html: string) {
   return html
     .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/(p|div|li|h[1-6]|tr|table)>/gi, "\n")
+    .replace(/<\/(p|div|li|h[1-6]|tr)>/gi, "\n")
     .replace(/<style[\s\S]*?<\/style>|<script[\s\S]*?<\/script>/gi, "")
     .replace(/<[^>]+>/g, "")
     .replace(/\n{3,}/g, "\n\n")
@@ -173,81 +172,106 @@ function personalizeTemplate(
     .replaceAll(/\{\{\s*EMAIL\s*\}\}/g, encode(email));
 }
 
-/* ==== 旧テーブル型フッターを除去（“詳細”に隠れるやつを消す） ==== */
-function stripOldAutoFooter(html: string) {
+/** ====== 追加: フッターの折りたたみ回避用ユーティリティ ====== */
+const FOOTER_MARK = "<!--EMAIL_FOOTER_START-->";
+
+function stripLegacyFooter(html: string) {
   let out = html || "";
-  // 自動フッターブロック / 既存コメントマーカーの除去
-  out = out.replace(/<!--EMAIL_FOOTER_START-->[\s\S]*?<\/table>\s*/gi, "");
-  out = out.replace(/<td[^>]*data-email-footer[^>]*>[\s\S]*?<\/td>/gi, "");
-  // よくあるトークンも消す
   out = out.replace(
     /\{\{\s*UNSUB_URL\s*\}\}|__UNSUB_URL__|%%UNSUB_URL%%/gi,
+    ""
+  );
+  out = out.replace(/<!--EMAIL_FOOTER_START-->[\s\S]*?<\/table>\s*/gi, "");
+  out = out.replace(
+    /<[^>]+data-email-footer[^>]*>[\s\S]*?<\/td>\s*<\/tr>\s*<\/table>\s*/gi,
     ""
   );
   return out;
 }
 
-/* ==== 本文末尾に“常に見える”最小フッター（テーブル版 / LinkedIn 風） ==== */
-function buildInlineBrandHTML(opts: {
+function footerHtmlCardV2(opts: {
+  url: string;
   company?: string;
   address?: string;
   support?: string;
-  unsubscribeUrl: string;
-  deliveryId?: string; // 可視のユニーク化でトリミング回避
+  recipientEmail: string;
+  deliveryId: string;
 }) {
-  const { company, address, support, unsubscribeUrl, deliveryId } = opts;
-  const idShort = (deliveryId || "").slice(-6).toUpperCase();
-  return `
-<table role="presentation" width="100%" style="margin-top:24px;border-top:1px solid #e5e7eb;">
+  const { url, company, address, support, recipientEmail, deliveryId } = opts;
+  return `${FOOTER_MARK}
+<table role="presentation" width="100%" style="margin-top:24px;">
   <tr>
-    <td style="padding-top:12px;font:14px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#374151;">
-      ${
-        company
-          ? `<div style="font-weight:600">${escapeHtml(company)}</div>`
-          : ""
-      }
-      ${address ? `<div>${escapeHtml(address)}</div>` : ""}
-      ${
-        support
-          ? `<div>お問い合わせ: <a href="mailto:${escapeHtml(
-              support
-            )}" style="color:#374151;text-decoration:underline">${escapeHtml(
-              support
-            )}</a></div>`
-          : ""
-      }
-      <div>配信停止: <a href="${unsubscribeUrl}" style="color:#374151;text-decoration:underline">こちら</a></div>
-      ${
-        idShort
-          ? `<div style="opacity:.6;font-size:12px;margin-top:4px">配信ID: ${escapeHtml(
-              idShort
-            )}</div>`
-          : ""
-      }
+    <td data-email-footer style="font:14px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111827;">
+      <table role="presentation" width="100%" style="border-radius:12px;background:#f9fafb;padding:16px;">
+        <tr><td>
+          ${
+            company
+              ? `<div style="font-weight:600;font-size:14px;color:#111827;">${escapeHtml(
+                  company
+                )}</div>`
+              : ""
+          }
+          ${
+            address
+              ? `<div style="margin-top:4px;">${escapeHtml(address)}</div>`
+              : ""
+          }
+          <div style="margin-top:8px;">このメールは ${
+            company ? escapeHtml(company) : "弊社"
+          } から <span style="white-space:nowrap">${escapeHtml(
+    recipientEmail
+  )}</span> 宛にお送りしています。</div>
+          ${
+            support
+              ? `<div style="margin-top:8px;">お問い合わせ: <a href="mailto:${escapeHtml(
+                  support
+                )}" style="color:#0a66c2;text-decoration:underline;">${escapeHtml(
+                  support
+                )}</a></div>`
+              : ""
+          }
+          <div style="margin-top:8px;">配信停止: <a href="${url}" target="_blank" rel="noopener" style="color:#0a66c2;text-decoration:underline;">こちら</a></div>
+          <div style="margin-top:6px;opacity:.75;font-size:12px;">配信ID: ${escapeHtml(
+            deliveryId
+          )}</div>
+        </td></tr>
+      </table>
     </td>
   </tr>
-</table>`.trim();
+</table>`;
 }
 
-function buildInlineBrandText(opts: {
+function footerTextV2(opts: {
+  url: string;
   company?: string;
   address?: string;
   support?: string;
-  unsubscribeUrl: string;
-  deliveryId?: string;
+  recipientEmail: string;
+  deliveryId: string;
 }) {
-  const { company, address, support, unsubscribeUrl, deliveryId } = opts;
-  const idShort = (deliveryId || "").slice(-6).toUpperCase();
+  const { url, company, address, support, recipientEmail, deliveryId } = opts;
   return [
-    "",
     company || "",
     address || "",
+    `このメールは ${
+      company || "弊社"
+    } から ${recipientEmail} 宛にお送りしています。`,
     support ? `お問い合わせ: ${support}` : "",
-    `配信停止: ${unsubscribeUrl}`,
-    idShort ? `配信ID: ${idShort}` : "",
+    `配信停止: ${url}`,
+    `配信ID: ${deliveryId}`,
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+/** HTML末尾に1回だけフッターを挿入 */
+function injectFooterOnce(html: string, footer: string) {
+  const src = html || "";
+  if (src.includes(FOOTER_MARK) || /data-email-footer/.test(src)) return src;
+  const bodyClose = /<\/body\s*>/i;
+  return bodyClose.test(src)
+    ? src.replace(bodyClose, `${footer}\n</body>`)
+    : `${src}\n${footer}`;
 }
 
 export async function POST(req: Request) {
@@ -295,7 +319,8 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
 
-    const htmlBody = ((camp as any).body_html as string | null) ?? "";
+    const htmlBodyRaw = ((camp as any).body_html as string | null) ?? "";
+    const textBodyFromHtml = htmlBodyRaw ? htmlToText(htmlBodyRaw) : undefined;
 
     // 受信者
     const { data: recs, error: rErr } = await sb
@@ -390,7 +415,7 @@ export async function POST(req: Request) {
         .eq("id", campaignId);
     }
 
-    // delivery_id map（開封ピクセル / 可視ユニークID 用）
+    // delivery_id map（開封ピクセル・表示ID用）
     const { data: dels, error: dErr } = await sb
       .from("deliveries")
       .select("id, recipient_id")
@@ -433,61 +458,62 @@ export async function POST(req: Request) {
         identity
       );
 
-      // 本文差し込み → 旧フッター除去
-      const htmlFilledRaw = personalizeTemplate(
-        htmlBody ?? "",
+      // HTML差し込み（“本文→フッター→ピクセル”の順で1回だけ）
+      // 1) 差し込み
+      const htmlFilled0 = personalizeTemplate(
+        htmlBodyRaw ?? "",
         { name: r.name, email: r.email },
         escapeHtml
       );
-      const htmlFilled = stripOldAutoFooter(htmlFilledRaw);
+      // 2) 旧フッター掃除
+      const htmlClean = stripLegacyFooter(htmlFilled0);
 
-      // 受信者ごとにユニークな末尾ブロック（Gmail のトリミング回避）
-      const unsubscribeUrl = (r as any).unsubscribe_token
+      // 3) フッター生成（固有情報: recipientEmail + deliveryId を含める → Gmailの繰り返し判定を回避）
+      const unsubUrl = r.unsubscribe_token
         ? `${appUrl}/api/unsubscribe?token=${encodeURIComponent(
-            (r as any).unsubscribe_token
+            r.unsubscribe_token
           )}`
-        : `${appUrl}/api/unsubscribe`;
+        : null;
 
-      const inlineBlock = buildInlineBrandHTML({
-        company: cfg.brandCompany,
-        address: cfg.brandAddress,
-        support: cfg.brandSupport,
-        unsubscribeUrl,
-        deliveryId,
-      });
+      let htmlWithFooter = htmlClean;
+      if (unsubUrl) {
+        const footerHtml = footerHtmlCardV2({
+          url: unsubUrl,
+          company: cfg.brandCompany,
+          address: cfg.brandAddress,
+          support: cfg.brandSupport,
+          recipientEmail: String(r.email),
+          deliveryId,
+        });
+        htmlWithFooter = injectFooterOnce(htmlWithFooter, footerHtml);
+      }
 
-      // 末尾ブロック → ピクセルの順で “</body>直前” に1回だけ注入
-      const withInline = /<\/body\s*>/i.test(htmlFilled)
-        ? htmlFilled.replace(/<\/body\s*>/i, `${inlineBlock}\n</body>`)
-        : `${htmlFilled}\n${inlineBlock}`;
-      const htmlFinal = injectOpenPixel(withInline, pixelUrl);
+      // 4) ピクセル最終末尾に注入（1回だけ）
+      const htmlFinal = injectOpenPixel(htmlWithFooter, pixelUrl);
 
-      // TEXT 版（-- のシグネチャ区切りは使わない）
-      const textFromHtml = htmlToText(htmlFilled);
-      const textPersonalized = decodeHtmlEntities(textFromHtml);
-      const textFinal =
-        (textPersonalized
-          ? `${textPersonalized}${buildInlineBrandText({
-              company: cfg.brandCompany,
-              address: cfg.brandAddress,
-              support: cfg.brandSupport,
-              unsubscribeUrl,
-              deliveryId,
-            })}`
-          : buildInlineBrandText({
-              company: cfg.brandCompany,
-              address: cfg.brandAddress,
-              support: cfg.brandSupport,
-              unsubscribeUrl,
-              deliveryId,
-            })) || undefined;
+      // TEXT差し込み + テキストフッター
+      const textFromHtml = htmlToText(htmlClean);
+      let textPersonalized = decodeHtmlEntities(textFromHtml);
+      if (unsubUrl) {
+        const textFooter = footerTextV2({
+          url: unsubUrl,
+          company: cfg.brandCompany,
+          address: cfg.brandAddress,
+          support: cfg.brandSupport,
+          recipientEmail: String(r.email),
+          deliveryId,
+        });
+        textPersonalized = textPersonalized
+          ? `${textPersonalized}\n\n${textFooter}`
+          : textFooter;
+      }
 
       const job: DirectEmailJob = {
         kind: "direct_email",
         to: String(r.email),
         subject: subjectPersonalized,
         html: htmlFinal,
-        text: textFinal,
+        text: textPersonalized,
         tenantId,
         unsubscribeToken: (r as any).unsubscribe_token ?? undefined,
         fromOverride,

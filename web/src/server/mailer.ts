@@ -8,9 +8,8 @@ const port = Number(process.env.SMTP_PORT!);
 const user = process.env.SMTP_USER || "";
 const pass = process.env.SMTP_PASS || "";
 
-// FROM_EMAIL に display 名が入っていても envelope 用に純アドレスを抽出
-const rawFrom = process.env.FROM_EMAIL!; // 例: 'Lotus Recruit <no-reply@lotus-d-transformation.com>'
-const defaultFromAddress = rawFrom.match(/<([^>]+)>/)?.[1] || rawFrom; // -> no-reply@...
+// 技術的送信者（MAIL FROM / Sender ヘッダ）は no-reply 固定
+const defaultFrom = process.env.FROM_EMAIL!; // 例: no-reply@lotus-d-transformation.com
 
 const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
   /\/+$/,
@@ -36,6 +35,9 @@ const fallbackAddress = process.env.COMPANY_ADDRESS ?? "";
 const fallbackSupport =
   process.env.SUPPORT_EMAIL ?? "no.no.mu.mu11223@gmail.com";
 
+// 重複付与を避けるためのフッターマーカー
+const FOOTER_MARK = "<!--EMAIL_FOOTER_START-->";
+
 export type SendArgs = {
   to: string;
   subject: string;
@@ -43,7 +45,7 @@ export type SendArgs = {
   text?: string;
   unsubscribeToken?: string;
 
-  // 表示上の差出人（Reply-To として扱う）
+  // 表示上の差出人としてユーザーが入れたもの（Reply-To として扱う）
   fromOverride?: string;
 
   brandCompany?: string;
@@ -51,14 +53,13 @@ export type SendArgs = {
   brandSupport?: string;
 };
 
-// 可能ならコネクションは再利用
 const transporter = nodemailer.createTransport({
   pool: true,
   maxConnections: 3,
   maxMessages: 50,
   host,
   port,
-  secure: port === 465, // 465=implicit TLS / 587=STARTTLS
+  secure: port === 465,
   requireTLS,
   auth: user && pass ? { user, pass } : undefined,
   tls: {
@@ -76,30 +77,118 @@ const transporter = nodemailer.createTransport({
     : {}),
 } as SMTPTransport.Options);
 
-// 配信停止URL（List-Unsubscribe ヘッダー用）
+// ---------- helpers ----------
+function escapeHtml(s: string) {
+  return s.replace(
+    /[&<>"']/g,
+    (m) =>
+      ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      }[m]!)
+  );
+}
+
+// 配信停止URL（ヘッダー用）
 function buildUnsubscribeUrl(token?: string | null) {
   if (!token) return null;
   return `${appUrl}/api/unsubscribe?token=${encodeURIComponent(token)}`;
 }
 
+/** 旧テンプレの手書きフッター + {{UNSUB_URL}} などを除去 */
+function stripLegacyFooter(html: string) {
+  let out = html || "";
+  // よくあるトークンを掃除（{{UNSUB_URL}}, __UNSUB_URL__, %%UNSUB_URL%%）
+  out = out.replace(
+    /\{\{\s*UNSUB_URL\s*\}\}|__UNSUB_URL__|%%UNSUB_URL%%/gi,
+    ""
+  );
+  // data-email-footer や EMAIL_FOOTER_START を含む既存ブロックを削除（重複対策）
+  out = out.replace(/<!--EMAIL_FOOTER_START-->[\s\S]*?<\/table>\s*/gi, "");
+  out = out.replace(
+    /<[^>]+data-email-footer[^>]*>[\s\S]*?<\/td>\s*<\/tr>\s*<\/table>\s*/gi,
+    ""
+  );
+  return out;
+}
+
+/** “折りたたみ回避”のカード型フッター（最小・後方互換用）。route 側で既に付与されていれば何もしない */
+function footerHtmlCard(opts: {
+  url: string;
+  company?: string;
+  address?: string;
+  support?: string;
+  recipient?: string;
+}) {
+  const { url, company, address, support, recipient } = opts;
+  const lineCompany = company
+    ? `<div style="font-weight:600;font-size:14px;color:#111827;">${escapeHtml(
+        company
+      )}</div>`
+    : "";
+  const lineAddress = address
+    ? `<div style="margin-top:4px;">${escapeHtml(address)}</div>`
+    : "";
+  const lineWho =
+    recipient || company
+      ? `<div style="margin-top:8px;">このメールは ${
+          company ? escapeHtml(company) : "弊社"
+        } から <span style="white-space:nowrap">${escapeHtml(
+          recipient || ""
+        )}</span> 宛にお送りしています。</div>`
+      : "";
+  const lineSupport = support
+    ? `<div style="margin-top:8px;">お問い合わせ: <a href="mailto:${escapeHtml(
+        support
+      )}" style="color:#0a66c2;text-decoration:underline;">${escapeHtml(
+        support
+      )}</a></div>`
+    : "";
+  const lineUnsub = `<div style="margin-top:8px;">配信停止: <a href="${url}" target="_blank" rel="noopener" style="color:#0a66c2;text-decoration:underline;">こちら</a></div>`;
+
+  return `${FOOTER_MARK}
+<table role="presentation" width="100%" style="margin-top:24px;">
+  <tr>
+    <td data-email-footer style="font:14px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111827;">
+      <table role="presentation" width="100%" style="border-radius:12px;background:#f9fafb;padding:16px;">
+        <tr><td>
+          ${lineCompany}
+          ${lineAddress}
+          ${lineWho}
+          ${lineSupport}
+          ${lineUnsub}
+        </td></tr>
+      </table>
+    </td>
+  </tr>
+</table>`;
+}
+
+/** HTML末尾に1回だけフッターを挿入 */
+function injectFooterOnce(html: string, footer: string) {
+  const src = html || "";
+  if (src.includes(FOOTER_MARK) || /data-email-footer/.test(src)) return src;
+  const bodyClose = /<\/body\s*>/i;
+  return bodyClose.test(src)
+    ? src.replace(bodyClose, `${footer}\n</body>`)
+    : `${src}\n${footer}`;
+}
+
 export async function sendMail(args: SendArgs) {
-  // ブランド表示名（表示名だけ利用。本文への会社情報は API 側で埋め込み済み）
+  // ブランド情報（テナント優先 → フォールバック）
   const company = args.brandCompany || fallbackCompany;
+  const address = args.brandAddress || fallbackAddress;
   const support = args.brandSupport || fallbackSupport;
 
-  // 表示上の From（ブランド名 + 自ドメインアドレス）
-  const fromHeader =
-    company && defaultFromAddress
-      ? { name: company, address: defaultFromAddress }
-      : defaultFromAddress;
-
-  // 技術的送信者（MAIL FROM / SPF / Sender）— 自ドメインで固定
-  const senderHeader = defaultFromAddress;
-
-  // 返信先はユーザー入力を尊重（DMARC 影響なし）
+  // --- DMARC 整合（From を自ドメインに固定） ---
+  const fromHeader = { name: company, address: defaultFrom };
+  const senderHeader = defaultFrom;
   const replyToHeader = args.fromOverride || undefined;
 
-  // Gmail の「解除」用ヘッダー（One-Click + mailto 併記）
+  // Unsubscribe（HTTPS One-Click + mailto の両方を用意）
   const unsubscribeUrl = buildUnsubscribeUrl(args.unsubscribeToken ?? null);
   const headers: Record<string, string> = {};
   if (unsubscribeUrl) {
@@ -108,17 +197,51 @@ export async function sendMail(args: SendArgs) {
     headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click";
   }
 
-  // ★本文は改変しない（フッターは API 側で本文末尾に埋め込み済み）
+  // --- 本文クリーン ---
+  let finalHtml = stripLegacyFooter(args.html);
+  let finalText = (args.text ?? "").replace(
+    /\{\{\s*UNSUB_URL\s*\}\}|__UNSUB_URL__|%%UNSUB_URL%%/gi,
+    ""
+  );
+
+  // route 側でフッター付与済みなら何もしない。付与されていないメール（後方互換）には最小フッターを補完。
+  if (unsubscribeUrl && !finalHtml.includes(FOOTER_MARK)) {
+    const htmlFooter = footerHtmlCard({
+      url: unsubscribeUrl,
+      company,
+      address,
+      support,
+      recipient: args.to,
+    });
+    finalHtml = injectFooterOnce(finalHtml, htmlFooter);
+    // text も最低限補完
+    const lines = [
+      company || "",
+      address || "",
+      args.to
+        ? `このメールは ${company || "弊社"} から ${
+            args.to
+          } 宛にお送りしています。`
+        : "",
+      support ? `お問い合わせ: ${support}` : "",
+      `配信停止: ${unsubscribeUrl}`,
+    ].filter(Boolean);
+    finalText = finalText
+      ? `${finalText}\n\n${lines.join("\n")}`
+      : lines.join("\n");
+  }
+
+  // （重要）開封ピクセルは route 側で一度だけ注入する方針に統一
+
   const info = await transporter.sendMail({
     from: fromHeader,
     sender: senderHeader,
     replyTo: replyToHeader,
     to: args.to,
     subject: args.subject,
-    html: args.html,
-    text: args.text || undefined,
+    html: finalHtml,
+    text: finalText || undefined,
     headers,
-    // SPF/バウンス整合のため envelope も自ドメイン固定
     envelope: { from: senderHeader, to: args.to },
   });
 
