@@ -8,8 +8,8 @@ import { supabaseServer } from "@/lib/supabaseServer";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 /**
- * 受け取った id / ids を is_active=false にするソフト削除。
- * 互換性維持のため { id } も { ids } も受け付けます。
+ * { id } または { ids } を受け取り、is_deleted=true にするソフト削除。
+ * is_active は配信対象切替用として存続（触らない）。
  * 成功時: { ok: true, count: <更新件数> }
  */
 export async function POST(req: Request) {
@@ -19,7 +19,6 @@ export async function POST(req: Request) {
       ids?: string[];
     };
 
-    // id か ids のいずれか必須
     const ids = Array.isArray(body.ids)
       ? body.ids.filter(Boolean)
       : body.id
@@ -32,11 +31,11 @@ export async function POST(req: Request) {
       );
     }
 
+    // 認証＆テナント取得
     const sb = await supabaseServer();
     const { data: u } = await sb.auth.getUser();
-    if (!u?.user) {
+    if (!u?.user)
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-    }
 
     const { data: prof } = await sb
       .from("profiles")
@@ -44,22 +43,20 @@ export async function POST(req: Request) {
       .eq("id", u.user.id)
       .maybeSingle();
     const tenant_id = prof?.tenant_id as string | undefined;
-    if (!tenant_id) {
+    if (!tenant_id)
       return NextResponse.json({ error: "no tenant" }, { status: 400 });
-    }
 
-    // ★ RLS回避のため admin クライアントで更新（tenant_id で絞って安全性担保）
+    // RLSの影響を避けるため admin クライアントで更新（tenant_id フィルタは厳守）
     const admin = supabaseAdmin();
     const { data, error } = await admin
       .from("recipients")
-      .update({ is_active: false, updated_at: new Date().toISOString() })
+      .update({ is_deleted: true, updated_at: new Date().toISOString() })
       .eq("tenant_id", tenant_id)
       .in("id", ids)
       .select("id");
 
-    if (error) {
+    if (error)
       return NextResponse.json({ error: error.message }, { status: 400 });
-    }
 
     return NextResponse.json({ ok: true, count: (data ?? []).length });
   } catch (e: any) {
@@ -70,7 +67,6 @@ export async function POST(req: Request) {
   }
 }
 
-// （必要なら）CORS プリフライト
 export async function OPTIONS() {
   return new NextResponse(null, {
     status: 204,

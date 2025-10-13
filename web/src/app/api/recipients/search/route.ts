@@ -1,54 +1,65 @@
 // web/src/app/api/recipients/search/route.ts
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
 
-/**
- * GET /api/recipients/search?active=0|1
- * - active=1 のときだけ is_active=true を絞り込み
- * - active=0 または未指定は全件（テナント内）
- * 返却列：UIで使う全項目（phone/consent を含む）
- */
 export async function GET(req: Request) {
   try {
-    const supabase = await supabaseServer();
+    const url = new URL(req.url);
+    const activeParam = url.searchParams.get("active"); // "1" or "0" or null
+    const onlyActive = activeParam === "1";
 
-    // 認証
-    const { data: u } = await supabase.auth.getUser();
-    if (!u?.user) return NextResponse.json({ rows: [] });
+    const sb = await supabaseServer();
+    const { data: u } = await sb.auth.getUser();
+    if (!u?.user)
+      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
-    // テナント
-    const { data: prof } = await supabase
+    const { data: prof } = await sb
       .from("profiles")
       .select("tenant_id")
       .eq("id", u.user.id)
       .maybeSingle();
+    const tenant_id = prof?.tenant_id as string | undefined;
+    if (!tenant_id)
+      return NextResponse.json({ error: "no tenant" }, { status: 400 });
 
-    const tenantId = prof?.tenant_id as string | undefined;
-    if (!tenantId) return NextResponse.json({ rows: [] });
-
-    const url = new URL(req.url);
-    const active = url.searchParams.get("active"); // "1" のときだけ active を絞る
-
-    let q = supabase
+    let q = sb
       .from("recipients")
       .select(
-        // ← 電話/consent を入れる
-        "id,name,email,phone,gender,region,birthday,job_category_large,job_category_small,job_type,is_active,consent"
+        "id,name,email,phone,gender,region,birthday,job_category_large,job_category_small,job_type,is_active,consent",
+        { count: "exact" }
       )
-      .eq("tenant_id", tenantId);
+      .eq("tenant_id", tenant_id)
+      .eq("is_deleted", false); // ← 削除済みは常に除外
 
-    if (active === "1") {
-      q = q.eq("is_active", true);
-    }
+    if (onlyActive) q = q.eq("is_active", true);
 
-    // 並び順は任意（created_at が無ければ名前）
-    const { data, error } = await q;
-    if (error) return NextResponse.json({ rows: [] });
+    const { data, error } = await q
+      .order("updated_at", { ascending: false })
+      .limit(2000);
+
+    if (error)
+      return NextResponse.json({ error: error.message }, { status: 400 });
 
     return NextResponse.json({ rows: data ?? [] });
-  } catch {
-    return NextResponse.json({ rows: [] });
+  } catch (e: any) {
+    return NextResponse.json(
+      { error: e?.message || "server error" },
+      { status: 500 }
+    );
   }
+}
+
+export async function OPTIONS() {
+  return new NextResponse(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    },
+  });
 }

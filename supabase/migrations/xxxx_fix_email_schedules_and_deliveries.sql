@@ -56,3 +56,25 @@ with check (
 alter table public.deliveries
   add constraint if not exists uniq_deliveries_campaign_recipient
   unique (campaign_id, recipient_id);
+
+
+
+
+
+
+-- recipients にソフト削除フラグを追加（無い場合のみ）2025/10/13
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name   = 'recipients'
+      AND column_name  = 'is_deleted'
+  ) THEN
+    ALTER TABLE public.recipients
+      ADD COLUMN is_deleted boolean NOT NULL DEFAULT false;
+    CREATE INDEX IF NOT EXISTS recipients_tenant_active_notdeleted_idx
+      ON public.recipients (tenant_id, is_active, is_deleted);
+  END IF;
+END$$;
