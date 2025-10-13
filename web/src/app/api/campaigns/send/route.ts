@@ -173,12 +173,25 @@ function stripLegacyFooter(html: string) {
   return out;
 }
 
-/** 情報チップ */
-function chip(html: string, extra = "") {
-  return `<span style="display:inline-block;margin:4px 6px 0 0;padding:4px 10px;border-radius:999px;background:#f9fafb !important;border:1px solid #e5e7eb !important;font-size:13px;line-height:1.6;color:#4b5563 !important;${extra}">${html}</span>`;
+/** 情報チップ（ライト固定：枠/背景/文字すべて !important） */
+function chip(html: string, extraStyle = "") {
+  return `<span
+    style="
+      display:inline-block;margin:4px 6px 0 0;padding:4px 10px;
+      border-radius:999px;
+      background:#f9fafb !important;
+      border:1px solid #e5e7eb !important;
+      color:#4b5563 !important;
+      -webkit-text-size-adjust:100%;
+      text-decoration:none !important;
+      ${extraStyle}
+    "
+  >
+    <span style="color:#4b5563 !important;">${html}</span>
+  </span>`;
 }
 
-/** 本文+メタを“1枚カード”に統合（見た目はそのまま、反転だけ抑止） */
+/** 本文+メタを“1枚カード”に統合（ライト固定を徹底） */
 function buildCardHtml(opts: {
   innerHtml: string;
   company?: string;
@@ -197,20 +210,21 @@ function buildCardHtml(opts: {
     unsubscribeUrl,
     deliveryId,
   } = opts;
-
   const clean = stripLegacyFooter(innerHtml);
 
-  // フッターのサイズ階層（＝変更前と同じ）
-  const explStyle = "font-size:14px;color:#374151;";
-  const idStyle = "font-size:12px;opacity:.75;color:#4b5563;";
+  // フッター内の文字サイズ階層
+  const explStyle = "font-size:14px;color:#374151 !important;";
+  const idStyle = "font-size:12px;opacity:.75;color:#4b5563 !important;";
+
+  // リンクは常に同じ色に固定
+  const linkStyle =
+    "color:#0a66c2 !important;text-decoration:underline !important;";
 
   const who = `<div style="margin-top:12px;${explStyle}">
     このメールは ${company ? escapeHtml(company) : "弊社"} から
     <a href="mailto:${escapeHtml(
       recipientEmail
-    )}" style="color:#0a66c2;text-decoration:underline;">${escapeHtml(
-    recipientEmail
-  )}</a>
+    )}" style="${linkStyle}">${escapeHtml(recipientEmail)}</a>
     宛にお送りしています。
   </div>`;
 
@@ -222,17 +236,16 @@ function buildCardHtml(opts: {
       chip(
         `連絡先：<a href="mailto:${escapeHtml(
           support
-        )}" style="color:#0a66c2;text-decoration:underline;">${escapeHtml(
-          support
-        )}</a>`
+        )}" style="${linkStyle}">${escapeHtml(support)}</a>`
       )
     );
   if (unsubscribeUrl)
     chips.push(
       chip(
-        `<a href="${unsubscribeUrl}" target="_blank" rel="noopener" style="color:#0a66c2;text-decoration:underline;">配信停止</a>`
+        `<a href="${unsubscribeUrl}" target="_blank" rel="noopener" style="${linkStyle}">配信停止</a>`
       )
     );
+
   const chipsRow = chips.length
     ? `<div style="margin-top:8px;">${chips.join("")}</div>`
     : "";
@@ -240,38 +253,58 @@ function buildCardHtml(opts: {
     deliveryId
   )}</div>`;
 
-  // ★変更点：各レイヤーに lockLight() を“追加”するだけ（既存の色/角丸/影/余白は一切変更しない）
+  // 重要ポイント：
+  // - bgcolor 属性を併用
+  // - background / color / border に !important
+  // - color-scheme を light/only light
+  // - すべてのレイヤーで #ffffff / #111827 / #e5e7eb を明示
   return `${CARD_MARK}
 <table role="presentation" width="100%" bgcolor="#f3f4f6"
-  style="background:#f3f4f6 !important;padding:16px 0;color-scheme:light;supported-color-schemes:light;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;${lockLight(
-    "#f3f4f6"
-  )}">
+  style="
+    background:#f3f4f6 !important;padding:16px 0;
+    color-scheme:only light; supported-color-schemes:light;
+    -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+  ">
   <tr>
-    <td align="center" bgcolor="#f3f4f6" style="padding:0 12px;${lockLight(
-      "#f3f4f6"
-    )}">
+    <td align="center" bgcolor="#f3f4f6" style="padding:0 12px;background:#f3f4f6 !important;">
       <table role="presentation" width="100%" bgcolor="#ffffff"
-        style="max-width:640px;border-radius:14px;background:#ffffff !important;box-shadow:0 4px 16px rgba(0,0,0,.08);border:1px solid #e5e7eb;color-scheme:light;supported-color-schemes:light;${lockLight(
-          "#ffffff"
-        )}">
+        style="
+          max-width:640px;border-radius:14px;
+          background:#ffffff !important;
+          box-shadow:0 4px 16px rgba(0,0,0,.08);
+          border:1px solid #e5e7eb !important;
+          color-scheme:only light; supported-color-schemes:light;
+        ">
         <tr>
           <td bgcolor="#ffffff"
-              style="padding:20px;font:16px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111827 !important;${lockLight(
-                "#ffffff"
-              )}">
+            style="
+              padding:20px;background:#ffffff !important;
+              font:16px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+              color:#111827 !important;
+            ">
+
             <!-- 本文（プレーン/軽量HTMLは1行目太字。リッチHTMLは無改変） -->
-            <div style="color:#111827 !important;${lockLight(
-              "#ffffff"
-            )}">${clean}</div>
+            <div bgcolor="#ffffff"
+              style="
+                background:#ffffff !important;
+                color:#111827 !important;
+                -webkit-font-smoothing:antialiased;
+              ">
+              ${clean}
+            </div>
 
             <!-- メタ情報 -->
-            <div style="margin-top:20px;padding-top:12px;border-top:1px dashed #e5e7eb;${lockLight(
-              "#ffffff"
-            )}">
+            <div bgcolor="#ffffff"
+              style="
+                background:#ffffff !important;
+                margin-top:20px;padding-top:12px;
+                border-top:1px dashed #e5e7eb !important;
+              ">
               ${who}
               ${chipsRow}
               ${did}
             </div>
+
           </td>
         </tr>
       </table>

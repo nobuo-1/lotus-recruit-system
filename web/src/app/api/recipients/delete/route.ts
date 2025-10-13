@@ -1,29 +1,83 @@
+// web/src/app/api/recipients/delete/route.ts
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
 
+/**
+ * 受け取った id / ids を is_active=false にするソフト削除。
+ * 互換性維持のため { id } も { ids } も受け付けます。
+ * 成功時: { ok: true, count: <更新件数> }
+ */
 export async function POST(req: Request) {
-  const { id } = await req.json();
-  if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
+  try {
+    const body = (await req.json().catch(() => ({}))) as {
+      id?: string;
+      ids?: string[];
+    };
 
-  const supabase = await supabaseServer();
-  const { data: u } = await supabase.auth.getUser();
-  if (!u?.user)
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    // id か ids のいずれか必須
+    const ids = Array.isArray(body.ids)
+      ? body.ids.filter(Boolean)
+      : body.id
+      ? [body.id]
+      : [];
 
-  const { data: prof } = await supabase
-    .from("profiles")
-    .select("tenant_id")
-    .eq("id", u.user.id)
-    .maybeSingle();
-  const tenant_id = prof?.tenant_id;
+    if (ids.length === 0) {
+      return NextResponse.json(
+        { error: "id or ids required" },
+        { status: 400 }
+      );
+    }
 
-  const { error } = await supabase
-    .from("recipients")
-    .delete()
-    .eq("id", id)
-    .eq("tenant_id", tenant_id);
-  if (error)
-    return NextResponse.json({ error: error.message }, { status: 400 });
+    const supabase = await supabaseServer();
+    const { data: u } = await supabase.auth.getUser();
+    if (!u?.user) {
+      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    }
 
-  return NextResponse.json({ ok: true });
+    const { data: prof } = await supabase
+      .from("profiles")
+      .select("tenant_id")
+      .eq("id", u.user.id)
+      .maybeSingle();
+
+    const tenant_id = prof?.tenant_id as string | undefined;
+    if (!tenant_id) {
+      return NextResponse.json({ error: "no tenant" }, { status: 400 });
+    }
+
+    // 物理削除ではなく、is_active=false に更新（ソフト削除）
+    const { data, error } = await supabase
+      .from("recipients")
+      .update({ is_active: false, updated_at: new Date().toISOString() })
+      .eq("tenant_id", tenant_id)
+      .in("id", ids)
+      .select("id"); // 影響件数を知るため
+
+    if (error) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
+
+    return NextResponse.json({ ok: true, count: (data ?? []).length });
+  } catch (e: any) {
+    return NextResponse.json(
+      { error: e?.message || "server error" },
+      { status: 500 }
+    );
+  }
+}
+
+// （必要なら）CORS プリフライト
+export async function OPTIONS() {
+  return new NextResponse(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    },
+  });
 }
