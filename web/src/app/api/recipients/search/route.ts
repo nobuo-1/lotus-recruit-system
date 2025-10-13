@@ -26,24 +26,37 @@ export async function GET(req: Request) {
     if (!tenant_id)
       return NextResponse.json({ error: "no tenant" }, { status: 400 });
 
-    let q = sb
-      .from("recipients")
-      .select(
-        "id,name,email,phone,gender,region,birthday,job_category_large,job_category_small,job_type,is_active,consent",
-        { count: "exact" }
-      )
-      .eq("tenant_id", tenant_id)
-      .eq("is_deleted", false); // ← 削除済みは常に除外
+    // 共通のSELECT列
+    const selectCols =
+      "id,name,email,phone,gender,region,birthday,job_category_large,job_category_small,job_type,is_active,consent";
 
-    if (onlyActive) q = q.eq("is_active", true);
+    // クエリビルダー（withDeletedFilter=true で is_deleted=false を付与）
+    const buildQuery = (withDeletedFilter: boolean) => {
+      let q = sb
+        .from("recipients")
+        .select(selectCols, { count: "exact" })
+        .eq("tenant_id", tenant_id);
+      if (withDeletedFilter) q = q.eq("is_deleted", false);
+      if (onlyActive) q = q.eq("is_active", true);
+      return q.order("updated_at", { ascending: false }).limit(2000);
+    };
 
-    const { data, error } = await q
-      .order("updated_at", { ascending: false })
-      .limit(2000);
+    // まずは is_deleted=false 付きでトライ
+    let { data, error } = await buildQuery(true);
+
+    // 列が無い環境では 42703（undefined_column）等になるのでフォールバック
+    if (
+      error &&
+      (error.code === "42703" || (error.message ?? "").includes("is_deleted"))
+    ) {
+      const r2 = await buildQuery(false);
+      if (r2.error)
+        return NextResponse.json({ error: r2.error.message }, { status: 400 });
+      return NextResponse.json({ rows: r2.data ?? [] });
+    }
 
     if (error)
       return NextResponse.json({ error: error.message }, { status: 400 });
-
     return NextResponse.json({ rows: data ?? [] });
   } catch (e: any) {
     return NextResponse.json(
