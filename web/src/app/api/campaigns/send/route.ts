@@ -28,6 +28,8 @@ const sWhite =
 const sLight =
   `background:#f3f4f6 !important; background-color:#f3f4f6 !important; ` +
   `background-image:url('${LIGHT_TILE}') !important; background-repeat:repeat !important;`;
+const CHIP_TILE =
+  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1' height='1'%3E%3Crect width='1' height='1' fill='%23f9fafb'/%3E%3C/svg%3E";
 
 type Payload = {
   campaignId: string;
@@ -35,17 +37,23 @@ type Payload = {
   scheduleAt?: string | null;
 };
 
-/** 背景をライト固定（bgcolor + background-color + 背景画像(単色グラデ)） */
+/** 背景をライト固定：bgcolor + background-color + 1pxタイル画像 */
 function lockLight(hex: string) {
-  // 例: "#ffffff" / "#f3f4f6"
-  return (
-    [
-      `background-color:${hex} !important`,
-      // Gmail iOS の自動暗転を止めるために背景画像を併用（見た目は完全に同じ）
-      `background-image:linear-gradient(${hex}, ${hex}) !important`,
-      `background-repeat:repeat !important`,
-    ].join(";") + ";"
-  );
+  const h = (hex || "").toLowerCase();
+  let tile = "";
+  if (h === "#ffffff") tile = WHITE_TILE;
+  else if (h === "#f3f4f6") tile = LIGHT_TILE;
+  else if (h === "#f9fafb") tile = CHIP_TILE;
+
+  // Gmail iOS の自動暗転対策：背景画像も同色で敷く
+  return [
+    `background:${h} !important`,
+    `background-color:${h} !important`,
+    tile ? `background-image:url('${tile}') !important` : "",
+    tile ? `background-repeat:repeat !important` : "",
+  ]
+    .filter(Boolean)
+    .join(";");
 }
 
 function chunk<T>(arr: T[], size: number): T[][] {
@@ -173,25 +181,23 @@ function stripLegacyFooter(html: string) {
   return out;
 }
 
-/** 情報チップ（ライト固定：枠/背景/文字すべて !important） */
-function chip(html: string, extraStyle = "") {
-  return `<span
-    style="
-      display:inline-block;margin:4px 6px 0 0;padding:4px 10px;
-      border-radius:999px;
-      background:#f9fafb !important;
-      border:1px solid #e5e7eb !important;
-      color:#4b5563 !important;
-      -webkit-text-size-adjust:100%;
-      text-decoration:none !important;
-      ${extraStyle}
-    "
-  >
-    <span style="color:#4b5563 !important;">${html}</span>
-  </span>`;
+/** 情報チップ（見た目そのまま。色だけライト固定を強化） */
+function chip(html: string, extra = "") {
+  return `<span style="
+    display:inline-block;
+    margin:4px 6px 0 0;
+    padding:4px 10px;
+    border-radius:999px;
+    border:1px solid #e5e7eb !important;
+    ${lockLight("#f9fafb")};
+    font-size:13px !important;
+    line-height:1.6;
+    color:#4b5563 !important;
+    ${extra}
+  ">${html}</span>`;
 }
 
-/** 本文+メタを“1枚カード”に統合（ライト固定を徹底） */
+/** 本文+メタを“1枚カード”に統合（見た目はそのまま、反転だけ抑止） */
 function buildCardHtml(opts: {
   innerHtml: string;
   company?: string;
@@ -210,21 +216,20 @@ function buildCardHtml(opts: {
     unsubscribeUrl,
     deliveryId,
   } = opts;
+
   const clean = stripLegacyFooter(innerHtml);
 
-  // フッター内の文字サイズ階層
+  // フッターのサイズ階層（＝変更前と同じ）
   const explStyle = "font-size:14px;color:#374151 !important;";
   const idStyle = "font-size:12px;opacity:.75;color:#4b5563 !important;";
-
-  // リンクは常に同じ色に固定
-  const linkStyle =
-    "color:#0a66c2 !important;text-decoration:underline !important;";
 
   const who = `<div style="margin-top:12px;${explStyle}">
     このメールは ${company ? escapeHtml(company) : "弊社"} から
     <a href="mailto:${escapeHtml(
       recipientEmail
-    )}" style="${linkStyle}">${escapeHtml(recipientEmail)}</a>
+    )}" style="color:#0a66c2;text-decoration:underline;">${escapeHtml(
+    recipientEmail
+  )}</a>
     宛にお送りしています。
   </div>`;
 
@@ -236,16 +241,17 @@ function buildCardHtml(opts: {
       chip(
         `連絡先：<a href="mailto:${escapeHtml(
           support
-        )}" style="${linkStyle}">${escapeHtml(support)}</a>`
+        )}" style="color:#0a66c2;text-decoration:underline;">${escapeHtml(
+          support
+        )}</a>`
       )
     );
   if (unsubscribeUrl)
     chips.push(
       chip(
-        `<a href="${unsubscribeUrl}" target="_blank" rel="noopener" style="${linkStyle}">配信停止</a>`
+        `<a href="${unsubscribeUrl}" target="_blank" rel="noopener" style="color:#0a66c2;text-decoration:underline;">配信停止</a>`
       )
     );
-
   const chipsRow = chips.length
     ? `<div style="margin-top:8px;">${chips.join("")}</div>`
     : "";
@@ -253,58 +259,38 @@ function buildCardHtml(opts: {
     deliveryId
   )}</div>`;
 
-  // 重要ポイント：
-  // - bgcolor 属性を併用
-  // - background / color / border に !important
-  // - color-scheme を light/only light
-  // - すべてのレイヤーで #ffffff / #111827 / #e5e7eb を明示
+  // ★変更点：各レイヤーに lockLight() を“追加”するだけ（既存の色/角丸/影/余白は一切変更しない）
   return `${CARD_MARK}
 <table role="presentation" width="100%" bgcolor="#f3f4f6"
-  style="
-    background:#f3f4f6 !important;padding:16px 0;
-    color-scheme:only light; supported-color-schemes:light;
-    -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
-  ">
+  style="background:#f3f4f6 !important;padding:16px 0;color-scheme:light;supported-color-schemes:light;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;${lockLight(
+    "#f3f4f6"
+  )}">
   <tr>
-    <td align="center" bgcolor="#f3f4f6" style="padding:0 12px;background:#f3f4f6 !important;">
-      <table role="presentation" width="100%" bgcolor="#ffffff"
-        style="
-          max-width:640px;border-radius:14px;
-          background:#ffffff !important;
-          box-shadow:0 4px 16px rgba(0,0,0,.08);
-          border:1px solid #e5e7eb !important;
-          color-scheme:only light; supported-color-schemes:light;
-        ">
+    <td align="center" bgcolor="#f3f4f6" style="padding:0 12px;${lockLight(
+      "#f3f4f6"
+    )}">
+    <table role="presentation" width="100%" bgcolor="#ffffff"
+    style="max-width:640px;border-radius:14px;background:#ffffff !important;box-shadow:0 4px 16px rgba(0,0,0,.08);border:1px solid #e5e7eb !important;color-scheme:light;supported-color-schemes:light;${lockLight(
+      "#ffffff"
+    )}">
         <tr>
           <td bgcolor="#ffffff"
-            style="
-              padding:20px;background:#ffffff !important;
-              font:16px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
-              color:#111827 !important;
-            ">
-
+              style="padding:20px;font:16px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111827 !important;${lockLight(
+                "#ffffff"
+              )}">
             <!-- 本文（プレーン/軽量HTMLは1行目太字。リッチHTMLは無改変） -->
-            <div bgcolor="#ffffff"
-              style="
-                background:#ffffff !important;
-                color:#111827 !important;
-                -webkit-font-smoothing:antialiased;
-              ">
-              ${clean}
-            </div>
+            <div style="color:#111827 !important;${lockLight(
+              "#ffffff"
+            )}">${clean}</div>
 
             <!-- メタ情報 -->
-            <div bgcolor="#ffffff"
-              style="
-                background:#ffffff !important;
-                margin-top:20px;padding-top:12px;
-                border-top:1px dashed #e5e7eb !important;
-              ">
+            <div style="margin-top:20px;padding-top:12px;border-top:1px dashed #e5e7eb;${lockLight(
+              "#ffffff"
+            )}">
               ${who}
               ${chipsRow}
               ${did}
             </div>
-
           </td>
         </tr>
       </table>
