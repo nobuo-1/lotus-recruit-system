@@ -16,45 +16,11 @@ const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
 );
 const CARD_MARK = "<!--EMAIL_CARD_START-->";
 
-// SVG 1px タイル（暗転を防ぐため背景画像としても敷く）
-const WHITE_TILE =
-  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1' height='1'%3E%3Crect width='1' height='1' fill='%23ffffff'/%3E%3C/svg%3E";
-const LIGHT_TILE =
-  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1' height='1'%3E%3Crect width='1' height='1' fill='%23f3f4f6'/%3E%3C/svg%3E";
-
-const sWhite =
-  `background:#ffffff !important; background-color:#ffffff !important; ` +
-  `background-image:url('${WHITE_TILE}') !important; background-repeat:repeat !important;`;
-const sLight =
-  `background:#f3f4f6 !important; background-color:#f3f4f6 !important; ` +
-  `background-image:url('${LIGHT_TILE}') !important; background-repeat:repeat !important;`;
-const CHIP_TILE =
-  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1' height='1'%3E%3Crect width='1' height='1' fill='%23f9fafb'/%3E%3C/svg%3E";
-
 type Payload = {
   campaignId: string;
   recipientIds: string[];
   scheduleAt?: string | null;
 };
-
-/** 背景をライト固定：bgcolor + background-color + 1pxタイル画像 */
-function lockLight(hex: string) {
-  const h = (hex || "").toLowerCase();
-  let tile = "";
-  if (h === "#ffffff") tile = WHITE_TILE;
-  else if (h === "#f3f4f6") tile = LIGHT_TILE;
-  else if (h === "#f9fafb") tile = CHIP_TILE;
-
-  // Gmail iOS の自動暗転対策：背景画像も同色で敷く
-  return [
-    `background:${h} !important`,
-    `background-color:${h} !important`,
-    tile ? `background-image:url('${tile}') !important` : "",
-    tile ? `background-repeat:repeat !important` : "",
-  ]
-    .filter(Boolean)
-    .join(";");
-}
 
 function chunk<T>(arr: T[], size: number): T[][] {
   const a = [...arr];
@@ -62,6 +28,7 @@ function chunk<T>(arr: T[], size: number): T[][] {
   while (a.length) out.push(a.splice(0, size));
   return out;
 }
+
 function htmlToText(html: string) {
   return html
     .replace(/<br\s*\/?>/gi, "\n")
@@ -71,6 +38,7 @@ function htmlToText(html: string) {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
+
 function escapeHtml(s: string) {
   return String(s)
     .replaceAll("&", "&amp;")
@@ -103,7 +71,7 @@ function personalize(
     .replaceAll(/\{\{\s*EMAIL\s*\}\}/g, encode(email));
 }
 
-/** “HTMLっぽい”簡易判定 */
+/** 入力が“HTMLっぽい”かの簡易判定（HTMLならそのまま扱う） */
 function isLikelyHtml(s: string) {
   if (!s) return false;
   return (
@@ -112,54 +80,64 @@ function isLikelyHtml(s: string) {
     ) || /<\/\s*[a-z][\s\S]*?>/i.test(s)
   );
 }
-/** リッチHTML判定（該当は無改変） */
+
+/** “リッチHTML”判定：該当時は無改変 */
 function isRichHtml(html: string) {
   return /<(p|h[1-6]|table|thead|tbody|tr|td|th|ul|ol|li|blockquote|strong|b|em|i|section|article|header|footer)\b/i.test(
     html || ""
   );
 }
 
-/** テキスト → HTML（1行目のみ太字＋濃色） */
+/** プレーン→HTML：1行目だけ太字＋濃色 */
 function toHtmlFromPlainTextFirstLineBold(raw: string) {
   const t = (raw ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   if (!t.length) return "";
   const idx = t.indexOf("\n");
-  if (idx === -1)
-    return `<strong style="font-weight:700;color:#0b1220;">${escapeHtml(
-      t
-    )}</strong>`;
-  const first = escapeHtml(t.slice(0, idx));
-  const rest = escapeHtml(t.slice(idx + 1)).replace(/\n/g, "<br />");
-  return `<strong style="font-weight:700;color:#0b1220;">${first}</strong><br />${rest}`;
+  if (idx === -1) {
+    const firstEsc = escapeHtml(t);
+    return `<strong style="font-weight:700;color:#0b1220;">${firstEsc}</strong>`;
+  }
+  const firstRaw = t.slice(0, idx);
+  const restRaw = t.slice(idx + 1);
+  const firstHtml = escapeHtml(firstRaw);
+  const restHtml = escapeHtml(restRaw).replace(/\n/g, "<br />");
+  return `<strong style="font-weight:700;color:#0b1220;">${firstHtml}</strong><br />${restHtml}`;
 }
 
-/** 軽量HTML（p/h/strong等なし）のときだけ1ブロック目を太字化 */
+/** 軽量HTML（p/h/strong等なし）の1行目のみ太字化。div/spanラップにも対応 */
 function maybeBoldenFirstLineInLightHtml(html: string) {
   const src = html ?? "";
   if (!src.trim()) return src;
   if (isRichHtml(src)) return src;
+
   const wrap = src.match(/^<\s*(div|span)\b[^>]*>/i);
-  let prefix = "",
-    body = src,
-    suffix = "";
+  let prefix = "";
+  let body = src;
+  let suffix = "";
   if (wrap) {
     prefix = wrap[0];
     const closing = src.match(new RegExp(`</\\s*${wrap[1]}\\s*>$`, "i"));
     if (closing) {
       suffix = closing[0];
       body = src.slice(prefix.length, src.length - suffix.length);
-    } else body = src.slice(prefix.length);
+    } else {
+      body = src.slice(prefix.length);
+    }
   }
-  const norm = body.replace(/<br\s*\/?>/gi, "<br />");
-  const i = norm.indexOf("<br />");
-  if (i === -1)
-    return `${prefix}<strong style="font-weight:700;color:#0b1220;">${norm}</strong>${suffix}`;
-  const first = norm.slice(0, i),
-    rest = norm.slice(i + "<br />".length);
+
+  const normalized = body.replace(/<br\s*\/?>/gi, "<br />");
+  const idx = normalized.indexOf("<br />");
+  if (idx === -1) {
+    return `${prefix}<strong style="font-weight:700;color:#0b1220;">${normalized}</strong>${suffix}`;
+  }
+  const first = normalized.slice(0, idx);
+  const rest = normalized.slice(idx + "<br />".length);
   return `${prefix}<strong style="font-weight:700;color:#0b1220;">${first}</strong><br />${rest}${suffix}`;
 }
-function buildBodyHtmlFromInput(input: string, isHtml: boolean) {
-  return isHtml
+
+/** 入力に応じた本文HTML作成 */
+function buildBodyHtmlFromInput(input: string, inputIsHtml: boolean) {
+  return inputIsHtml
     ? maybeBoldenFirstLineInLightHtml(input)
     : toHtmlFromPlainTextFirstLineBold(input);
 }
@@ -181,23 +159,12 @@ function stripLegacyFooter(html: string) {
   return out;
 }
 
-/** 情報チップ（見た目そのまま。色だけライト固定を強化） */
-function chip(html: string, extra = "") {
-  return `<span style="
-    display:inline-block;
-    margin:4px 6px 0 0;
-    padding:4px 10px;
-    border-radius:999px;
-    border:1px solid #e5e7eb !important;
-    ${lockLight("#f9fafb")};
-    font-size:13px !important;
-    line-height:1.6;
-    color:#4b5563 !important;
-    ${extra}
-  ">${html}</span>`;
+/** 情報チップ：デザインそのまま（暗転禁止に関わる処理なし） */
+function chip(html: string, extraStyle = "") {
+  return `<span style="display:inline-block;margin:4px 6px 0 0;padding:4px 10px;border-radius:999px;background:#f9fafb !important;border:1px solid #e5e7eb !important;font-size:13px;line-height:1.6;color:#4b5563 !important;${extraStyle}">${html}</span>`;
 }
 
-/** 本文+メタを“1枚カード”に統合（見た目はそのまま、反転だけ抑止） */
+/** 本文+メタを“1枚カード”に統合（暗転禁止の仕組みは含めない） */
 function buildCardHtml(opts: {
   innerHtml: string;
   company?: string;
@@ -255,38 +222,24 @@ function buildCardHtml(opts: {
   const chipsRow = chips.length
     ? `<div style="margin-top:8px;">${chips.join("")}</div>`
     : "";
+
   const did = `<div style="margin-top:8px;${idStyle}">配信ID: ${escapeHtml(
     deliveryId
   )}</div>`;
 
-  // ★変更点：各レイヤーに lockLight() を“追加”するだけ（既存の色/角丸/影/余白は一切変更しない）
+  // ※ color-scheme や 1pxタイル・lockLight 等の“暗転禁止”要素は一切入れない
   return `${CARD_MARK}
-<table role="presentation" width="100%" bgcolor="#f3f4f6"
-  style="background:#f3f4f6 !important;padding:16px 0;color-scheme:light;supported-color-schemes:light;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;${lockLight(
-    "#f3f4f6"
-  )}">
+<table role="presentation" width="100%" bgcolor="#f3f4f6" style="background:#f3f4f6 !important;padding:16px 0;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;">
   <tr>
-    <td align="center" bgcolor="#f3f4f6" style="padding:0 12px;${lockLight(
-      "#f3f4f6"
-    )}">
-    <table role="presentation" width="100%" bgcolor="#ffffff"
-    style="max-width:640px;border-radius:14px;background:#ffffff !important;box-shadow:0 4px 16px rgba(0,0,0,.08);border:1px solid #e5e7eb !important;color-scheme:light;supported-color-schemes:light;${lockLight(
-      "#ffffff"
-    )}">
+    <td align="center" bgcolor="#f3f4f6" style="padding:0 12px;">
+      <table role="presentation" width="100%" bgcolor="#ffffff" style="max-width:640px;border-radius:14px;background:#ffffff !important;box-shadow:0 4px 16px rgba(0,0,0,.08);border:1px solid #e5e7eb !important;">
         <tr>
-          <td bgcolor="#ffffff"
-              style="padding:20px;font:16px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111827 !important;${lockLight(
-                "#ffffff"
-              )}">
+          <td bgcolor="#ffffff" style="padding:20px;font:16px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111827 !important;">
             <!-- 本文（プレーン/軽量HTMLは1行目太字。リッチHTMLは無改変） -->
-            <div style="color:#111827 !important;${lockLight(
-              "#ffffff"
-            )}">${clean}</div>
+            <div style="color:#111827 !important;">${clean}</div>
 
             <!-- メタ情報 -->
-            <div style="margin-top:20px;padding-top:12px;border-top:1px dashed #e5e7eb;${lockLight(
-              "#ffffff"
-            )}">
+            <div style="margin-top:20px;padding-top:12px;border-top:1px dashed #e5e7eb;">
               ${who}
               ${chipsRow}
               ${did}
@@ -331,6 +284,7 @@ async function loadSenderConfigForCurrentUser() {
   const user = u?.user;
   if (!user)
     return { tenantId: undefined as string | undefined, cfg: {} as any };
+
   const { data: prof } = await sb
     .from("profiles")
     .select("tenant_id")
@@ -365,6 +319,7 @@ async function loadSenderConfigForCurrentUser() {
       brand_support ||= (byTenant.data as any).brand_support;
     }
   }
+
   if (tenantId) {
     const { data: t } = await sb
       .from("tenants")
@@ -378,6 +333,7 @@ async function loadSenderConfigForCurrentUser() {
       brand_support ||= (t as any).support_email || undefined;
     }
   }
+
   return {
     tenantId,
     cfg: {
@@ -397,16 +353,19 @@ export async function POST(req: Request) {
       ? body.recipientIds
       : [];
     const scheduleAtISO = body.scheduleAt ?? null;
-    if (!campaignId || recipientIds.length === 0)
+
+    if (!campaignId || recipientIds.length === 0) {
       return NextResponse.json(
         { error: "campaignId と recipientIds は必須です" },
         { status: 400 }
       );
+    }
 
     const sb = await supabaseServer();
     const { data: u } = await sb.auth.getUser();
     if (!u?.user)
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+
     const { tenantId, cfg } = await loadSenderConfigForCurrentUser();
     if (!tenantId)
       return NextResponse.json({ error: "no tenant" }, { status: 400 });
@@ -440,6 +399,7 @@ export async function POST(req: Request) {
         { error: "db(recipients): " + rErr.message },
         { status: 500 }
       );
+
     const recipients = (recs ?? []).filter(
       (r: any) => r?.email && !r?.unsubscribed_at
     );
@@ -529,6 +489,7 @@ export async function POST(req: Request) {
         { error: "db(deliveries): " + dErr.message },
         { status: 500 }
       );
+
     const idMap = new Map<string, string>();
     (dels ?? []).forEach((d) =>
       idMap.set(String(d.recipient_id), String(d.id))
@@ -545,17 +506,20 @@ export async function POST(req: Request) {
       const pixelUrl = `${appUrl}/api/email/open?id=${encodeURIComponent(
         deliveryId
       )}`;
+
       const unsubUrl = r.unsubscribe_token
         ? `${appUrl}/api/unsubscribe?token=${encodeURIComponent(
             r.unsubscribe_token
           )}`
         : null;
+
       const subjectPersonalized = personalize(
         subjectRaw,
         { name: r.name, email: r.email },
         identity
       );
 
+      // 本文：HTMLは軽量のみ1行目太字、リッチは無改変。テキストはHTML化＋1行目太字。
       const inputIsHtml = isLikelyHtml(htmlBodyRaw);
       const personalizedInput = personalize(
         htmlBodyRaw,
@@ -564,6 +528,7 @@ export async function POST(req: Request) {
       );
       const htmlFilled = buildBodyHtmlFromInput(personalizedInput, inputIsHtml);
 
+      // カード化（暗転禁止は入れない）
       const cardHtml = buildCardHtml({
         innerHtml: htmlFilled,
         company: cfg.brandCompany,
@@ -576,6 +541,7 @@ export async function POST(req: Request) {
 
       const htmlFinal = injectOpenPixel(cardHtml, pixelUrl);
 
+      // テキスト版
       const textBody = inputIsHtml
         ? decodeHtmlEntities(htmlToText(htmlFilled))
         : personalize(
@@ -610,6 +576,7 @@ export async function POST(req: Request) {
         brandAddress: cfg.brandAddress,
         brandSupport: cfg.brandSupport,
       };
+
       const jobId = `camp:${campaignId}:rcpt:${r.id}:${Date.now()}`;
       await emailQueue.add("direct_email", job, {
         jobId,

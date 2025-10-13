@@ -5,6 +5,7 @@ export const revalidate = 0;
 
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 /**
  * 受け取った id / ids を is_active=false にするソフト削除。
@@ -24,7 +25,6 @@ export async function POST(req: Request) {
       : body.id
       ? [body.id]
       : [];
-
     if (ids.length === 0) {
       return NextResponse.json(
         { error: "id or ids required" },
@@ -32,30 +32,30 @@ export async function POST(req: Request) {
       );
     }
 
-    const supabase = await supabaseServer();
-    const { data: u } = await supabase.auth.getUser();
+    const sb = await supabaseServer();
+    const { data: u } = await sb.auth.getUser();
     if (!u?.user) {
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
     }
 
-    const { data: prof } = await supabase
+    const { data: prof } = await sb
       .from("profiles")
       .select("tenant_id")
       .eq("id", u.user.id)
       .maybeSingle();
-
     const tenant_id = prof?.tenant_id as string | undefined;
     if (!tenant_id) {
       return NextResponse.json({ error: "no tenant" }, { status: 400 });
     }
 
-    // 物理削除ではなく、is_active=false に更新（ソフト削除）
-    const { data, error } = await supabase
+    // ★ RLS回避のため admin クライアントで更新（tenant_id で絞って安全性担保）
+    const admin = supabaseAdmin();
+    const { data, error } = await admin
       .from("recipients")
       .update({ is_active: false, updated_at: new Date().toISOString() })
       .eq("tenant_id", tenant_id)
       .in("id", ids)
-      .select("id"); // 影響件数を知るため
+      .select("id");
 
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 400 });
