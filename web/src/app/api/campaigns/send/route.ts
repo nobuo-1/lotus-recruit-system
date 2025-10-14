@@ -187,8 +187,8 @@ function buildCardHtml(opts: {
   const clean = stripLegacyFooter(innerHtml);
 
   // フッターのサイズ階層（＝変更前と同じ）
-  const explStyle = "font-size:14px;color:#374151 !important;";
-  const idStyle = "font-size:12px;opacity:.75;color:#4b5563 !important;";
+  const explStyle = "font-size:12px;color:#374151 !important;";
+  const idStyle = "font-size:10px;opacity:.75;color:#4b5563 !important;";
 
   const who = `<div style="margin-top:12px;${explStyle}">
     このメールは ${company ? escapeHtml(company) : "弊社"} から
