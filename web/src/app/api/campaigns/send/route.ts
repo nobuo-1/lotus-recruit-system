@@ -161,7 +161,7 @@ function stripLegacyFooter(html: string) {
 
 /** 情報チップ：デザインそのまま（暗転禁止に関わる処理なし） */
 function chip(html: string, extraStyle = "") {
-  return `<span style="display:inline-block;margin:4px 6px 0 0;padding:4px 10px;border-radius:999px;background:#f9fafb !important;border:1px solid #e5e7eb !important;font-size:13px;line-height:1.6;color:#4b5563 !important;${extraStyle}">${html}</span>`;
+  return `<span style="display:inline-block;margin:4px 6px 0 0;padding:4px 10px;border-radius:999px;background:#f9fafb !important;border:1px solid #e5e7eb !important;font-size:8px;line-height:1.6;color:#4b5563 !important;${extraStyle}">${html}</span>`;
 }
 
 /** 本文+メタを“1枚カード”に統合（暗転禁止の仕組みは含めない） */
