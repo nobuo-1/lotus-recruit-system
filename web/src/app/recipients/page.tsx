@@ -40,8 +40,8 @@ type Row = {
   birthday: string | null;
 
   // 後方互換の単一ペア
-  job_category_large: unknown | null;
-  job_category_small: unknown | null;
+  job_category_large: string | null;
+  job_category_small: string | null;
 
   // 複数職種（API で返る想定）
   job_categories?: Array<string | { large?: unknown; small?: unknown }> | null;
@@ -277,8 +277,24 @@ export default function RecipientsPage() {
             {safe(toText(r.company_name))}
           </span>
         );
-      case "job_categories":
-        return <JobCategoriesCell items={normalizeJobs(r)} />;
+      case "job_categories": {
+        // API が job_categories を返す場合：それを優先
+        // 返さない場合は単一の大/小から 1 行だけ作る（後方互換）
+        const fallbackOne = (() => {
+          const L = (r.job_category_large ?? "").trim();
+          const S = (r.job_category_small ?? "").trim();
+          return L || S
+            ? [`${L}${L && S ? "（" : ""}${S}${L && S ? "）" : ""}`]
+            : [];
+        })();
+
+        const items =
+          Array.isArray(r.job_categories) && r.job_categories.length
+            ? r.job_categories
+            : fallbackOne;
+
+        return <JobCategoriesCell items={items} />;
+      }
       case "gender":
         return (
           <span className="whitespace-nowrap">
