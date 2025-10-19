@@ -5,7 +5,7 @@ import { createClient } from "@supabase/supabase-js";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-// --- Supabase Admin Client ---
+// --- Supabase Admin Client（サービスロール） ---
 function supabaseAdmin() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL as string;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY as string;
@@ -40,8 +40,34 @@ function htmlToText(html: string) {
     .trim();
 }
 
-export async function GET() {
-  return NextResponse.json({ ok: true, path: "/api/mails/send" });
+// 差出人メール取得：email_settings → env（SMTP_FROM or SMTP_USER）
+async function resolveFromEmail(
+  supabase: ReturnType<typeof createClient>,
+  tenantId: string | null | undefined
+): Promise<string> {
+  // 1) email_settings テーブルから
+  if (tenantId) {
+    try {
+      const { data } = await supabase
+        .from("email_settings")
+        .select("from_email")
+        .eq("tenant_id", tenantId)
+        .maybeSingle();
+      const v = String(data?.from_email ?? "").trim();
+      if (v) return v;
+    } catch {
+      /* ignore and fallback */
+    }
+  }
+  // 2) 環境変数（優先: SMTP_FROM、次点: SMTP_USER）
+  const envFrom = String(
+    process.env.SMTP_FROM ?? process.env.SMTP_USER ?? ""
+  ).trim();
+  if (envFrom) return envFrom;
+
+  throw new Error(
+    "差出人メールが見つかりません（email_settings.from_email または SMTP_FROM/SMTP_USER を設定してください）"
+  );
 }
 
 export async function POST(req: Request) {
@@ -56,10 +82,10 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "invalid payload" }, { status: 400 });
     }
 
-    // メール本体
+    // --- メール本体（from_email は選択しない：スキーマ差異に耐性） ---
     const { data: mail, error: me } = await supabase
       .from("mails")
-      .select("id, tenant_id, name, subject, from_email, body_text, body_html")
+      .select("id, tenant_id, name, subject, body_text, body_html")
       .eq("id", mailId)
       .maybeSingle();
 
@@ -70,7 +96,10 @@ export async function POST(req: Request) {
       );
     }
 
-    // 予約
+    // 差出人を決定（email_settings → env）
+    const fromEmail = await resolveFromEmail(supabase, mail.tenant_id);
+
+    // --- 予約登録 ---
     if (scheduleAt) {
       const { error: se } = await supabase.from("mail_schedules").insert({
         mail_id: mailId,
@@ -80,6 +109,7 @@ export async function POST(req: Request) {
       });
       if (se) return NextResponse.json({ error: se.message }, { status: 500 });
 
+      // 予約対象の recipients を scheduled で投入
       const ins = ids.map((rid: string) => ({
         mail_id: mailId,
         recipient_id: rid,
@@ -93,19 +123,17 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, scheduled: ids.length });
     }
 
-    // 即時送信
+    // --- 即時送信 ---
     const { data: recs, error: re } = await supabase
       .from("recipients")
       .select("id, email, name, consent")
       .in("id", ids);
-
     if (re) return NextResponse.json({ error: re.message }, { status: 500 });
 
     const transporter = makeTransport();
     const subjectTpl = String(mail.subject ?? "");
     const bodyTextRaw =
       String(mail.body_text ?? "") || htmlToText(String(mail.body_html ?? ""));
-    const fromEmail = String(mail.from_email ?? "");
 
     const results: { id: string; ok: boolean; message?: string }[] = [];
 
