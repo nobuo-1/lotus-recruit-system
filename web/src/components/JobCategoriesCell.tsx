@@ -1,31 +1,43 @@
 // web/src/components/JobCategoriesCell.tsx
 "use client";
 
-type Pair = { large?: string | null; small?: string | null } | string;
+type Item = { large?: unknown; small?: unknown };
 
-export function JobCategoriesCell({ items }: { items: Pair[] | null }) {
-  const labels = (items ?? [])
-    .map((it) => {
-      if (typeof it === "string") return it;
-      const L = (it?.large ?? "").trim();
-      const S = (it?.small ?? "").trim();
-      if (L && S) return `${L}（${S}）`;
-      if (L) return L;
-      if (S) return S;
-      return "";
-    })
-    .filter(Boolean);
+// どんな値でも安全に文字列へ
+const toText = (v: unknown): string => {
+  if (typeof v === "string") return v;
+  if (Array.isArray(v)) {
+    const s = v.find((x) => typeof x === "string");
+    return typeof s === "string" ? s : "";
+  }
+  if (v == null) return "";
+  try {
+    return String(v);
+  } catch {
+    return "";
+  }
+};
 
-  if (!labels.length) return <span className="text-gray-400">-</span>;
+export function JobCategoriesCell({
+  items,
+}: {
+  items: Item[] | null | undefined;
+}) {
+  const arr = Array.isArray(items) ? items : [];
+  if (!arr.length) return <span className="text-gray-400">-</span>;
 
-  // すべて表示（トグルなし）
   return (
     <div className="flex flex-wrap items-center gap-1">
-      {labels.map((label, i) => (
-        <span key={i} className="px-2 py-0.5 rounded-full border">
-          {label}
-        </span>
-      ))}
+      {arr.map((it, i) => {
+        const L = toText(it.large).trim();
+        const S = toText(it.small).trim();
+        const label = L && S ? `${L}（${S}）` : L || S || "-";
+        return (
+          <span key={i} className="rounded-full border px-2 py-0.5">
+            {label}
+          </span>
+        );
+      })}
     </div>
   );
 }

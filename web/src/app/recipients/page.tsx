@@ -9,7 +9,6 @@ import { JOB_CATEGORIES, JOB_LARGE } from "@/constants/jobCategories";
 import { Pencil, Trash2 } from "lucide-react";
 import { JobCategoriesCell } from "@/components/JobCategoriesCell";
 
-// 設定ページで切り替える列キー
 type RecipientColumnKey =
   | "name"
   | "company_name"
@@ -39,11 +38,14 @@ type Row = {
   gender: "male" | "female" | null;
   region: string | null;
   birthday: string | null;
-  // 既存の単一フィールド（後方互換）
-  job_category_large: string | null;
-  job_category_small: string | null;
-  // 複数職種に対応（API で返却される想定）
-  job_categories?: { large?: string | null; small?: string | null }[] | null;
+
+  // 後方互換の単一ペア
+  job_category_large: unknown | null;
+  job_category_small: unknown | null;
+
+  // 複数職種（API で返る想定）
+  job_categories?: { large?: unknown; small?: unknown }[] | null;
+
   is_active: boolean | null;
   consent: string | null;
   created_at?: string | null;
@@ -51,26 +53,38 @@ type Row = {
 
 const safe = (v: any) => v ?? "";
 
-function ageFromBirthday(iso?: string | null): string {
-  if (!iso) return "";
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
-  if (!m) return "";
-  const y = +m[1],
-    mm = +m[2] - 1,
-    d = +m[3];
-  const b = new Date(y, mm, d);
-  const now = new Date();
-  let age = now.getFullYear() - b.getFullYear();
-  const mDiff = now.getMonth() - b.getMonth();
-  if (mDiff < 0 || (mDiff === 0 && now.getDate() < b.getDate())) age--;
-  return age >= 0 && age < 130 ? String(age) : "";
-}
+// どんな値でも安全に文字列へ（.trim対策）
+const toText = (v: unknown): string => {
+  if (typeof v === "string") return v;
+  if (Array.isArray(v)) {
+    const s = v.find((x) => typeof x === "string");
+    return typeof s === "string" ? s : "";
+  }
+  if (v == null) return "";
+  try {
+    return String(v);
+  } catch {
+    return "";
+  }
+};
+
+// 行データを JobCategoriesCell 用の配列に正規化
+const normalizeJobs = (r: Row): { large?: string; small?: string }[] => {
+  if (Array.isArray(r.job_categories) && r.job_categories.length) {
+    return r.job_categories.map((it) => ({
+      large: toText(it?.large).trim(),
+      small: toText(it?.small).trim(),
+    }));
+  }
+  const L = toText(r.job_category_large).trim();
+  const S = toText(r.job_category_small).trim();
+  return L || S ? [{ large: L, small: S }] : [];
+};
 
 export default function RecipientsPage() {
   const [rows, setRows] = useState<Row[]>([]);
   const [msg, setMsg] = useState("");
 
-  // 表示列設定の取得
   const [visible, setVisible] = useState<RecipientColumnKey[]>(DEFAULT_VISIBLE);
   const [loadingCols, setLoadingCols] = useState(true);
 
@@ -132,33 +146,46 @@ export default function RecipientsPage() {
       if (
         enableTextSearch &&
         q &&
-        !(r.name ?? "").includes(q) &&
-        !(r.email ?? "").includes(q)
+        !toText(r.name).includes(q) &&
+        !toText(r.email).includes(q)
       )
         return false;
 
       if (
         visible.includes("company_name") &&
         companyQ &&
-        !(r.company_name ?? "").includes(companyQ)
+        !toText(r.company_name).includes(companyQ)
       )
         return false;
 
       if (visible.includes("gender") && gender && r.gender !== (gender as any))
         return false;
 
-      if (visible.includes("region") && pref && r.region !== pref) return false;
+      if (visible.includes("region") && pref && toText(r.region) !== pref)
+        return false;
 
       if (visible.includes("job_categories")) {
-        // 単一の大/小カテゴリに対するフィルタ（複数職種ありでもメインの1組で絞り込む）
-        if (large && r.job_category_large !== large) return false;
-        if (small && r.job_category_small !== small) return false;
+        // 単一ペアでの絞り込み（複数職種があってもメイン1組で）
+        if (large && toText(r.job_category_large) !== large) return false;
+        if (small && toText(r.job_category_small) !== small) return false;
       }
 
       if (visible.includes("age")) {
-        const age = ageFromBirthday(r.birthday);
-        if (ageMin && (age ? +age : -1) < +ageMin) return false;
-        if (ageMax && (age ? +age : 999) > +ageMax) return false;
+        const b = toText(r.birthday);
+        const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(b);
+        let age = -1;
+        if (m) {
+          const y = +m[1],
+            mm = +m[2] - 1,
+            d = +m[3];
+          const bd = new Date(y, mm, d);
+          const now = new Date();
+          age = now.getFullYear() - bd.getFullYear();
+          const diffM = now.getMonth() - bd.getMonth();
+          if (diffM < 0 || (diffM === 0 && now.getDate() < bd.getDate())) age--;
+        }
+        if (ageMin && age < +ageMin) return false;
+        if (ageMax && (age === -1 ? 999 : age) > +ageMax) return false;
       }
 
       return true;
@@ -208,12 +235,24 @@ export default function RecipientsPage() {
     );
   }
 
+  const HEADERS: Record<RecipientColumnKey, string> = {
+    name: "名前",
+    company_name: "会社名",
+    job_categories: "職種",
+    gender: "性別",
+    age: "年齢",
+    created_at: "作成日",
+    email: "メール",
+    region: "都道府県",
+    phone: "電話",
+  };
+
   const renderCell = (k: RecipientColumnKey, r: Row) => {
     switch (k) {
       case "name":
         return (
           <div className="flex flex-col gap-1">
-            <span>{safe(r.name)}</span>
+            <span>{safe(toText(r.name))}</span>
             {r.consent === "opt_out" && (
               <span className="inline-block w-fit rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-xs text-red-600">
                 配信停止
@@ -221,62 +260,62 @@ export default function RecipientsPage() {
             )}
           </div>
         );
-
       case "company_name":
-        return <span className="text-neutral-700">{safe(r.company_name)}</span>;
-
-      case "job_categories": {
-        // 複数職種があればそれを、無ければ後方互換で単一ペアを使う
-        const items =
-          Array.isArray(r.job_categories) && r.job_categories.length > 0
-            ? r.job_categories.map((it) => ({
-                large: it?.large ?? null,
-                small: it?.small ?? null,
-              }))
-            : [{ large: r.job_category_large, small: r.job_category_small }];
-
-        return <JobCategoriesCell items={items} />;
-      }
-
+        return (
+          <span className="text-neutral-700">
+            {safe(toText(r.company_name))}
+          </span>
+        );
+      case "job_categories":
+        return <JobCategoriesCell items={normalizeJobs(r)} />;
       case "gender":
         return (
           <span className="whitespace-nowrap">
             {r.gender === "male" ? "男性" : r.gender === "female" ? "女性" : ""}
           </span>
         );
-
       case "age":
         return (
           <span className="whitespace-nowrap">
-            {ageFromBirthday(r.birthday)}
+            {(() => {
+              const b = toText(r.birthday);
+              const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(b);
+              if (!m) return "";
+              const y = +m[1],
+                mm = +m[2] - 1,
+                d = +m[3];
+              const bd = new Date(y, mm, d);
+              const now = new Date();
+              let age = now.getFullYear() - bd.getFullYear();
+              const diffM = now.getMonth() - bd.getMonth();
+              if (diffM < 0 || (diffM === 0 && now.getDate() < bd.getDate()))
+                age--;
+              return age >= 0 && age < 130 ? String(age) : "";
+            })()}
           </span>
         );
-
       case "created_at":
         return (
           <span className="whitespace-nowrap">
             {r.created_at?.slice(0, 10) ?? ""}
           </span>
         );
-
       case "email":
         return (
           <span className="whitespace-nowrap text-neutral-600">
-            {safe(r.email)}
+            {safe(toText(r.email))}
           </span>
         );
-
       case "region":
         return (
           <span className="whitespace-nowrap text-neutral-600">
-            {safe(r.region)}
+            {safe(toText(r.region))}
           </span>
         );
-
       case "phone":
         return (
           <span className="whitespace-nowrap text-neutral-600">
-            {safe(r.phone)}
+            {safe(toText(r.phone))}
           </span>
         );
     }
@@ -478,7 +517,6 @@ export default function RecipientsPage() {
                   }
                 </th>
               ))}
-              {/* 常時表示 */}
               <th className="px-3 py-3 text-center">アクティブ</th>
               <th className="px-3 py-3 text-center">操作</th>
             </tr>
@@ -503,7 +541,6 @@ export default function RecipientsPage() {
                   </td>
                 ))}
 
-                {/* 常時表示 */}
                 <td className="px-2.5 py-2.5 text-center whitespace-nowrap">
                   <Toggle
                     checked={!!r.is_active}
