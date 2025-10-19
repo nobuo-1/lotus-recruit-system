@@ -1,3 +1,4 @@
+// web/src/app/api/mails/send/route.ts
 import { NextResponse } from "next/server";
 import nodemailer from "nodemailer";
 import { createClient } from "@supabase/supabase-js";
@@ -6,7 +7,8 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 // --- Supabase Admin Client（サービスロール） ---
-function supabaseAdmin() {
+// 型ループ回避のため any 化
+function supabaseAdmin(): any {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL as string;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY as string;
   if (!url || !key) {
@@ -14,7 +16,7 @@ function supabaseAdmin() {
       "Missing SUPABASE envs (NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY)"
     );
   }
-  return createClient(url, key, { auth: { persistSession: false } });
+  return createClient(url, key, { auth: { persistSession: false } }) as any;
 }
 
 // --- SMTP Transport ---
@@ -41,18 +43,21 @@ function htmlToText(html: string) {
 }
 
 // 差出人メール取得：email_settings → env（SMTP_FROM or SMTP_USER）
+// supabase 引数は any にしてジェネリクス起因の型エラーを回避
 async function resolveFromEmail(
-  supabase: ReturnType<typeof createClient>,
+  supabase: any,
   tenantId: string | null | undefined
 ): Promise<string> {
   // 1) email_settings テーブルから
   if (tenantId) {
     try {
-      const { data } = await supabase
+      type EmailSettingsRow = { from_email: string | null };
+      const { data } = (await supabase
         .from("email_settings")
         .select("from_email")
         .eq("tenant_id", tenantId)
-        .maybeSingle();
+        .maybeSingle()) as { data: EmailSettingsRow | null; error: any | null };
+
       const v = String(data?.from_email ?? "").trim();
       if (v) return v;
     } catch {
@@ -82,12 +87,20 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "invalid payload" }, { status: 400 });
     }
 
-    // --- メール本体（from_email は選択しない：スキーマ差異に耐性） ---
-    const { data: mail, error: me } = await supabase
+    // --- メール本体（from_email は参照しない）---
+    type MailRow = {
+      id: string;
+      tenant_id: string | null;
+      name: string | null;
+      subject: string | null;
+      body_text: string | null;
+      body_html: string | null;
+    };
+    const { data: mail, error: me } = (await supabase
       .from("mails")
       .select("id, tenant_id, name, subject, body_text, body_html")
       .eq("id", mailId)
-      .maybeSingle();
+      .maybeSingle()) as { data: MailRow | null; error: any | null };
 
     if (me || !mail) {
       return NextResponse.json(
@@ -124,10 +137,16 @@ export async function POST(req: Request) {
     }
 
     // --- 即時送信 ---
-    const { data: recs, error: re } = await supabase
+    type RecRow = {
+      id: string;
+      email: string | null;
+      name: string | null;
+      consent: string | null;
+    };
+    const { data: recs, error: re } = (await supabase
       .from("recipients")
       .select("id, email, name, consent")
-      .in("id", ids);
+      .in("id", ids)) as { data: RecRow[] | null; error: any | null };
     if (re) return NextResponse.json({ error: re.message }, { status: 500 });
 
     const transporter = makeTransport();
