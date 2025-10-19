@@ -308,7 +308,7 @@ export default function SendPage() {
       <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
           <h1 className="whitespace-nowrap text-2xl font-semibold text-neutral-900">
-            配信先選択
+            配信先選択（キャンペーン）
           </h1>
           <p className="text-sm text-neutral-500">
             配信先の選択と配信タイミングを設定

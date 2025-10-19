@@ -1,4 +1,3 @@
-// web/src/app/mails/[id]/send/page.tsx
 "use client";
 import React, { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
@@ -8,46 +7,39 @@ import { PREFECTURES } from "@/constants/prefectures";
 import { JOB_CATEGORIES, JOB_LARGE } from "@/constants/jobCategories";
 import { toastSuccess, toastError } from "@/components/AppToast";
 
-type Recipient = {
-  id: string;
-  name: string | null;
-  company_name?: string | null;
-  email: string | null;
-  phone?: string | null;
-  gender: "male" | "female" | null;
-  region: string | null;
-  birthday: string | null;
-  job_category_large: string | null; // 後方互換の単一ペア(大)
-  job_category_small: string | null; // 後方互換の単一ペア(小)
-  job_categories?: Array<string | { large?: unknown; small?: unknown }> | null; // 複数職種
-};
-
 type RecipientColumnKey =
   | "name"
   | "company_name"
   | "job_categories"
   | "gender"
   | "age"
+  | "created_at"
   | "email"
-  | "region";
+  | "region"
+  | "phone";
 
 const DEFAULT_VISIBLE: RecipientColumnKey[] = [
   "name",
+  "company_name",
+  "job_categories",
   "email",
   "region",
-  "gender",
-  "job_categories",
+  "created_at",
 ];
 
-const DISPLAY_ORDER: RecipientColumnKey[] = [
-  "name",
-  "company_name",
-  "email",
-  "region",
-  "gender",
-  "job_categories",
-  // age は配信先ページでは非必須のため除外しておく（必要なら上に追加）
-];
+type Recipient = {
+  id: string;
+  name: string | null;
+  company_name?: string | null;
+  email: string | null;
+  gender: "male" | "female" | null;
+  region: string | null;
+  birthday: string | null;
+  job_category_large: string | null;
+  job_category_small: string | null;
+  job_categories?: Array<string | { large?: unknown; small?: unknown }> | null;
+  is_active: boolean | null;
+};
 
 function ageFromBirthday(iso?: string | null): number | null {
   if (!iso) return null;
@@ -63,80 +55,71 @@ function ageFromBirthday(iso?: string | null): number | null {
   if (md < 0 || (md === 0 && now.getDate() < b.getDate())) age--;
   return age >= 0 && age < 130 ? age : null;
 }
-
 const pad = (n: number) => String(n).padStart(2, "0");
 const localDateISO = (d: Date) =>
   `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 
-const toS = (v: unknown) => (typeof v === "string" ? v.trim() : "");
-
-type JobPair = { large: string; small: string };
-const extractJobPairs = (r: Recipient): JobPair[] => {
-  const pairs: JobPair[] = [];
-
-  // 1) 複数職種の配列があれば優先
-  if (Array.isArray(r.job_categories) && r.job_categories.length) {
-    for (const it of r.job_categories) {
-      if (typeof it === "string") {
-        // 文字列の中にJSON風が入っている場合もケア（後方互換）
-        const s = it.trim();
-        if (s.startsWith("{") && s.endsWith("}")) {
-          try {
-            const o = JSON.parse(s);
-            const L = toS(o?.large) || "";
-            const S = toS(o?.small) || "";
-            if (L || S) pairs.push({ large: L, small: S });
-          } catch {
-            // そのまま単独文字列として扱う（L のみ or S のみ）
-            if (s) pairs.push({ large: s, small: "" });
-          }
-        } else {
-          // "営業（個人営業）" のように組み合わせ済みの文字列は分解不可のため large として保持
-          pairs.push({ large: s, small: "" });
-        }
-      } else if (it && typeof it === "object") {
-        const L = toS((it as any).large) || "";
-        const S = toS((it as any).small) || "";
-        if (L || S) pairs.push({ large: L, small: S });
+const toText = (v: unknown) =>
+  typeof v === "string" ? v : v == null ? "" : String(v);
+const normalizeJobs = (r: Recipient): string[] => {
+  const L = (r.job_category_large ?? "").trim?.() ?? "";
+  const S = (r.job_category_small ?? "").trim?.() ?? "";
+  const one =
+    L || S ? [`${L}${L && S ? "（" : ""}${S}${L && S ? "）" : ""}`] : [];
+  const raw = r.job_categories;
+  if (!Array.isArray(raw) || raw.length === 0) return one;
+  const toS = (x: unknown) => (typeof x === "string" ? x.trim() : "");
+  return raw
+    .map((it) => {
+      if (typeof it === "string") return toS(it);
+      if (it && typeof it === "object") {
+        const ll = toS((it as any).large);
+        const ss = toS((it as any).small);
+        return ll && ss ? `${ll}（${ss}）` : ll || ss || "";
       }
-    }
-  }
-
-  // 2) 単一フィールド後方互換（なければスキップ）
-  const L = toS(r.job_category_large) || "";
-  const S = toS(r.job_category_small) || "";
-  if ((L || S) && pairs.length === 0) pairs.push({ large: L, small: S });
-
-  return pairs;
+      return "";
+    })
+    .filter(Boolean);
 };
-
-const jobsToMultiline = (pairs: JobPair[]) =>
-  pairs
-    .map(({ large, small }) =>
-      large && small ? `${large}（${small}）` : large || small || ""
-    )
-    .filter(Boolean)
-    .join("\n");
 
 export default function MailSendPage() {
   const router = useRouter();
   const params = useParams<{ id: string }>();
   const id = (params?.id as string) || "";
 
-  // 予約日・時刻の初期値
   const now = new Date();
   const minDateISO = localDateISO(now);
   const twoYears = new Date(now);
   twoYears.setFullYear(now.getFullYear() + 2);
   const maxDateISO = localDateISO(twoYears);
 
-  // データ
   const [all, setAll] = useState<Recipient[]>([]);
   const [already, setAlready] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
-  // フィルタ
+  // 表示列設定の取得（フィルター＆列に反映）
+  const [visible, setVisible] = useState<RecipientColumnKey[]>(DEFAULT_VISIBLE);
+  const [loadingCols, setLoadingCols] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("/api/email/recipient-list-settings", {
+          cache: "no-store",
+        });
+        if (res.ok) {
+          const j = await res.json();
+          const cols = (j?.visible_columns ?? []) as RecipientColumnKey[];
+          if (Array.isArray(cols) && cols.length) setVisible(cols);
+        }
+      } catch {}
+      setLoadingCols(false);
+    })();
+  }, []);
+
+  // フィルター（可視列のみ表示）
   const [q, setQ] = useState("");
+  const [companyQ, setCompanyQ] = useState("");
   const [ageMin, setAgeMin] = useState<string>("");
   const [ageMax, setAgeMax] = useState<string>("");
   const [gender, setGender] = useState<string>("");
@@ -149,24 +132,6 @@ export default function MailSendPage() {
     [large]
   );
 
-  // 可視列（受信者リストの表示列）
-  const [visible, setVisible] = useState<RecipientColumnKey[]>(DEFAULT_VISIBLE);
-  useEffect(() => {
-    (async () => {
-      try {
-        const r = await fetch("/api/email/recipient-list-settings", {
-          cache: "no-store",
-        });
-        if (r.ok) {
-          const j = await r.json();
-          const cols = (j?.visible_columns ?? []) as RecipientColumnKey[];
-          if (Array.isArray(cols) && cols.length) setVisible(cols);
-        }
-      } catch {}
-    })();
-  }, []);
-
-  // 送信モード
   const [mode, setMode] = useState<"now" | "reserve">("now");
   const [reserveDate, setReserveDate] = useState<string>(minDateISO);
   const [reserveHour, setReserveHour] = useState<number>(now.getHours());
@@ -183,12 +148,14 @@ export default function MailSendPage() {
     const j = await res.json();
     setAll(j?.rows ?? []);
   };
+
   const loadAlready = async () => {
     if (!id) return;
     const r = await fetch(`/api/mails/${id}/sent`, { cache: "no-store" });
     const j = await r.json();
     setAlready(new Set<string>(j?.ids ?? []));
   };
+
   useEffect(() => {
     load();
     loadAlready();
@@ -197,36 +164,59 @@ export default function MailSendPage() {
   const list = useMemo(() => {
     return all.filter((r) => {
       if (already.has(r.id)) return false;
-      if (q && !(r.name ?? "").includes(q)) return false;
-      if (gender && r.gender !== (gender as any)) return false;
-      if (pref && r.region !== pref) return false;
 
-      // 職種フィルタ（複数職種に対応）
-      if (large || small) {
-        const pairs = extractJobPairs(r);
-        const ok = pairs.some((p) => {
-          if (large && p.large !== large) return false;
-          if (small && p.small !== small) return false;
-          return true;
-        });
-        if (!ok) return false;
+      // 名前/メールテキスト検索（どちらかが可視の場合のみ）
+      if ((visible.includes("name") || visible.includes("email")) && q) {
+        if (!toText(r.name).includes(q) && !toText(r.email).includes(q))
+          return false;
       }
 
-      const age = ageFromBirthday(r.birthday);
-      if (ageMin && (age ?? -1) < +ageMin) return false;
-      if (ageMax && (age ?? 999) > +ageMax) return false;
+      // 会社名（可視のときのみ）
+      if (visible.includes("company_name") && companyQ) {
+        if (!toText(r.company_name).includes(companyQ)) return false;
+      }
+
+      // 性別（可視のときのみ）
+      if (visible.includes("gender") && gender && r.gender !== (gender as any))
+        return false;
+
+      // 都道府県（可視のときのみ）
+      if (visible.includes("region") && pref && r.region !== pref) return false;
+
+      // 職種（可視のときのみ）…単一ペアで絞り込み（データの代表値）
+      if (visible.includes("job_categories")) {
+        if (large && r.job_category_large !== large) return false;
+        if (small && r.job_category_small !== small) return false;
+      }
+
+      // 年齢（可視のときのみ）
+      if (visible.includes("age")) {
+        const a = ageFromBirthday(r.birthday);
+        if (ageMin && (a ?? -1) < +ageMin) return false;
+        if (ageMax && (a ?? 999) > +ageMax) return false;
+      }
+
       return true;
     });
-  }, [all, already, q, gender, pref, large, small, ageMin, ageMax]);
+  }, [
+    all,
+    already,
+    q,
+    companyQ,
+    gender,
+    pref,
+    large,
+    small,
+    ageMin,
+    ageMax,
+    visible,
+  ]);
 
   const allSelected = list.length > 0 && list.every((r) => selected.has(r.id));
   const toggleAll = () => {
     const next = new Set(selected);
-    if (allSelected) {
-      list.forEach((r) => next.delete(r.id));
-    } else {
-      list.forEach((r) => next.add(r.id));
-    }
+    if (allSelected) list.forEach((r) => next.delete(r.id));
+    else list.forEach((r) => next.add(r.id));
     setSelected(next);
   };
   const toggle = (rid: string) => {
@@ -274,7 +264,6 @@ export default function MailSendPage() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload),
     });
-
     const t = await res.text();
     setMsg(`${res.status}: ${t}`);
 
@@ -282,30 +271,25 @@ export default function MailSendPage() {
       toastSuccess(
         mode === "now" ? "送信キューに追加しました" : "予約を作成しました"
       );
-      router.push(mode === "now" ? "/mails" : "/mails/schedules");
+      router.push("/mails");
     } else {
       toastError(`送信/予約に失敗しました（${res.status}）`);
       alert(`送信/予約に失敗しました: ${res.status}\n${t}`);
     }
   };
 
-  const orderedVisible = DISPLAY_ORDER.filter((k) => visible.includes(k));
-  const headerText = (k: RecipientColumnKey) =>
-    ((
-      {
-        name: "名前",
-        company_name: "会社名",
-        email: "メール",
-        region: "都道府県",
-        gender: "性別",
-        job_categories: "職種",
-        age: "年齢",
-      } as const
-    )[k]);
+  if (loadingCols) {
+    return (
+      <main className="mx-auto max-w-6xl p-6">
+        <h1 className="text-2xl font-semibold">配信先選択（メール）</h1>
+        <p className="text-sm text-neutral-500">読み込み中…</p>
+      </main>
+    );
+  }
 
   return (
     <main className="mx-auto max-w-6xl p-6">
-      {/* ヘッダー：スマホは縦積み */}
+      {/* ヘッダー */}
       <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
           <h1 className="whitespace-nowrap text-2xl font-semibold text-neutral-900">
@@ -363,87 +347,111 @@ export default function MailSendPage() {
         </div>
       )}
 
-      {/* フィルター */}
+      {/* 可視列に連動するフィルター */}
       <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-3">
-        <input
-          placeholder="名前で検索"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          className="rounded-lg border border-neutral-300 px-3 py-2"
-        />
-        <div className="flex gap-2">
+        {(visible.includes("name") || visible.includes("email")) && (
           <input
-            type="number"
-            inputMode="numeric"
-            placeholder="年齢(最小)"
-            value={ageMin}
-            onChange={(e) => setAgeMin(e.target.value)}
-            className="w-full rounded-lg border border-neutral-300 px-3 py-2"
+            placeholder="名前/メールで検索"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            className="rounded-lg border border-neutral-300 px-3 py-2"
           />
-          <input
-            type="number"
-            inputMode="numeric"
-            placeholder="年齢(最大)"
-            value={ageMax}
-            onChange={(e) => setAgeMax(e.target.value)}
-            className="w-full rounded-lg border border-neutral-300 px-3 py-2"
-          />
-        </div>
-        <select
-          value={gender}
-          onChange={(e) => setGender(e.target.value)}
-          className="rounded-lg border border-neutral-300 px-3 py-2"
-        >
-          <option value="">性別: 指定なし</option>
-          <option value="male">男性</option>
-          <option value="female">女性</option>
-        </select>
+        )}
 
-        <select
-          value={large}
-          onChange={(e) => {
-            setLarge(e.target.value);
-            setSmall("");
-          }}
-          className="rounded-lg border border-neutral-300 px-3 py-2"
-        >
-          <option value="">大カテゴリ: 指定なし</option>
-          {JOB_LARGE.map((c) => (
-            <option key={c} value={c}>
-              {c}
-            </option>
-          ))}
-        </select>
-        <select
-          value={small}
-          onChange={(e) => setSmall(e.target.value)}
-          disabled={!large}
-          className="rounded-lg border border-neutral-300 px-3 py-2 disabled:bg-neutral-100"
-        >
-          <option value="">
-            {large ? "小カテゴリ: 指定なし" : "大カテゴリを先に選択"}
-          </option>
-          {(large ? smallOptions : []).map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
-        <select
-          value={pref}
-          onChange={(e) => setPref(e.target.value)}
-          className="rounded-lg border border-neutral-300 px-3 py-2"
-        >
-          <option value="">都道府県: 指定なし</option>
-          {PREFECTURES.map((p) => (
-            <option key={p} value={p}>
-              {p}
-            </option>
-          ))}
-        </select>
+        {visible.includes("company_name") && (
+          <input
+            placeholder="会社名"
+            value={companyQ}
+            onChange={(e) => setCompanyQ(e.target.value)}
+            className="rounded-lg border border-neutral-300 px-3 py-2"
+          />
+        )}
+
+        {visible.includes("age") && (
+          <div className="flex gap-2">
+            <input
+              type="number"
+              inputMode="numeric"
+              placeholder="年齢(最小)"
+              value={ageMin}
+              onChange={(e) => setAgeMin(e.target.value)}
+              className="w-full rounded-lg border border-neutral-300 px-3 py-2"
+            />
+            <input
+              type="number"
+              inputMode="numeric"
+              placeholder="年齢(最大)"
+              value={ageMax}
+              onChange={(e) => setAgeMax(e.target.value)}
+              className="w-full rounded-lg border border-neutral-300 px-3 py-2"
+            />
+          </div>
+        )}
+
+        {visible.includes("gender") && (
+          <select
+            value={gender}
+            onChange={(e) => setGender(e.target.value)}
+            className="rounded-lg border border-neutral-300 px-3 py-2"
+          >
+            <option value="">性別: 指定なし</option>
+            <option value="male">男性</option>
+            <option value="female">女性</option>
+          </select>
+        )}
+
+        {visible.includes("job_categories") && (
+          <>
+            <select
+              value={large}
+              onChange={(e) => {
+                setLarge(e.target.value);
+                setSmall("");
+              }}
+              className="rounded-lg border border-neutral-300 px-3 py-2"
+            >
+              <option value="">大カテゴリ: 指定なし</option>
+              {JOB_LARGE.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </select>
+            <select
+              value={small}
+              onChange={(e) => setSmall(e.target.value)}
+              disabled={!large}
+              className="rounded-lg border border-neutral-300 px-3 py-2 disabled:bg-neutral-100"
+            >
+              <option value="">
+                {large ? "小カテゴリ: 指定なし" : "大カテゴリを先に選択"}
+              </option>
+              {(large ? smallOptions : []).map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+          </>
+        )}
+
+        {visible.includes("region") && (
+          <select
+            value={pref}
+            onChange={(e) => setPref(e.target.value)}
+            className="rounded-lg border border-neutral-300 px-3 py-2"
+          >
+            <option value="">都道府県: 指定なし</option>
+            {PREFECTURES.map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </select>
+        )}
       </div>
 
-      {/* テーブル */}
+      {/* テーブル（会社名は設定連動、職種は複数行表示） */}
       <div className="overflow-x-auto rounded-2xl border border-neutral-200">
         <table className="min-w-[1000px] w-full text-sm">
           <thead className="bg-neutral-50 text-neutral-600">
@@ -463,24 +471,28 @@ export default function MailSendPage() {
                   </label>
                 </div>
               </th>
-              {orderedVisible.map((k) => (
-                <th
-                  key={k}
-                  className={`px-3 py-3 ${
-                    k === "gender" || k === "region" || k === "job_categories"
-                      ? "text-center"
-                      : "text-left"
-                  }`}
-                >
-                  {headerText(k)}
-                </th>
-              ))}
+              <th className="px-3 py-3 text-left">名前</th>
+              {visible.includes("company_name") && (
+                <th className="px-3 py-3 text-left">会社名</th>
+              )}
+              <th className="px-3 py-3 text-left">メール</th>
+              {visible.includes("age") && (
+                <th className="px-3 py-3 text-center">年齢</th>
+              )}
+              {visible.includes("gender") && (
+                <th className="px-3 py-3 text-center">性別</th>
+              )}
+              {visible.includes("region") && (
+                <th className="px-3 py-3 text-center">都道府県</th>
+              )}
+              {visible.includes("job_categories") && (
+                <th className="px-3 py-3 text-center">職種</th>
+              )}
             </tr>
           </thead>
           <tbody>
             {list.map((r) => {
-              const pairs = extractJobPairs(r);
-              const jobs = jobsToMultiline(pairs);
+              const jobs = normalizeJobs(r);
               return (
                 <tr key={r.id} className="border-t border-neutral-200">
                   <td className="px-3 py-3">
@@ -490,84 +502,56 @@ export default function MailSendPage() {
                       onChange={() => toggle(r.id)}
                     />
                   </td>
-
-                  {orderedVisible.map((k) => {
-                    switch (k) {
-                      case "name":
-                        return (
-                          <td key={k} className="px-3 py-3">
-                            {r.name ?? ""}
-                          </td>
-                        );
-                      case "company_name":
-                        return (
-                          <td
-                            key={k}
-                            className="px-3 py-3 text-neutral-700 whitespace-nowrap"
-                          >
-                            {r.company_name ?? ""}
-                          </td>
-                        );
-                      case "email":
-                        return (
-                          <td
-                            key={k}
-                            className="px-3 py-3 text-neutral-600 whitespace-nowrap"
-                          >
-                            {r.email ?? ""}
-                          </td>
-                        );
-                      case "region":
-                        return (
-                          <td
-                            key={k}
-                            className="px-3 py-3 text-center whitespace-nowrap"
-                          >
-                            {r.region ?? ""}
-                          </td>
-                        );
-                      case "gender":
-                        return (
-                          <td
-                            key={k}
-                            className="px-3 py-3 text-center whitespace-nowrap"
-                          >
-                            {r.gender === "male"
-                              ? "男性"
-                              : r.gender === "female"
-                              ? "女性"
-                              : ""}
-                          </td>
-                        );
-                      case "job_categories":
-                        return (
-                          <td key={k} className="px-3 py-3 text-center">
-                            <div className="whitespace-pre-line leading-5 text-neutral-600">
-                              {jobs}
-                            </div>
-                          </td>
-                        );
-                      case "age":
-                        return (
-                          <td
-                            key={k}
-                            className="px-3 py-3 text-center whitespace-nowrap"
-                          >
-                            {ageFromBirthday(r.birthday) ?? ""}
-                          </td>
-                        );
-                      default:
-                        return null;
-                    }
-                  })}
+                  <td className="px-3 py-3">{r.name ?? ""}</td>
+                  {visible.includes("company_name") && (
+                    <td className="px-3 py-3 text-neutral-700">
+                      {r.company_name ?? ""}
+                    </td>
+                  )}
+                  <td className="px-3 py-3 text-neutral-600 whitespace-nowrap">
+                    {r.email ?? ""}
+                  </td>
+                  {visible.includes("age") && (
+                    <td className="px-3 py-3 text-center whitespace-nowrap">
+                      {ageFromBirthday(r.birthday) ?? ""}
+                    </td>
+                  )}
+                  {visible.includes("gender") && (
+                    <td className="px-3 py-3 text-center whitespace-nowrap">
+                      {r.gender === "male"
+                        ? "男性"
+                        : r.gender === "female"
+                        ? "女性"
+                        : ""}
+                    </td>
+                  )}
+                  {visible.includes("region") && (
+                    <td className="px-3 py-3 text-center whitespace-nowrap">
+                      {r.region ?? ""}
+                    </td>
+                  )}
+                  {visible.includes("job_categories") && (
+                    <td className="px-3 py-3 text-center text-neutral-600">
+                      {jobs.length
+                        ? jobs.map((s, i) => <div key={i}>{s}</div>)
+                        : ""}
+                    </td>
+                  )}
                 </tr>
               );
             })}
-
             {list.length === 0 && (
               <tr>
                 <td
-                  colSpan={orderedVisible.length + 1}
+                  colSpan={
+                    2 +
+                    1 + // email
+                    (visible.includes("company_name") ? 1 : 0) +
+                    (visible.includes("age") ? 1 : 0) +
+                    (visible.includes("gender") ? 1 : 0) +
+                    (visible.includes("region") ? 1 : 0) +
+                    (visible.includes("job_categories") ? 1 : 0)
+                  }
                   className="px-4 py-8 text-center text-neutral-400"
                 >
                   該当データがありません
@@ -578,7 +562,7 @@ export default function MailSendPage() {
         </table>
       </div>
 
-      {/* 送信ボタン：スマホは幅いっぱい */}
+      {/* 送信ボタン */}
       <div className="mt-6 flex justify-end">
         <button
           onClick={onSend}

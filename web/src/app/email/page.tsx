@@ -3,7 +3,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { PlusCircle, List, Users, Settings, Mail } from "lucide-react";
 import KpiCard from "@/components/KpiCard";
 import {
   ResponsiveContainer,
@@ -14,6 +13,16 @@ import {
   Tooltip,
   CartesianGrid,
 } from "recharts";
+import {
+  PlusCircle,
+  List,
+  Users,
+  Settings,
+  Mail,
+  Clock,
+  Megaphone,
+  ChevronDown,
+} from "lucide-react";
 
 type Summary = {
   campaignCount: number;
@@ -30,6 +39,7 @@ export default function EmailLanding() {
   const [data, setData] = useState<Summary | null>(null);
   const [range, setRange] = useState<RangeKey>("14d");
   const [msg, setMsg] = useState("");
+  const [openActions, setOpenActions] = useState(false);
   const router = useRouter();
 
   useEffect(() => {
@@ -57,55 +67,49 @@ export default function EmailLanding() {
     [data?.openRate]
   );
 
-  const Header = () => (
-    <header className="sticky top-0 z-40 border-b border-neutral-200 bg-white/80 backdrop-blur">
-      <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-4">
-        <Link
-          href="/dashboard"
-          className="inline-flex items-center gap-2"
-          aria-label="ダッシュボードへ"
-        >
-          <svg
-            width="22"
-            height="22"
-            viewBox="0 0 24 24"
-            className="text-neutral-800"
-            aria-hidden
-          >
-            <path
-              fill="currentColor"
-              d="M12 2c-.9 2.6-2.9 4.6-5.5 5.5C9.1 8.4 11.1 10.4 12 13c.9-2.6 2.9-4.6 5.5-5.5C14.9 6.6 12.9 4.6 12 2zM5 14c2.9.6 5.3 2.9 5.9 5.9c-.6 2.9-2.9 5.3-5.9 5.9zM19 14c-.6 2.9-2.9 5.3-5.9 5.9c.6-2.9 2.9-5.3 5.9-5.9z"
-            />
-          </svg>
-          <span className="text-sm font-semibold tracking-wide text-neutral-900">
-            Lotus Recruit
-          </span>
-        </Link>
-
-        <button
-          onClick={() => {
-            if (typeof window !== "undefined" && window.history.length > 1) {
-              window.history.back();
-            } else {
-              router.push("/dashboard");
-            }
-          }}
-          className="rounded-lg border border-neutral-200 px-3 py-1.5 text-sm hover:bg-neutral-50"
-          aria-label="前のページに戻る"
-        >
-          戻る
-        </button>
-      </div>
-    </header>
-  );
-
   return (
     <>
-      <Header />
+      <header className="sticky top-0 z-40 border-b border-neutral-200 bg-white/80 backdrop-blur">
+        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-4">
+          <Link
+            href="/dashboard"
+            className="inline-flex items-center gap-2"
+            aria-label="ダッシュボードへ"
+          >
+            <svg
+              width="22"
+              height="22"
+              viewBox="0 0 24 24"
+              className="text-neutral-800"
+              aria-hidden
+            >
+              <path
+                fill="currentColor"
+                d="M12 2c-.9 2.6-2.9 4.6-5.5 5.5C9.1 8.4 11.1 10.4 12 13c.9-2.6 2.9-4.6 5.5-5.5C14.9 6.6 12.9 4.6 12 2zM5 14c2.9.6 5.3 2.9 5.9 5.9c-.6 2.9-2.9 5.3-5.9 5.9zM19 14c-.6 2.9-2.9 5.3-5.9 5.9c.6-2.9 2.9-5.3 5.9-5.9z"
+              />
+            </svg>
+            <span className="text-sm font-semibold tracking-wide text-neutral-900">
+              Lotus Recruit
+            </span>
+          </Link>
+
+          <button
+            onClick={() => {
+              if (typeof window !== "undefined" && window.history.length > 1)
+                window.history.back();
+              else router.push("/dashboard");
+            }}
+            className="rounded-lg border border-neutral-200 px-3 py-1.5 text-sm hover:bg-neutral-50"
+            aria-label="前のページに戻る"
+          >
+            戻る
+          </button>
+        </div>
+      </header>
+
       <main className="mx-auto max-w-6xl p-6">
-        {/* ヘッダー行（スマホは縦積み、md+は従来どおり横並び） */}
+        {/* ヘッダー行 */}
         <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-          {/* 左側：タイトル＋説明＋設定 */}
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <h1 className="whitespace-nowrap text-2xl font-semibold text-neutral-900">
@@ -123,71 +127,68 @@ export default function EmailLanding() {
               </Link>
             </div>
             <p className="mt-1 text-sm text-neutral-500">
-              キャンペーン / プレーンテキストメールの作成・配信とKPIの確認
+              キャンペーン / メールの作成・配信とKPIの確認
             </p>
           </div>
 
-          {/* 右側：操作ボタン群（スマホでは下に縦積み） */}
-          <div className="grid w-full grid-cols-1 gap-2 sm:w-auto sm:grid-cols-2 lg:grid-cols-4">
-            {/* キャンペーン系 */}
-            <Link
-              href="/campaigns/new"
-              className="inline-flex items-center justify-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
+          {/* トグル式アクションメニュー */}
+          <div className="relative">
+            <button
+              type="button"
+              aria-expanded={openActions}
+              onClick={() => setOpenActions((v) => !v)}
+              className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
             >
-              <PlusCircle
-                className="h-5 w-5 text-neutral-600"
-                strokeWidth={1.5}
+              操作メニュー
+              <ChevronDown
+                className={`h-4 w-4 text-neutral-600 transition-transform ${
+                  openActions ? "rotate-180" : ""
+                }`}
               />
-              <span className="whitespace-nowrap">新規キャンペーン</span>
-            </Link>
-            <Link
-              href="/campaigns"
-              className="inline-flex items-center justify-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
-            >
-              <List className="h-5 w-5 text-neutral-600" strokeWidth={1.5} />
-              <span className="whitespace-nowrap">キャンペーン一覧</span>
-            </Link>
+            </button>
 
-            {/* 受信者 */}
-            <Link
-              href="/recipients"
-              className="inline-flex items-center justify-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
-            >
-              <Users className="h-5 w-5 text-neutral-600" strokeWidth={1.5} />
-              <span className="whitespace-nowrap">受信者リスト</span>
-            </Link>
-
-            {/* メール（プレーンテキスト） */}
-            <Link
-              href="/mails/new"
-              className="inline-flex items-center justify-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
-            >
-              <Mail className="h-5 w-5 text-neutral-600" strokeWidth={1.5} />
-              <span className="whitespace-nowrap">新規メール</span>
-            </Link>
-            <Link
-              href="/mails"
-              className="inline-flex items-center justify-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
-            >
-              <List className="h-5 w-5 text-neutral-600" strokeWidth={1.5} />
-              <span className="whitespace-nowrap">メール一覧</span>
-            </Link>
-
-            {/* 予約リスト（分離） */}
-            <Link
-              href="/mails/schedules"
-              className="inline-flex items-center justify-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
-            >
-              <List className="h-5 w-5 text-neutral-600" strokeWidth={1.5} />
-              <span className="whitespace-nowrap">メール予約リスト</span>
-            </Link>
-            <Link
-              href="/campaigns/schedules"
-              className="inline-flex items-center justify-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
-            >
-              <List className="h-5 w-5 text-neutral-600" strokeWidth={1.5} />
-              <span className="whitespace-nowrap">キャンペーン予約リスト</span>
-            </Link>
+            {openActions && (
+              <div className="absolute right-0 z-10 mt-2 w-[320px] rounded-2xl border border-neutral-200 bg-white p-3 shadow-sm">
+                <div className="grid grid-cols-1 gap-2">
+                  <ActionLink
+                    href="/mails/new"
+                    icon={<Mail className="h-4 w-4" />}
+                    label="新規メール"
+                  />
+                  <ActionLink
+                    href="/mails"
+                    icon={<List className="h-4 w-4" />}
+                    label="メール一覧"
+                  />
+                  <ActionLink
+                    href="/mails/schedules"
+                    icon={<Clock className="h-4 w-4" />}
+                    label="メール予約リスト"
+                  />
+                  <ActionLink
+                    href="/campaigns/new"
+                    icon={<PlusCircle className="h-4 w-4" />}
+                    label="新規キャンペーン"
+                  />
+                  <ActionLink
+                    href="/campaigns"
+                    icon={<List className="h-4 w-4" />}
+                    label="キャンペーン一覧"
+                  />
+                  {/* ▼ 修正2: 正しいリンクに修正（詳細ページではなく /email/schedules に遷移） */}
+                  <ActionLink
+                    href="/email/schedules"
+                    icon={<Clock className="h-4 w-4" />}
+                    label="キャンペーン予約リスト"
+                  />
+                  <ActionLink
+                    href="/recipients"
+                    icon={<Users className="h-4 w-4" />}
+                    label="受信者リスト"
+                  />
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
@@ -213,6 +214,26 @@ export default function EmailLanding() {
         )}
       </main>
     </>
+  );
+}
+
+function ActionLink({
+  href,
+  icon,
+  label,
+}: {
+  href: string;
+  icon: React.ReactNode;
+  label: string;
+}) {
+  return (
+    <Link
+      href={href}
+      className="flex items-center gap-2 rounded-xl border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
+    >
+      <span className="text-neutral-600">{icon}</span>
+      <span className="text-neutral-800">{label}</span>
+    </Link>
   );
 }
 
