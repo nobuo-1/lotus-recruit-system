@@ -7,7 +7,6 @@ import Toggle from "@/components/Toggle";
 import { PREFECTURES } from "@/constants/prefectures";
 import { JOB_CATEGORIES, JOB_LARGE } from "@/constants/jobCategories";
 import { Pencil, Trash2 } from "lucide-react";
-import { JobCategoriesCell } from "@/components/JobCategoriesCell";
 
 // 設定ページで切り替える列キー
 type RecipientColumnKey =
@@ -227,15 +226,12 @@ export default function RecipientsPage() {
         );
       case "company_name":
         return <span className="text-neutral-700">{safe(r.company_name)}</span>;
-      case "job_categories": {
-        const items =
-          r.job_categories && Array.isArray(r.job_categories)
-            ? r.job_categories
-            : ([r.job_category_large, r.job_category_small].filter(
-                Boolean
-              ) as string[]);
-        return <JobCategoriesCell items={items} />;
-      }
+      case "job_categories":
+        return (
+          <span className="whitespace-nowrap text-neutral-600">
+            {formatJob(r.job_category_large, r.job_category_small)}
+          </span>
+        );
       case "gender":
         return (
           <span className="whitespace-nowrap">
