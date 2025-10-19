@@ -9,6 +9,38 @@ import { toastSuccess, toastError } from "@/components/AppToast";
 
 type JobPair = { large: string; small: string };
 
+// 文字列/オブジェクト/表示済みラベルから {large, small} を抽出
+const parseJobToPair = (it: unknown): JobPair => {
+  // 1) 文字列（JSON or ラベル「大(小)」）
+  if (typeof it === "string") {
+    const s = it.trim();
+    if (s.startsWith("{") && s.endsWith("}")) {
+      try {
+        const o = JSON.parse(s);
+        return {
+          large: typeof o?.large === "string" ? o.large : "",
+          small: typeof o?.small === "string" ? o.small : "",
+        };
+      } catch {}
+    }
+    // 「大(小)」 or 「大（小）」形式
+    const m = s.match(/^(.+?)\s*[（(]([^()（）]+)[)）]\s*$/);
+    if (m) return { large: m[1].trim(), small: m[2].trim() };
+    // 小のみ/大のみのラベルだった場合はとりあえず large に入れる
+    return { large: s, small: "" };
+  }
+
+  // 2) オブジェクト
+  if (it && typeof it === "object") {
+    const any = it as any;
+    return {
+      large: typeof any?.large === "string" ? any.large : "",
+      small: typeof any?.small === "string" ? any.small : "",
+    };
+  }
+  return { large: "", small: "" };
+};
+
 export default function EditRecipientPage({
   params,
 }: {
@@ -49,13 +81,10 @@ export default function EditRecipientPage({
         setRegion(r.region ?? "");
         setGender((r.gender as any) ?? "");
 
-        // 既存の複数職種があればプリセット、無ければ従来の大/小→1行
+        // --- 職種プリセット ---
         let preset: JobPair[] = [];
         if (Array.isArray(r.job_categories) && r.job_categories.length) {
-          preset = r.job_categories.map((it: any) => ({
-            large: typeof it?.large === "string" ? it.large : "",
-            small: typeof it?.small === "string" ? it.small : "",
-          }));
+          preset = r.job_categories.map(parseJobToPair);
         } else {
           preset = [
             {
@@ -86,7 +115,7 @@ export default function EditRecipientPage({
   const onSave = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    // 送信用：空行を除外
+    // 空行を除外
     const cleaned = jobs
       .map((j) => ({
         large: j.large?.trim() || "",
@@ -257,7 +286,13 @@ export default function EditRecipientPage({
             <div className="text-sm text-neutral-500">職種（複数追加可）</div>
 
             {jobs.map((j, idx) => {
-              const smalls = j.large ? JOB_CATEGORIES[j.large] ?? [] : [];
+              const baseSmalls = j.large ? JOB_CATEGORIES[j.large] ?? [] : [];
+              // 既存データがマスタ外でも選択肢に出す（未選択化防止）
+              const smalls =
+                j.small && !baseSmalls.includes(j.small)
+                  ? [...baseSmalls, j.small]
+                  : baseSmalls;
+
               return (
                 <div
                   key={idx}

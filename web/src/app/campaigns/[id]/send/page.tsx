@@ -7,7 +7,7 @@ import { PREFECTURES } from "@/constants/prefectures";
 import { JOB_CATEGORIES, JOB_LARGE } from "@/constants/jobCategories";
 import { toastSuccess, toastError } from "@/components/AppToast";
 
-/** 受信者リスト設定で使うキー */
+// 受信者リストの表示列キー（共通）
 type RecipientColumnKey =
   | "name"
   | "company_name"
@@ -19,23 +19,13 @@ type RecipientColumnKey =
   | "region"
   | "phone";
 
-/** このページで扱う列（設定でONのものだけ表示） */
-const PAGE_ORDER: RecipientColumnKey[] = [
+const DEFAULT_VISIBLE: RecipientColumnKey[] = [
   "name",
   "email",
   "age",
   "gender",
   "region",
   "job_categories",
-];
-
-const DEFAULT_VISIBLE: RecipientColumnKey[] = [
-  "name",
-  "company_name",
-  "job_categories",
-  "email",
-  "region",
-  "created_at",
 ];
 
 type Recipient = {
@@ -46,11 +36,11 @@ type Recipient = {
   region: string | null;
   birthday: string | null;
 
-  // 従来の単一フィールド
+  // 単一ペア（後方互換）
   job_category_large: string | null;
   job_category_small: string | null;
 
-  // 新：複数職種（文字列 or {large,small} 配列）
+  // 複数職種（APIが返す場合に使用）
   job_categories?: Array<string | { large?: unknown; small?: unknown }> | null;
 
   is_active: boolean | null;
@@ -74,30 +64,40 @@ const pad = (n: number) => String(n).padStart(2, "0");
 const localDateISO = (d: Date) =>
   `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 
-const toS = (v: unknown) => (typeof v === "string" ? v.trim() : "");
-
-const normalizeJobs = (
-  r: Pick<
-    Recipient,
-    "job_categories" | "job_category_large" | "job_category_small"
-  >
-): string[] => {
-  if (Array.isArray(r.job_categories) && r.job_categories.length) {
-    return r.job_categories
-      .map((it) => {
-        if (typeof it === "string") return toS(it);
-        if (it && typeof it === "object") {
-          const L = toS((it as any).large);
-          const S = toS((it as any).small);
-          return L && S ? `${L}（${S}）` : L || S || "";
-        }
-        return "";
-      })
-      .filter(Boolean);
+// 文字列/オブジェクト → 表示ラベル「大(小)」
+const jobLabelFromAny = (it: unknown): string => {
+  const toS = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+  if (typeof it === "string") {
+    const s = it.trim();
+    if (s.startsWith("{") && s.endsWith("}")) {
+      try {
+        const o = JSON.parse(s);
+        const L = toS(o?.large);
+        const S = toS(o?.small);
+        return L && S ? `${L}(${S})` : L || S || "";
+      } catch {
+        return s;
+      }
+    }
+    return s;
   }
-  const L = toS(r.job_category_large);
-  const S = toS(r.job_category_small);
-  return L || S ? [L && S ? `${L}（${S}）` : L || S] : [];
+  if (it && typeof it === "object") {
+    const any = it as any;
+    const L = toS(any?.large);
+    const S = toS(any?.small);
+    return L && S ? `${L}(${S})` : L || S || "";
+  }
+  return "";
+};
+
+// 受け取ったレコードから表示用職種配列を作る
+const normalizeJobs = (r: Recipient): string[] => {
+  if (Array.isArray(r.job_categories) && r.job_categories.length) {
+    return r.job_categories.map(jobLabelFromAny).filter(Boolean);
+  }
+  const L = (r.job_category_large ?? "").trim();
+  const S = (r.job_category_small ?? "").trim();
+  return L || S ? [L && S ? `${L}(${S})` : L || S] : [];
 };
 
 export default function SendPage() {
@@ -105,6 +105,7 @@ export default function SendPage() {
   const params = useParams<{ id: string }>();
   const id = (params?.id as string) || "";
 
+  // 予約UI用
   const now = new Date();
   const minDateISO = localDateISO(now);
   const twoYears = new Date(now);
@@ -115,12 +116,24 @@ export default function SendPage() {
   const [already, setAlready] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
-  // 可視列設定
-  const [visibleCols, setVisibleCols] =
-    useState<RecipientColumnKey[]>(DEFAULT_VISIBLE);
-  const orderedVisible = PAGE_ORDER.filter((k) => visibleCols.includes(k));
+  // 表示列設定の取得（フィルタとテーブル両方で使用）
+  const [visible, setVisible] = useState<RecipientColumnKey[]>(DEFAULT_VISIBLE);
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("/api/email/recipient-list-settings", {
+          cache: "no-store",
+        });
+        if (res.ok) {
+          const j = await res.json();
+          const cols = (j?.visible_columns ?? []) as RecipientColumnKey[];
+          if (Array.isArray(cols) && cols.length) setVisible(cols);
+        }
+      } catch {}
+    })();
+  }, []);
 
-  // フィルタ（可視列に連動）
+  // フィルター（可視列に応じて出し分け）
   const [q, setQ] = useState("");
   const [ageMin, setAgeMin] = useState<string>("");
   const [ageMax, setAgeMax] = useState<string>("");
@@ -158,69 +171,45 @@ export default function SendPage() {
     setAlready(new Set<string>(j?.ids ?? []));
   };
 
-  const loadVisible = async () => {
-    try {
-      const r = await fetch("/api/email/recipient-list-settings", {
-        cache: "no-store",
-      });
-      if (r.ok) {
-        const j = await r.json();
-        const cols = (j?.visible_columns ?? []) as RecipientColumnKey[];
-        if (Array.isArray(cols) && cols.length) setVisibleCols(cols);
-      }
-    } catch {}
-  };
-
   useEffect(() => {
     load();
     loadAlready();
-    loadVisible();
   }, [id]);
 
   const list = useMemo(() => {
     return all.filter((r) => {
       if (already.has(r.id)) return false;
-
-      if (orderedVisible.includes("name") && q && !(r.name ?? "").includes(q))
+      if ((visible.includes("name") || visible.includes("email")) && q) {
+        if (!(r.name ?? "").includes(q) && !(r.email ?? "").includes(q))
+          return false;
+      }
+      if (visible.includes("gender") && gender && r.gender !== gender)
         return false;
-      if (orderedVisible.includes("gender") && gender && r.gender !== gender)
-        return false;
-      if (orderedVisible.includes("region") && pref && r.region !== pref)
-        return false;
-
-      // 職種フィルタは従来通りメインの大/小で実施（複数があっても同様）
-      if (orderedVisible.includes("job_categories")) {
+      if (visible.includes("region") && pref && r.region !== pref) return false;
+      if (visible.includes("job_categories")) {
         if (large && r.job_category_large !== large) return false;
         if (small && r.job_category_small !== small) return false;
       }
-
-      if (orderedVisible.includes("age")) {
+      if (visible.includes("age")) {
         const age = ageFromBirthday(r.birthday);
         if (ageMin && (age ?? -1) < +ageMin) return false;
         if (ageMax && (age ?? 999) > +ageMax) return false;
       }
       return true;
     });
-  }, [
-    all,
-    already,
-    q,
-    gender,
-    pref,
-    large,
-    small,
-    ageMin,
-    ageMax,
-    orderedVisible,
-  ]);
+  }, [all, already, q, gender, pref, large, small, ageMin, ageMax, visible]);
 
   const allSelected = list.length > 0 && list.every((r) => selected.has(r.id));
   const toggleAll = () => {
     const next = new Set(selected);
-    if (allSelected) list.forEach((r) => next.delete(r.id));
-    else list.forEach((r) => next.add(r.id));
+    if (allSelected) {
+      list.forEach((r) => next.delete(r.id));
+    } else {
+      list.forEach((r) => next.add(r.id));
+    }
     setSelected(next);
   };
+
   const toggle = (rid: string) => {
     const next = new Set(selected);
     next.has(rid) ? next.delete(rid) : next.add(rid);
@@ -280,6 +269,17 @@ export default function SendPage() {
       alert(`送信/予約に失敗しました: ${res.status}\n${t}`);
     }
   };
+
+  // 可視列のうち、このページで扱う列だけ順序固定で表示
+  const DISPLAY_ORDER: RecipientColumnKey[] = [
+    "name",
+    "email",
+    "age",
+    "gender",
+    "region",
+    "job_categories",
+  ];
+  const orderedVisible = DISPLAY_ORDER.filter((k) => visible.includes(k));
 
   return (
     <main className="mx-auto max-w-6xl p-6">
@@ -341,18 +341,18 @@ export default function SendPage() {
         </div>
       )}
 
-      {/* フィルタ（可視列に連動して表示） */}
+      {/* フィルター（可視列に応じて出し分け） */}
       <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-3">
-        {orderedVisible.includes("name") && (
+        {(visible.includes("name") || visible.includes("email")) && (
           <input
-            placeholder="名前で検索"
+            placeholder="名前/メールで検索"
             value={q}
             onChange={(e) => setQ(e.target.value)}
             className="rounded-lg border border-neutral-300 px-3 py-2"
           />
         )}
 
-        {orderedVisible.includes("age") && (
+        {visible.includes("age") && (
           <div className="flex gap-2">
             <input
               type="number"
@@ -373,7 +373,7 @@ export default function SendPage() {
           </div>
         )}
 
-        {orderedVisible.includes("gender") && (
+        {visible.includes("gender") && (
           <select
             value={gender}
             onChange={(e) => setGender(e.target.value)}
@@ -385,7 +385,7 @@ export default function SendPage() {
           </select>
         )}
 
-        {orderedVisible.includes("job_categories") && (
+        {visible.includes("job_categories") && (
           <>
             <select
               value={large}
@@ -420,7 +420,7 @@ export default function SendPage() {
           </>
         )}
 
-        {orderedVisible.includes("region") && (
+        {visible.includes("region") && (
           <select
             value={pref}
             onChange={(e) => setPref(e.target.value)}
@@ -457,29 +457,31 @@ export default function SendPage() {
                 </div>
               </th>
 
-              {orderedVisible.map((c) => (
+              {orderedVisible.map((k) => (
                 <th
-                  key={c}
+                  key={k}
                   className={`px-3 py-3 ${
-                    c === "gender" ||
-                    c === "age" ||
-                    c === "region" ||
-                    c === "job_categories"
+                    k === "age" ||
+                    k === "gender" ||
+                    k === "region" ||
+                    k === "job_categories"
                       ? "text-center"
                       : "text-left"
                   }`}
                 >
-                  {{
-                    name: "名前",
-                    email: "メール",
-                    age: "年齢",
-                    gender: "性別",
-                    region: "都道府県",
-                    job_categories: "職種",
-                    company_name: "会社名",
-                    created_at: "作成日",
-                    phone: "電話",
-                  }[c] ?? c}
+                  {
+                    {
+                      name: "名前",
+                      email: "メール",
+                      age: "年齢",
+                      gender: "性別",
+                      region: "都道府県",
+                      job_categories: "職種",
+                      company_name: "会社名",
+                      created_at: "作成日",
+                      phone: "電話",
+                    }[k] as string
+                  }
                 </th>
               ))}
             </tr>
@@ -495,18 +497,18 @@ export default function SendPage() {
                   />
                 </td>
 
-                {orderedVisible.map((c) => {
-                  switch (c) {
+                {orderedVisible.map((k) => {
+                  switch (k) {
                     case "name":
                       return (
-                        <td key={c} className="px-3 py-3">
+                        <td key={k} className="px-3 py-3">
                           {r.name ?? ""}
                         </td>
                       );
                     case "email":
                       return (
                         <td
-                          key={c}
+                          key={k}
                           className="px-3 py-3 text-neutral-600 whitespace-nowrap"
                         >
                           {r.email ?? ""}
@@ -515,7 +517,7 @@ export default function SendPage() {
                     case "age":
                       return (
                         <td
-                          key={c}
+                          key={k}
                           className="px-3 py-3 text-center whitespace-nowrap"
                         >
                           {ageFromBirthday(r.birthday) ?? ""}
@@ -524,7 +526,7 @@ export default function SendPage() {
                     case "gender":
                       return (
                         <td
-                          key={c}
+                          key={k}
                           className="px-3 py-3 text-center whitespace-nowrap"
                         >
                           {r.gender === "male"
@@ -537,29 +539,26 @@ export default function SendPage() {
                     case "region":
                       return (
                         <td
-                          key={c}
+                          key={k}
                           className="px-3 py-3 text-center whitespace-nowrap"
                         >
                           {r.region ?? ""}
                         </td>
                       );
-                    case "job_categories": {
-                      const items = normalizeJobs(r);
+                    case "job_categories":
                       return (
-                        <td key={c} className="px-3 py-3 text-center">
+                        <td key={k} className="px-3 py-3 text-center">
                           <div className="text-neutral-600 leading-5 whitespace-pre-line">
-                            {items.length ? items.join("\n") : ""}
+                            {normalizeJobs(r).join("\n")}
                           </div>
                         </td>
                       );
-                    }
                     default:
                       return null;
                   }
                 })}
               </tr>
             ))}
-
             {list.length === 0 && (
               <tr>
                 <td
