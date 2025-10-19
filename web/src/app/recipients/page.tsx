@@ -44,7 +44,7 @@ type Row = {
   job_category_small: unknown | null;
 
   // 複数職種（API で返る想定）
-  job_categories?: { large?: unknown; small?: unknown }[] | null;
+  job_categories?: Array<string | { large?: unknown; small?: unknown }> | null;
 
   is_active: boolean | null;
   consent: string | null;
@@ -68,17 +68,28 @@ const toText = (v: unknown): string => {
   }
 };
 
-// 行データを JobCategoriesCell 用の配列に正規化
-const normalizeJobs = (r: Row): { large?: string; small?: string }[] => {
+// すべて「表示用の文字列配列」に正規化
+const normalizeJobs = (r: Row): string[] => {
+  const toS = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+
   if (Array.isArray(r.job_categories) && r.job_categories.length) {
-    return r.job_categories.map((it) => ({
-      large: toText(it?.large).trim(),
-      small: toText(it?.small).trim(),
-    }));
+    return r.job_categories
+      .map((it) => {
+        if (typeof it === "string") return toS(it);
+        if (it && typeof it === "object") {
+          const L = toS((it as any).large);
+          const S = toS((it as any).small);
+          return L && S ? `${L}（${S}）` : L || S || "";
+        }
+        return "";
+      })
+      .filter(Boolean);
   }
-  const L = toText(r.job_category_large).trim();
-  const S = toText(r.job_category_small).trim();
-  return L || S ? [{ large: L, small: S }] : [];
+
+  // 後方互換（単一フィールドから作成）
+  const L = toS(r.job_category_large);
+  const S = toS(r.job_category_small);
+  return L || S ? [L && S ? `${L}（${S}）` : L || S] : [];
 };
 
 export default function RecipientsPage() {
