@@ -26,11 +26,10 @@ export async function GET(req: Request) {
     if (!tenant_id)
       return NextResponse.json({ error: "no tenant" }, { status: 400 });
 
-    // 取得カラム（UIが参照するもののみ）
+    // UIが参照するカラム
     const selectCols =
-      "id,name,company_name,email,phone,gender,region,birthday,job_category_large,job_category_small,job_type,is_active,consent";
+      "id,name,company_name,job_categories,email,phone,gender,region,birthday,job_category_large,job_category_small,job_type,is_active,consent,created_at";
 
-    // クエリを1回実行するヘルパー
     const run = async (
       useDeletedFilter: boolean,
       orderBy: "updated_at" | "id"
@@ -39,21 +38,15 @@ export async function GET(req: Request) {
         .from("recipients")
         .select(selectCols, { count: "exact" })
         .eq("tenant_id", tenant_id);
-      if (useDeletedFilter) q = q.eq("is_deleted", false); // ← is_deleted があれば使う
+
+      if (useDeletedFilter) q = q.eq("is_deleted", false); // あれば効く
       if (onlyActive) q = q.eq("is_active", true);
+
       q = q.order(orderBy as any, { ascending: false }).limit(2000);
       return await q;
     };
 
-    /**
-     * フォールバック順:
-     *  1) is_deleted あり + updated_at 並び
-     *  2) is_deleted あり + id 並び
-     *  3) is_deleted なし + updated_at 並び
-     *  4) is_deleted なし + id 並び
-     *
-     * どこかで成功したらそれを返す。missing column 以外のエラーは即返す。
-     */
+    // 列有無の違いにフォールバック
     const tries: Array<[boolean, "updated_at" | "id"]> = [
       [true, "updated_at"],
       [true, "id"],
@@ -75,13 +68,12 @@ export async function GET(req: Request) {
         /is_deleted/.test(msg) ||
         /updated_at/.test(msg);
 
-      // 列が無い系のエラーは次のフォールバックへ。それ以外は即返す。
       if (!isMissingColumn) {
         return NextResponse.json({ error: error.message }, { status: 400 });
       }
     }
 
-    // 全て失敗した場合でも 200/空配列で返す（UIが壊れないように）
+    // 全滅でもUIは壊さない
     return NextResponse.json({ rows: [] });
   } catch (e: any) {
     return NextResponse.json(

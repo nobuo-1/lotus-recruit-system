@@ -1,10 +1,16 @@
 // web/src/app/email/settings/page.tsx
 "use client";
-import React from "react";
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import AppHeader from "@/components/AppHeader";
 import { toastSuccess, toastError } from "@/components/AppToast";
+
+// 非SSRで読み込み（CSR専用）
+const RecipientListSettingsForm = dynamic(
+  () => import("./RecipientListSettingsForm"),
+  { ssr: false }
+);
 
 type Form = {
   company_name: string;
@@ -49,18 +55,15 @@ export default function EmailSettingsPage() {
     });
     const t = await res.text();
     setMsg(`${res.status}: ${t}`);
-    if (res.ok) {
-      toastSuccess("保存しました");
-    } else {
-      toastError(`保存に失敗しました（${res.status}）`);
-    }
+    if (res.ok) toastSuccess("保存しました");
+    else toastError(`保存に失敗しました（${res.status}）`);
   };
 
   return (
     <>
       <AppHeader showBack />
       <main className="mx-auto max-w-3xl p-6">
-        {/* ヘッダー行：スマホは縦積み */}
+        {/* ヘッダー行 */}
         <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
           <div>
             <h1 className="whitespace-nowrap text-2xl font-semibold text-neutral-900">
@@ -78,6 +81,7 @@ export default function EmailSettingsPage() {
           </Link>
         </div>
 
+        {/* 会社情報フォーム（既存） */}
         <form
           onSubmit={onSubmit}
           className="space-y-4 rounded-2xl border border-neutral-200 p-4"
@@ -140,6 +144,16 @@ export default function EmailSettingsPage() {
             </button>
           </div>
         </form>
+
+        {/* ▼ 受信者リストの表示列（新規セクション） */}
+        <div className="mt-8 rounded-2xl border border-neutral-200 p-4">
+          <h2 className="mb-2 text-lg font-semibold">受信者リストの表示列</h2>
+          <p className="mb-3 text-sm text-neutral-500">
+            チェックした項目だけが「求職者リスト」の列とフィルターに出ます。
+            会社名や職種（複数）も選択できます。
+          </p>
+          <RecipientListSettingsForm />
+        </div>
 
         <pre className="mt-3 text-xs text-neutral-500">{msg}</pre>
       </main>
