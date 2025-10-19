@@ -15,7 +15,7 @@ const OPTIONS: { key: RecipientColumnKey; label: string }[] = [
   { key: "age", label: "年齢" },
   { key: "created_at", label: "作成日" },
   { key: "email", label: "メール" },
-  { key: "region", label: "地域" },
+  { key: "region", label: "都道府県" },
   { key: "phone", label: "電話" },
 ];
 
