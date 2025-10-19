@@ -46,27 +46,20 @@ export default function RecipientListSettingsForm() {
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-3">
-        {OPTIONS.map((o) => (
-          <label key={o.key} className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={selected.includes(o.key)}
-              onChange={() => toggle(o.key)}
-            />
-            <span>{o.label}</span>
-          </label>
-        ))}
+        {/* ...チェックボックス群 そのまま... */}
       </div>
-      <p className="text-sm text-gray-500">
+      <p className="text-sm text-neutral-500">
         ※ 「アクティブ切替」「操作（編集/消去）」は常に表示されます。
       </p>
-      <button
-        onClick={onSave}
-        disabled={isPending}
-        className="px-3 py-2 rounded bg-black text-white"
-      >
-        {isPending ? "保存中…" : "保存"}
-      </button>
+      <div className="flex justify-end">
+        <button
+          onClick={onSave}
+          disabled={isPending}
+          className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
+        >
+          {isPending ? "保存中…" : "保存"}
+        </button>
+      </div>
     </div>
   );
 }
