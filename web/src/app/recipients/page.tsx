@@ -64,6 +64,15 @@ function ageFromBirthday(iso?: string | null): string {
   return age >= 0 && age < 130 ? String(age) : "";
 }
 
+function formatJob(large?: string | null, small?: string | null): string {
+  const L = (large ?? "").trim();
+  const S = (small ?? "").trim();
+  if (L && S) return `${L}（${S}）`;
+  if (L) return L;
+  if (S) return S;
+  return "";
+}
+
 export default function RecipientsPage() {
   const [rows, setRows] = useState<Row[]>([]);
   const [msg, setMsg] = useState("");
