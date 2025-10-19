@@ -28,7 +28,7 @@ export async function GET(req: Request) {
 
     // 取得カラム（UIが参照するもののみ）
     const selectCols =
-      "id,name,email,phone,gender,region,birthday,job_category_large,job_category_small,job_type,is_active,consent";
+      "id,name,company_name,email,phone,gender,region,birthday,job_category_large,job_category_small,job_type,is_active,consent";
 
     // クエリを1回実行するヘルパー
     const run = async (
