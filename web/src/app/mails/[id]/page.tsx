@@ -5,7 +5,6 @@ import Link from "next/link";
 import { supabaseServer } from "@/lib/supabaseServer";
 import { formatJpDateTime } from "@/lib/formatDate";
 
-// 受信者リストの表示列キー
 type RecipientColumnKey =
   | "name"
   | "company_name"
@@ -26,32 +25,44 @@ const DEFAULT_VISIBLE: RecipientColumnKey[] = [
   "created_at",
 ];
 
-// 安全にテキスト化
-const toText = (v: unknown) =>
-  typeof v === "string" ? v : v == null ? "" : String(v);
+const toText = (v: any) => (v == null ? "" : String(v));
 
-// 職種の表示用正規化（複数対応）
 const normalizeJobs = (rec: any): string[] => {
-  const L = (rec?.job_category_large ?? "").trim?.() ?? "";
-  const S = (rec?.job_category_small ?? "").trim?.() ?? "";
+  const L = toText(rec?.job_category_large).trim();
+  const S = toText(rec?.job_category_small).trim();
   const one =
     L || S ? [`${L}${L && S ? "（" : ""}${S}${L && S ? "）" : ""}`] : [];
 
   const raw = rec?.job_categories;
   if (!Array.isArray(raw) || raw.length === 0) return one;
 
-  const toS = (x: unknown) => (typeof x === "string" ? x.trim() : "");
-  return raw
-    .map((it) => {
-      if (typeof it === "string") return toS(it);
-      if (it && typeof it === "object") {
-        const ll = toS((it as any).large);
-        const ss = toS((it as any).small);
-        return ll && ss ? `${ll}（${ss}）` : ll || ss || "";
+  const toS = (x: unknown): string => {
+    if (typeof x === "string") {
+      const s = x.trim();
+      if (s.startsWith("{") || s.startsWith("[")) {
+        try {
+          const j = JSON.parse(s);
+          if (Array.isArray(j)) return j.map(toS).filter(Boolean).join(" / ");
+          if (j && typeof j === "object") {
+            const ll = toText((j as any).large).trim();
+            const ss = toText((j as any).small).trim();
+            return ll && ss ? `${ll}（${ss}）` : ll || ss || "";
+          }
+        } catch {
+          /* as plain string */
+        }
       }
-      return "";
-    })
-    .filter(Boolean);
+      return s;
+    }
+    if (x && typeof x === "object") {
+      const ll = toText((x as any).large).trim();
+      const ss = toText((x as any).small).trim();
+      return ll && ss ? `${ll}（${ss}）` : ll || ss || "";
+    }
+    return "";
+  };
+
+  return raw.map(toS).filter(Boolean);
 };
 
 export default async function MailDetailPage({
@@ -71,7 +82,6 @@ export default async function MailDetailPage({
     );
   }
 
-  // tenant
   const { data: prof } = await supabase
     .from("profiles")
     .select("tenant_id")
@@ -79,14 +89,13 @@ export default async function MailDetailPage({
     .maybeSingle();
   const tenantId = prof?.tenant_id as string | undefined;
 
-  // メール本体
   const { data: mail } = await supabase
     .from("mails")
     .select("id, name, subject, body_text, body_html, status, created_at")
     .eq("id", id)
     .maybeSingle();
 
-  // 受信者列の表示設定
+  // 表示列設定
   let visible = DEFAULT_VISIBLE;
   try {
     const { data: s } = await supabase
@@ -100,7 +109,7 @@ export default async function MailDetailPage({
     /* no-op */
   }
 
-  // 送信実績（メール用）
+  // 送信実績
   const { data: rows } = await supabase
     .from("mail_deliveries")
     .select(
@@ -109,9 +118,16 @@ export default async function MailDetailPage({
     .eq("mail_id", id)
     .order("sent_at", { ascending: false });
 
-  const sentCount = rows?.length ?? 0;
+  const textBody =
+    toText(mail?.body_text) ||
+    toText(mail?.body_html)
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/p>/gi, "\n\n")
+      .replace(/<[^>]+>/g, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
 
-  // 表示する列（設定に従う／独自列は常に表示）
+  // このページで使う列（表示設定に追従）
   const baseCols = [
     "name",
     ...(visible.includes("company_name") ? (["company_name"] as const) : []),
@@ -167,28 +183,32 @@ export default async function MailDetailPage({
       <section className="rounded-2xl border border-neutral-200 p-4">
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <div>
-            <div className="text-sm text-neutral-500">メール名</div>
-            <div className="text-neutral-900">{mail?.name ?? "-"}</div>
+            <div className="text-sm text-neutral-500">名前</div>
+            <div className="text-neutral-900">{toText(mail?.name) || "-"}</div>
           </div>
           <div>
             <div className="text-sm text-neutral-500">件名</div>
-            <div className="text-neutral-900">{mail?.subject ?? "-"}</div>
+            <div className="text-neutral-900">
+              {toText(mail?.subject) || "-"}
+            </div>
           </div>
           <div>
             <div className="text-sm text-neutral-500">ステータス</div>
-            <div className="text-neutral-900">{mail?.status ?? "-"}</div>
+            <div className="text-neutral-900">
+              {toText(mail?.status) || "-"}
+            </div>
           </div>
           <div>
             <div className="text-sm text-neutral-500">作成日</div>
             <div className="text-neutral-900">
-              {formatJpDateTime(mail?.created_at)}
+              {formatJpDateTime(mail?.created_at) || "-"}
             </div>
           </div>
           <div className="md:col-span-2">
             <div className="text-sm text-neutral-500">本文（テキスト）</div>
             <textarea
               readOnly
-              defaultValue={toText(mail?.body_text)}
+              defaultValue={textBody || "-"}
               className="mt-1 w-full min-h-[160px] rounded-xl border border-neutral-200 px-3 py-2"
             />
           </div>
@@ -198,7 +218,7 @@ export default async function MailDetailPage({
       {/* 送信先一覧 */}
       <section className="mt-8 rounded-2xl border border-neutral-200">
         <div className="px-4 py-3 text-neutral-700">
-          送信先一覧（{sentCount} 件）
+          送信先一覧（{rows?.length ?? 0} 件）
         </div>
         <div className="overflow-x-auto">
           <table className="min-w-[1180px] w-full text-sm">
@@ -290,9 +310,11 @@ export default async function MailDetailPage({
                       }
                     })}
                     <td className="px-3 py-3 text-center">
-                      {toText(r.status)}
+                      {toText(r.status) || "-"}
                     </td>
-                    <td className="px-3 py-3">{formatJpDateTime(r.sent_at)}</td>
+                    <td className="px-3 py-3">
+                      {formatJpDateTime(r.sent_at) || "-"}
+                    </td>
                   </tr>
                 );
               })}

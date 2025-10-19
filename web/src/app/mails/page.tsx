@@ -1,4 +1,3 @@
-// web/src/app/mails/page.tsx
 import React from "react";
 export const dynamic = "force-dynamic";
 
@@ -117,22 +116,18 @@ export default async function MailsPage() {
         arr.push(s);
         byMail.set(s.mail_id, arr);
       });
-    } catch {
-      // スケジュール無しでも一覧は出せる
-    }
+    } catch {}
   }
 
   return (
     <main className="mx-auto max-w-6xl p-6">
-      {/* ヘッダー：スマホ縦積み */}
+      {/* ヘッダー：キャンペーン一覧のデザインに準拠 */}
       <div className="mb-6 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
           <h1 className="whitespace-nowrap text-2xl font-semibold text-neutral-900">
             メール一覧
           </h1>
-          <p className="text-sm text-neutral-500">
-            作成したプレーンテキストメールの一覧
-          </p>
+          <p className="text-sm text-neutral-500">作成したメールの一覧</p>
         </div>
         <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
           <Link

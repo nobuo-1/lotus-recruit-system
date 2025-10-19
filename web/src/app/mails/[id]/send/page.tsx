@@ -59,27 +59,42 @@ const pad = (n: number) => String(n).padStart(2, "0");
 const localDateISO = (d: Date) =>
   `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 
-const toText = (v: unknown) =>
-  typeof v === "string" ? v : v == null ? "" : String(v);
 const normalizeJobs = (r: Recipient): string[] => {
-  const L = (r.job_category_large ?? "").trim?.() ?? "";
-  const S = (r.job_category_small ?? "").trim?.() ?? "";
+  const L = (r.job_category_large ?? "").toString().trim();
+  const S = (r.job_category_small ?? "").toString().trim();
   const one =
     L || S ? [`${L}${L && S ? "（" : ""}${S}${L && S ? "）" : ""}`] : [];
+
   const raw = r.job_categories;
   if (!Array.isArray(raw) || raw.length === 0) return one;
-  const toS = (x: unknown) => (typeof x === "string" ? x.trim() : "");
-  return raw
-    .map((it) => {
-      if (typeof it === "string") return toS(it);
-      if (it && typeof it === "object") {
-        const ll = toS((it as any).large);
-        const ss = toS((it as any).small);
-        return ll && ss ? `${ll}（${ss}）` : ll || ss || "";
+
+  const toS = (x: unknown): string => {
+    if (typeof x === "string") {
+      const s = x.trim();
+      if (s.startsWith("{") || s.startsWith("[")) {
+        try {
+          const j = JSON.parse(s);
+          if (Array.isArray(j)) return j.map(toS).filter(Boolean).join(" / ");
+          if (j && typeof j === "object") {
+            const ll = String((j as any).large ?? "").trim();
+            const ss = String((j as any).small ?? "").trim();
+            return ll && ss ? `${ll}（${ss}）` : ll || ss || "";
+          }
+        } catch {
+          /* as plain string */
+        }
       }
-      return "";
-    })
-    .filter(Boolean);
+      return s;
+    }
+    if (x && typeof x === "object") {
+      const ll = String((x as any).large ?? "").trim();
+      const ss = String((x as any).small ?? "").trim();
+      return ll && ss ? `${ll}（${ss}）` : ll || ss || "";
+    }
+    return "";
+  };
+
+  return raw.map(toS).filter(Boolean);
 };
 
 export default function MailSendPage() {
@@ -97,10 +112,8 @@ export default function MailSendPage() {
   const [already, setAlready] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
-  // 表示列設定の取得（フィルター＆列に反映）
+  // 表示列設定（フィルター／列に反映）
   const [visible, setVisible] = useState<RecipientColumnKey[]>(DEFAULT_VISIBLE);
-  const [loadingCols, setLoadingCols] = useState(true);
-
   useEffect(() => {
     (async () => {
       try {
@@ -112,20 +125,21 @@ export default function MailSendPage() {
           const cols = (j?.visible_columns ?? []) as RecipientColumnKey[];
           if (Array.isArray(cols) && cols.length) setVisible(cols);
         }
-      } catch {}
-      setLoadingCols(false);
+      } catch {
+        /* no-op (既定のDEFAULT_VISIBLE) */
+      }
     })();
   }, []);
 
-  // フィルター（可視列のみ表示）
+  // フィルター
   const [q, setQ] = useState("");
-  const [companyQ, setCompanyQ] = useState("");
+  const [gender, setGender] = useState("");
+  const [pref, setPref] = useState("");
   const [ageMin, setAgeMin] = useState<string>("");
   const [ageMax, setAgeMax] = useState<string>("");
-  const [gender, setGender] = useState<string>("");
-  const [pref, setPref] = useState<string>("");
-  const [large, setLarge] = useState<string>("");
-  const [small, setSmall] = useState<string>("");
+  const [large, setLarge] = useState("");
+  const [small, setSmall] = useState("");
+  const [companyQ, setCompanyQ] = useState("");
 
   const smallOptions = useMemo(
     () => (large ? JOB_CATEGORIES[large] ?? [] : []),
@@ -164,47 +178,34 @@ export default function MailSendPage() {
   const list = useMemo(() => {
     return all.filter((r) => {
       if (already.has(r.id)) return false;
-
-      // 名前/メールテキスト検索（どちらかが可視の場合のみ）
       if ((visible.includes("name") || visible.includes("email")) && q) {
-        if (!toText(r.name).includes(q) && !toText(r.email).includes(q))
-          return false;
+        const hit = (r.name ?? "").includes(q) || (r.email ?? "").includes(q);
+        if (!hit) return false;
       }
-
-      // 会社名（可視のときのみ）
-      if (visible.includes("company_name") && companyQ) {
-        if (!toText(r.company_name).includes(companyQ)) return false;
-      }
-
-      // 性別（可視のときのみ）
       if (visible.includes("gender") && gender && r.gender !== (gender as any))
         return false;
-
-      // 都道府県（可視のときのみ）
       if (visible.includes("region") && pref && r.region !== pref) return false;
-
-      // 職種（可視のときのみ）…単一ペアで絞り込み（データの代表値）
+      if (visible.includes("company_name") && companyQ) {
+        if (!(r.company_name ?? "").includes(companyQ)) return false;
+      }
       if (visible.includes("job_categories")) {
         if (large && r.job_category_large !== large) return false;
         if (small && r.job_category_small !== small) return false;
       }
-
-      // 年齢（可視のときのみ）
       if (visible.includes("age")) {
-        const a = ageFromBirthday(r.birthday);
-        if (ageMin && (a ?? -1) < +ageMin) return false;
-        if (ageMax && (a ?? 999) > +ageMax) return false;
+        const age = ageFromBirthday(r.birthday);
+        if (ageMin && (age ?? -1) < +ageMin) return false;
+        if (ageMax && (age ?? 999) > +ageMax) return false;
       }
-
       return true;
     });
   }, [
     all,
     already,
     q,
-    companyQ,
     gender,
     pref,
+    companyQ,
     large,
     small,
     ageMin,
@@ -215,10 +216,14 @@ export default function MailSendPage() {
   const allSelected = list.length > 0 && list.every((r) => selected.has(r.id));
   const toggleAll = () => {
     const next = new Set(selected);
-    if (allSelected) list.forEach((r) => next.delete(r.id));
-    else list.forEach((r) => next.add(r.id));
+    if (allSelected) {
+      list.forEach((r) => next.delete(r.id));
+    } else {
+      list.forEach((r) => next.add(r.id));
+    }
     setSelected(next);
   };
+
   const toggle = (rid: string) => {
     const next = new Set(selected);
     next.has(rid) ? next.delete(rid) : next.add(rid);
@@ -264,6 +269,7 @@ export default function MailSendPage() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload),
     });
+
     const t = await res.text();
     setMsg(`${res.status}: ${t}`);
 
@@ -271,21 +277,13 @@ export default function MailSendPage() {
       toastSuccess(
         mode === "now" ? "送信キューに追加しました" : "予約を作成しました"
       );
+      // UX: 送信後は一覧へ戻る
       router.push("/mails");
     } else {
       toastError(`送信/予約に失敗しました（${res.status}）`);
       alert(`送信/予約に失敗しました: ${res.status}\n${t}`);
     }
   };
-
-  if (loadingCols) {
-    return (
-      <main className="mx-auto max-w-6xl p-6">
-        <h1 className="text-2xl font-semibold">配信先選択（メール）</h1>
-        <p className="text-sm text-neutral-500">読み込み中…</p>
-      </main>
-    );
-  }
 
   return (
     <main className="mx-auto max-w-6xl p-6">
@@ -347,7 +345,7 @@ export default function MailSendPage() {
         </div>
       )}
 
-      {/* 可視列に連動するフィルター */}
+      {/* フィルター（表示列に追従して表示/非表示） */}
       <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-3">
         {(visible.includes("name") || visible.includes("email")) && (
           <input
@@ -451,7 +449,7 @@ export default function MailSendPage() {
         )}
       </div>
 
-      {/* テーブル（会社名は設定連動、職種は複数行表示） */}
+      {/* テーブル（表示列に追従） */}
       <div className="overflow-x-auto rounded-2xl border border-neutral-200">
         <table className="min-w-[1000px] w-full text-sm">
           <thead className="bg-neutral-50 text-neutral-600">
@@ -545,7 +543,6 @@ export default function MailSendPage() {
                 <td
                   colSpan={
                     2 +
-                    1 + // email
                     (visible.includes("company_name") ? 1 : 0) +
                     (visible.includes("age") ? 1 : 0) +
                     (visible.includes("gender") ? 1 : 0) +
@@ -562,7 +559,7 @@ export default function MailSendPage() {
         </table>
       </div>
 
-      {/* 送信ボタン */}
+      {/* 送信ボタン：スマホは幅いっぱい */}
       <div className="mt-6 flex justify-end">
         <button
           onClick={onSend}

@@ -131,7 +131,7 @@ export default function EmailLanding() {
             </p>
           </div>
 
-          {/* トグル式アクションメニュー */}
+          {/* トグル式アクションメニュー（グルーピング＋羅列） */}
           <div className="relative">
             <button
               type="button"
@@ -148,44 +148,92 @@ export default function EmailLanding() {
             </button>
 
             {openActions && (
-              <div className="absolute right-0 z-10 mt-2 w-[320px] rounded-2xl border border-neutral-200 bg-white p-3 shadow-sm">
-                <div className="grid grid-cols-1 gap-2">
-                  <ActionLink
-                    href="/mails/new"
-                    icon={<Mail className="h-4 w-4" />}
-                    label="新規メール"
-                  />
-                  <ActionLink
-                    href="/mails"
-                    icon={<List className="h-4 w-4" />}
-                    label="メール一覧"
-                  />
-                  <ActionLink
-                    href="/mails/schedules"
-                    icon={<Clock className="h-4 w-4" />}
-                    label="メール予約リスト"
-                  />
-                  <ActionLink
-                    href="/campaigns/new"
-                    icon={<PlusCircle className="h-4 w-4" />}
-                    label="新規キャンペーン"
-                  />
-                  <ActionLink
-                    href="/campaigns"
-                    icon={<List className="h-4 w-4" />}
-                    label="キャンペーン一覧"
-                  />
-                  {/* ▼ 修正2: 正しいリンクに修正（詳細ページではなく /email/schedules に遷移） */}
-                  <ActionLink
-                    href="/email/schedules"
-                    icon={<Clock className="h-4 w-4" />}
-                    label="キャンペーン予約リスト"
-                  />
-                  <ActionLink
-                    href="/recipients"
-                    icon={<Users className="h-4 w-4" />}
-                    label="受信者リスト"
-                  />
+              <div className="absolute right-0 z-10 mt-2 w-[360px] rounded-2xl border border-neutral-200 bg-white p-3 shadow-sm">
+                {/* メール */}
+                <div className="mb-2 rounded-xl border border-neutral-100 p-3">
+                  <div className="mb-1.5 flex items-center gap-2 text-sm font-semibold text-neutral-700">
+                    <Mail className="h-4 w-4 text-neutral-600" />
+                    メール
+                  </div>
+                  <ul className="ml-6 list-disc space-y-1 text-sm">
+                    <li>
+                      <Link
+                        href="/mails/new"
+                        className="text-neutral-800 hover:underline"
+                      >
+                        新規メール
+                      </Link>
+                    </li>
+                    <li>
+                      <Link
+                        href="/mails"
+                        className="text-neutral-800 hover:underline"
+                      >
+                        メール一覧
+                      </Link>
+                    </li>
+                    <li>
+                      <Link
+                        href="/mails/schedules"
+                        className="text-neutral-800 hover:underline"
+                      >
+                        メール予約リスト
+                      </Link>
+                    </li>
+                  </ul>
+                </div>
+
+                {/* キャンペーン */}
+                <div className="mb-2 rounded-xl border border-neutral-100 p-3">
+                  <div className="mb-1.5 flex items-center gap-2 text-sm font-semibold text-neutral-700">
+                    <Megaphone className="h-4 w-4 text-neutral-600" />
+                    キャンペーン
+                  </div>
+                  <ul className="ml-6 list-disc space-y-1 text-sm">
+                    <li>
+                      <Link
+                        href="/campaigns/new"
+                        className="text-neutral-800 hover:underline"
+                      >
+                        新規キャンペーン
+                      </Link>
+                    </li>
+                    <li>
+                      <Link
+                        href="/campaigns"
+                        className="text-neutral-800 hover:underline"
+                      >
+                        キャンペーン一覧
+                      </Link>
+                    </li>
+                    {/* ← 修正：正しいURLに */}
+                    <li>
+                      <Link
+                        href="/email/schedules"
+                        className="text-neutral-800 hover:underline"
+                      >
+                        キャンペーン予約リスト
+                      </Link>
+                    </li>
+                  </ul>
+                </div>
+
+                {/* 受信者 */}
+                <div className="rounded-xl border border-neutral-100 p-3">
+                  <div className="mb-1.5 flex items-center gap-2 text-sm font-semibold text-neutral-700">
+                    <Users className="h-4 w-4 text-neutral-600" />
+                    受信者
+                  </div>
+                  <ul className="ml-6 list-disc space-y-1 text-sm">
+                    <li>
+                      <Link
+                        href="/recipients"
+                        className="text-neutral-800 hover:underline"
+                      >
+                        受信者リスト
+                      </Link>
+                    </li>
+                  </ul>
                 </div>
               </div>
             )}
@@ -204,7 +252,7 @@ export default function EmailLanding() {
           <KpiCard label="配信停止数(30日)" value={data?.unsub30 ?? "-"} />
         </div>
 
-        {/* 折れ線グラフ（期間切替） */}
+        {/* 折れ線グラフ */}
         <ChartBlock range={range} setRange={setRange} series={series} />
 
         {msg && (
@@ -214,26 +262,6 @@ export default function EmailLanding() {
         )}
       </main>
     </>
-  );
-}
-
-function ActionLink({
-  href,
-  icon,
-  label,
-}: {
-  href: string;
-  icon: React.ReactNode;
-  label: string;
-}) {
-  return (
-    <Link
-      href={href}
-      className="flex items-center gap-2 rounded-xl border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
-    >
-      <span className="text-neutral-600">{icon}</span>
-      <span className="text-neutral-800">{label}</span>
-    </Link>
   );
 }
 
