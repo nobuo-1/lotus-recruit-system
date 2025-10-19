@@ -5,7 +5,7 @@ import { createClient } from "@supabase/supabase-js";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-// --- Supabase Admin Client（サービスロール） ---
+// --- Supabase Admin Client ---
 function supabaseAdmin() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL as string;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY as string;
@@ -40,6 +40,10 @@ function htmlToText(html: string) {
     .trim();
 }
 
+export async function GET() {
+  return NextResponse.json({ ok: true, path: "/api/mails/send" });
+}
+
 export async function POST(req: Request) {
   try {
     const supabase = supabaseAdmin();
@@ -66,7 +70,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // --- 予約登録 ---
+    // 予約
     if (scheduleAt) {
       const { error: se } = await supabase.from("mail_schedules").insert({
         mail_id: mailId,
@@ -76,7 +80,6 @@ export async function POST(req: Request) {
       });
       if (se) return NextResponse.json({ error: se.message }, { status: 500 });
 
-      // 予約対象の recipients を scheduled でキュー化
       const ins = ids.map((rid: string) => ({
         mail_id: mailId,
         recipient_id: rid,
@@ -90,7 +93,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, scheduled: ids.length });
     }
 
-    // --- 即時送信 ---
+    // 即時送信
     const { data: recs, error: re } = await supabase
       .from("recipients")
       .select("id, email, name, consent")
