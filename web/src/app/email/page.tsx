@@ -1,9 +1,9 @@
 // web/src/app/email/page.tsx
 "use client";
-import React from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
-import { PlusCircle, List, Users, Settings } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { PlusCircle, List, Users, Settings, Mail } from "lucide-react";
 import KpiCard from "@/components/KpiCard";
 import {
   ResponsiveContainer,
@@ -14,7 +14,6 @@ import {
   Tooltip,
   CartesianGrid,
 } from "recharts";
-import { useRouter } from "next/navigation";
 
 type Summary = {
   campaignCount: number;
@@ -124,12 +123,13 @@ export default function EmailLanding() {
               </Link>
             </div>
             <p className="mt-1 text-sm text-neutral-500">
-              キャンペーンの作成・配信とKPIの確認
+              キャンペーン / プレーンテキストメールの作成・配信とKPIの確認
             </p>
           </div>
 
           {/* 右側：操作ボタン群（スマホでは下に縦積み） */}
-          <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+          <div className="grid w-full grid-cols-1 gap-2 sm:w-auto sm:grid-cols-2 lg:grid-cols-4">
+            {/* キャンペーン系 */}
             <Link
               href="/campaigns/new"
               className="inline-flex items-center justify-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
@@ -147,12 +147,46 @@ export default function EmailLanding() {
               <List className="h-5 w-5 text-neutral-600" strokeWidth={1.5} />
               <span className="whitespace-nowrap">キャンペーン一覧</span>
             </Link>
+
+            {/* 受信者 */}
             <Link
               href="/recipients"
               className="inline-flex items-center justify-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
             >
               <Users className="h-5 w-5 text-neutral-600" strokeWidth={1.5} />
               <span className="whitespace-nowrap">受信者リスト</span>
+            </Link>
+
+            {/* メール（プレーンテキスト） */}
+            <Link
+              href="/mails/new"
+              className="inline-flex items-center justify-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
+            >
+              <Mail className="h-5 w-5 text-neutral-600" strokeWidth={1.5} />
+              <span className="whitespace-nowrap">新規メール</span>
+            </Link>
+            <Link
+              href="/mails"
+              className="inline-flex items-center justify-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
+            >
+              <List className="h-5 w-5 text-neutral-600" strokeWidth={1.5} />
+              <span className="whitespace-nowrap">メール一覧</span>
+            </Link>
+
+            {/* 予約リスト（分離） */}
+            <Link
+              href="/mails/schedules"
+              className="inline-flex items-center justify-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
+            >
+              <List className="h-5 w-5 text-neutral-600" strokeWidth={1.5} />
+              <span className="whitespace-nowrap">メール予約リスト</span>
+            </Link>
+            <Link
+              href="/campaigns/schedules"
+              className="inline-flex items-center justify-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
+            >
+              <List className="h-5 w-5 text-neutral-600" strokeWidth={1.5} />
+              <span className="whitespace-nowrap">キャンペーン予約リスト</span>
             </Link>
           </div>
         </div>
