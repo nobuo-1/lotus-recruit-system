@@ -283,7 +283,7 @@ export default function SendPage() {
       toastSuccess(
         mode === "now" ? "送信キューに追加しました" : "予約を作成しました"
       );
-      router.push(mode === "now" ? "/campaigns" : "/campaigns/schedules");
+      router.push(mode === "now" ? "/campaigns" : "/email/schedules");
     } else {
       toastError(`送信/予約に失敗しました（${res.status}）`);
       alert(`送信/予約に失敗しました: ${res.status}\n${t}`);

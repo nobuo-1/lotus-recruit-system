@@ -142,7 +142,7 @@ export default async function CampaignsPage() {
             href="/email/schedules"
             className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
           >
-            メール予約リスト
+            キャンペーン予約リスト
           </Link>
           <Link
             href="/campaigns/new"
@@ -157,7 +157,7 @@ export default async function CampaignsPage() {
         <table className="min-w-[1180px] w-full text-sm">
           <thead className="bg-neutral-50 text-neutral-600">
             <tr>
-              <th className="px-3 py-3 text-left">名前</th>
+              <th className="px-3 py-3 text-left">キャンペーン名</th>
               <th className="px-3 py-3 text-left">件名</th>
               <th className="px-3 py-3 text-left">ステータス</th>
               <th className="px-3 py-3 text-left">予約</th>

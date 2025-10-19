@@ -1,34 +1,58 @@
+// web/src/app/mails/new/page.tsx
 "use client";
-import { useState } from "react";
-import { useRouter } from "next/navigation";
+import React, { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { toastSuccess, toastError } from "@/components/AppToast";
 
-export default function NewMailPage() {
-  const router = useRouter();
-  const [name, setName] = useState("");
-  const [subject, setSubject] = useState("");
-  const [body, setBody] = useState("");
-  const [msg, setMsg] = useState("");
-  const [submitting, setSubmitting] = useState(false);
+type Settings = {
+  from_email?: string | null;
+};
 
-  const onSubmit = async (e: React.FormEvent) => {
+export default function MailNewPage() {
+  const [msg, setMsg] = useState("");
+  const [fromEmail, setFromEmail] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("/api/email/settings", { cache: "no-store" });
+        if (res.ok) {
+          const j: Settings = await res.json();
+          setFromEmail(String(j?.from_email ?? ""));
+        }
+      } catch {
+        /* no-op */
+      }
+    })();
+  }, []);
+
+  const onSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (submitting) return;
-    setSubmitting(true);
+    const fd = new FormData(e.currentTarget);
+
+    const body_text = (fd.get("body_text") as string) ?? "";
+    const body_html = body_text
+      .split("\n")
+      .map((l) => l.trim())
+      .join("<br />");
+
+    const payload = {
+      name: fd.get("name"),
+      subject: fd.get("subject"),
+      from_email: fd.get("from_email"),
+      body_text,
+      body_html, // 変換して同時保存（プレビューや将来の再利用に備える）
+    };
 
     const res = await fetch("/api/mails", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name, subject, body_text: body }),
+      body: JSON.stringify(payload),
     });
     const t = await res.text();
     setMsg(`${res.status}: ${t}`);
-    setSubmitting(false);
-
     if (res.ok) {
-      const j = JSON.parse(t);
       toastSuccess("保存しました");
-      router.push(`/mails/${j.id}`);
     } else {
       toastError(`保存に失敗しました（${res.status}）`);
     }
@@ -36,49 +60,101 @@ export default function NewMailPage() {
 
   return (
     <main className="mx-auto max-w-3xl p-6">
-      <h1 className="mb-4 text-2xl font-semibold text-neutral-900">
-        新規メール
-      </h1>
-      <form onSubmit={onSubmit} className="space-y-4 rounded-2xl border p-4">
+      {/* ヘッダー：スマホ縦積み */}
+      <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
-          <label className="block text-sm text-neutral-600">管理名</label>
-          <input
-            className="mt-1 w-full rounded-xl border px-3 py-2"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            required
-          />
+          <h1 className="whitespace-nowrap text-2xl font-semibold text-neutral-900">
+            メール作成
+          </h1>
+          <p className="text-sm text-neutral-500">
+            プレーンテキストのメールを作成します
+          </p>
         </div>
-        <div>
-          <label className="block text-sm text-neutral-600">件名</label>
-          <input
-            className="mt-1 w-full rounded-xl border px-3 py-2"
-            value={subject}
-            onChange={(e) => setSubject(e.target.value)}
-            required
-          />
-        </div>
-        <div>
-          <label className="block text-sm text-neutral-600">
-            本文（プレーンテキスト）
-          </label>
-          <textarea
-            className="mt-1 h-64 w-full rounded-xl border px-3 py-2"
-            value={body}
-            onChange={(e) => setBody(e.target.value)}
-            required
-          />
-        </div>
-        <div className="flex justify-end">
-          <button
-            disabled={submitting}
-            className="rounded-xl border px-4 py-2 hover:bg-neutral-50"
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+          <Link
+            href="/email"
+            className="whitespace-nowrap rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
           >
-            {submitting ? "保存中…" : "保存"}
+            メール配信トップへ
+          </Link>
+          <Link
+            href="/mails"
+            className="whitespace-nowrap rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
+          >
+            メール一覧へ
+          </Link>
+        </div>
+      </div>
+
+      <form
+        onSubmit={onSubmit}
+        className="space-y-4 rounded-2xl border border-neutral-200 p-4"
+      >
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div>
+            <div className="text-sm text-neutral-500">内部名</div>
+            <input
+              name="name"
+              className="mt-1 w-full rounded-lg border border-neutral-300 px-3 py-2"
+              placeholder="メール名"
+              required
+            />
+          </div>
+
+          <div>
+            <div className="text-sm text-neutral-500">件名</div>
+            <input
+              name="subject"
+              className="mt-1 w-full rounded-lg border border-neutral-300 px-3 py-2"
+              placeholder="メール件名（例: {{NAME}} 様へのご案内）"
+              required
+            />
+            <p className="mt-1 text-xs text-neutral-500">
+              差し込み可: <code className="font-mono">{"{{NAME}}"}</code>,{" "}
+              <code className="font-mono">{"{{EMAIL}}"}</code> （例:{" "}
+              <code className="font-mono">{"{{NAME}}"}</code> 様）
+            </p>
+          </div>
+
+          <div className="md:col-span-2">
+            <div className="text-sm text-neutral-500">差出人メール</div>
+            <input
+              name="from_email"
+              className="mt-1 w-full rounded-lg border border-neutral-300 px-3 py-2"
+              placeholder="noreply@example.com"
+              value={fromEmail}
+              onChange={(e) => setFromEmail(e.target.value)}
+              required
+            />
+          </div>
+        </div>
+
+        <div>
+          <div className="text-sm text-neutral-500">本文（文章）</div>
+          <textarea
+            name="body_text"
+            className="mt-1 w-full min-h-[240px] rounded-lg border border-neutral-300 px-3 py-2"
+            placeholder="そのまま文章を入力してください（差し込み可: {{NAME}}, {{EMAIL}}）"
+            required
+          />
+          <p className="mt-2 text-xs text-neutral-500">
+            差し込み可: <code className="font-mono">{"{{NAME}}"}</code>,{" "}
+            <code className="font-mono">{"{{EMAIL}}"}</code>
+            （例: <code className="font-mono">{"{{NAME}}"}</code> 様）
+          </p>
+        </div>
+
+        <div className="flex justify-end sm:justify-end">
+          <button
+            type="submit"
+            className="w-full rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 sm:w-auto"
+          >
+            保存
           </button>
         </div>
-        <pre className="mt-3 text-xs text-neutral-500">{msg}</pre>
       </form>
+
+      <pre className="mt-3 text-xs text-neutral-500">{msg}</pre>
     </main>
   );
 }

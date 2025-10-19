@@ -46,7 +46,7 @@ export default function SchedulesPage() {
         <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
           <div>
             <h1 className="whitespace-nowrap text-2xl font-semibold text-neutral-900">
-              メール予約リスト
+              キャンペーン予約リスト
             </h1>
             <p className="text-sm text-neutral-500">
               予約中のメール配信を確認します
