@@ -1,3 +1,4 @@
+// web/src/app/email/settings/RecipientListSettingsForm.tsx
 "use client";
 
 import { useEffect, useState, useTransition } from "react";
@@ -45,12 +46,24 @@ export default function RecipientListSettingsForm() {
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-2 gap-3">
-        {/* ...チェックボックス群 そのまま... */}
+      {/* ← ここがコメントになっていたので描画されていませんでした */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {OPTIONS.map((o) => (
+          <label key={o.key} className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={selected.includes(o.key)}
+              onChange={() => toggle(o.key)}
+            />
+            <span>{o.label}</span>
+          </label>
+        ))}
       </div>
+
       <p className="text-sm text-neutral-500">
         ※ 「アクティブ切替」「操作（編集/消去）」は常に表示されます。
       </p>
+
       <div className="flex justify-end">
         <button
           onClick={onSave}
