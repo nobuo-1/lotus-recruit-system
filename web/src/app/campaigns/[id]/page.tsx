@@ -76,7 +76,7 @@ export default async function CampaignDetailPage({
     );
   }
 
-  // tenant & 可視列
+  // tenant & 可視列取得
   const { data: prof } = await supabase
     .from("profiles")
     .select("tenant_id")
@@ -101,11 +101,11 @@ export default async function CampaignDetailPage({
     .eq("id", id)
     .maybeSingle();
 
-  // 送信先（受信者の複数職種も一緒に取得）
+  // 送信先（受信者の複数職種＋会社名も取得）
   const { data: rows } = await supabase
     .from("deliveries")
     .select(
-      "recipient_id, status, sent_at, recipients(name, email, region, gender, job_category_large, job_category_small, job_categories)"
+      "recipient_id, status, sent_at, recipients(name, email, company_name, region, gender, job_category_large, job_category_small, job_categories)"
     )
     .eq("campaign_id", id)
     .order("sent_at", { ascending: false });
@@ -116,6 +116,7 @@ export default async function CampaignDetailPage({
   // このページで扱う列のうち、設定で可視のものだけ表示（送信ステータス/送信日時は常時表示）
   const DISPLAY_ORDER: RecipientColumnKey[] = [
     "name",
+    "company_name", // ← 会社名を追加（設定ONの時のみ表示）
     "email",
     "region",
     "gender",
@@ -233,6 +234,15 @@ export default async function CampaignDetailPage({
                           return (
                             <td key={k} className="px-3 py-3">
                               {rec.name ?? ""}
+                            </td>
+                          );
+                        case "company_name":
+                          return (
+                            <td
+                              key={k}
+                              className="px-3 py-3 text-neutral-700 whitespace-nowrap"
+                            >
+                              {rec.company_name ?? ""}
                             </td>
                           );
                         case "email":

@@ -7,7 +7,7 @@ import { PREFECTURES } from "@/constants/prefectures";
 import { JOB_CATEGORIES, JOB_LARGE } from "@/constants/jobCategories";
 import { toastSuccess, toastError } from "@/components/AppToast";
 
-// 受信者リストの表示列キー（共通）
+// 受信者リストの表示列キー
 type RecipientColumnKey =
   | "name"
   | "company_name"
@@ -31,6 +31,7 @@ const DEFAULT_VISIBLE: RecipientColumnKey[] = [
 type Recipient = {
   id: string;
   name: string | null;
+  company_name?: string | null;
   email: string | null;
   gender: "male" | "female" | null;
   region: string | null;
@@ -64,7 +65,7 @@ const pad = (n: number) => String(n).padStart(2, "0");
 const localDateISO = (d: Date) =>
   `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 
-// 文字列/オブジェクト → 表示ラベル「大(小)」
+// JSON/オブジェクト/ラベル → 「大(小)」
 const jobLabelFromAny = (it: unknown): string => {
   const toS = (v: unknown) => (typeof v === "string" ? v.trim() : "");
   if (typeof it === "string") {
@@ -90,7 +91,7 @@ const jobLabelFromAny = (it: unknown): string => {
   return "";
 };
 
-// 受け取ったレコードから表示用職種配列を作る
+// 表示用の職種配列へ正規化
 const normalizeJobs = (r: Recipient): string[] => {
   if (Array.isArray(r.job_categories) && r.job_categories.length) {
     return r.job_categories.map(jobLabelFromAny).filter(Boolean);
@@ -135,6 +136,7 @@ export default function SendPage() {
 
   // フィルター（可視列に応じて出し分け）
   const [q, setQ] = useState("");
+  const [companyQ, setCompanyQ] = useState("");
   const [ageMin, setAgeMin] = useState<string>("");
   const [ageMax, setAgeMax] = useState<string>("");
   const [gender, setGender] = useState<string>("");
@@ -183,6 +185,12 @@ export default function SendPage() {
         if (!(r.name ?? "").includes(q) && !(r.email ?? "").includes(q))
           return false;
       }
+      if (
+        visible.includes("company_name") &&
+        companyQ &&
+        !(r.company_name ?? "").includes(companyQ)
+      )
+        return false;
       if (visible.includes("gender") && gender && r.gender !== gender)
         return false;
       if (visible.includes("region") && pref && r.region !== pref) return false;
@@ -197,7 +205,19 @@ export default function SendPage() {
       }
       return true;
     });
-  }, [all, already, q, gender, pref, large, small, ageMin, ageMax, visible]);
+  }, [
+    all,
+    already,
+    q,
+    companyQ,
+    gender,
+    pref,
+    large,
+    small,
+    ageMin,
+    ageMax,
+    visible,
+  ]);
 
   const allSelected = list.length > 0 && list.every((r) => selected.has(r.id));
   const toggleAll = () => {
@@ -270,9 +290,10 @@ export default function SendPage() {
     }
   };
 
-  // 可視列のうち、このページで扱う列だけ順序固定で表示
+  // このページで扱う列のうち、設定で可視のものだけ順序固定で表示
   const DISPLAY_ORDER: RecipientColumnKey[] = [
     "name",
+    "company_name", // ← 会社名を名前の次に
     "email",
     "age",
     "gender",
@@ -348,6 +369,15 @@ export default function SendPage() {
             placeholder="名前/メールで検索"
             value={q}
             onChange={(e) => setQ(e.target.value)}
+            className="rounded-lg border border-neutral-300 px-3 py-2"
+          />
+        )}
+
+        {visible.includes("company_name") && (
+          <input
+            placeholder="会社名"
+            value={companyQ}
+            onChange={(e) => setCompanyQ(e.target.value)}
             className="rounded-lg border border-neutral-300 px-3 py-2"
           />
         )}
@@ -438,7 +468,7 @@ export default function SendPage() {
 
       {/* テーブル */}
       <div className="overflow-x-auto rounded-2xl border border-neutral-200">
-        <table className="min-w-[1000px] w-full text-sm">
+        <table className="min-w-[1080px] w-full text-sm">
           <thead className="bg-neutral-50 text-neutral-600">
             <tr>
               <th className="px-3 py-3 text-left">
@@ -472,12 +502,12 @@ export default function SendPage() {
                   {
                     {
                       name: "名前",
+                      company_name: "会社名",
                       email: "メール",
                       age: "年齢",
                       gender: "性別",
                       region: "都道府県",
                       job_categories: "職種",
-                      company_name: "会社名",
                       created_at: "作成日",
                       phone: "電話",
                     }[k] as string
@@ -503,6 +533,15 @@ export default function SendPage() {
                       return (
                         <td key={k} className="px-3 py-3">
                           {r.name ?? ""}
+                        </td>
+                      );
+                    case "company_name":
+                      return (
+                        <td
+                          key={k}
+                          className="px-3 py-3 text-neutral-700 whitespace-nowrap"
+                        >
+                          {r.company_name ?? ""}
                         </td>
                       );
                     case "email":
