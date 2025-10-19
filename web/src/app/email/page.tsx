@@ -152,7 +152,7 @@ export default function EmailLanding() {
               className="inline-flex items-center justify-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
             >
               <Users className="h-5 w-5 text-neutral-600" strokeWidth={1.5} />
-              <span className="whitespace-nowrap">求職者リスト</span>
+              <span className="whitespace-nowrap">受信者リスト</span>
             </Link>
           </div>
         </div>

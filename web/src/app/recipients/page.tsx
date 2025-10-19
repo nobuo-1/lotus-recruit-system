@@ -29,6 +29,19 @@ const DEFAULT_VISIBLE: RecipientColumnKey[] = [
   "created_at",
 ];
 
+// ◆ 表示順（選択されている列だけ、この順番で表示）
+const DISPLAY_ORDER: RecipientColumnKey[] = [
+  "name",
+  "company_name",
+  "email",
+  "phone",
+  "age",
+  "gender",
+  "region",
+  "job_categories",
+  "created_at",
+];
+
 type Row = {
   id: string;
   name: string | null;
@@ -68,7 +81,7 @@ const toText = (v: unknown): string => {
   }
 };
 
-// すべて「表示用の文字列配列」に正規化
+// 職種配列を「表示用の文字列配列」に正規化
 const normalizeJobs = (r: Row): string[] => {
   const toS = (v: unknown) => (typeof v === "string" ? v.trim() : "");
 
@@ -240,11 +253,14 @@ export default function RecipientsPage() {
   if (loadingCols) {
     return (
       <main className="mx-auto max-w-7xl p-6">
-        <h1 className="text-2xl font-semibold">求職者リスト</h1>
+        <h1 className="text-2xl font-semibold">受信者リスト</h1>
         <p className="text-sm text-neutral-500">読み込み中…</p>
       </main>
     );
   }
+
+  // ◆ 選択済み列を、表示順に並べ替えた配列
+  const orderedVisible = DISPLAY_ORDER.filter((k) => visible.includes(k));
 
   const HEADERS: Record<RecipientColumnKey, string> = {
     name: "名前",
@@ -278,20 +294,7 @@ export default function RecipientsPage() {
           </span>
         );
       case "job_categories": {
-        // API が job_categories を返す場合：それを優先
-        // 返さない場合は単一の大/小から 1 行だけ作る（後方互換）
-        const fallbackOne = (() => {
-          const L = (r.job_category_large ?? "").trim();
-          const S = (r.job_category_small ?? "").trim();
-          return L || S
-            ? [`${L}${L && S ? "（" : ""}${S}${L && S ? "）" : ""}`]
-            : [];
-        })();
-
-        const items =
-          Array.isArray(r.job_categories) && r.job_categories.length
-            ? r.job_categories
-            : fallbackOne;
+        const items = normalizeJobs(r); // すべて文字列に正規化
 
         return <JobCategoriesCell items={items} />;
       }
@@ -353,7 +356,7 @@ export default function RecipientsPage() {
       <div className="mb-4 flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-neutral-900">
-            求職者リスト
+            受信者リスト
           </h1>
           <p className="text-sm text-neutral-500">登録・編集・配信対象の管理</p>
         </div>
@@ -514,7 +517,7 @@ export default function RecipientsPage() {
         <table className="min-w-[1080px] w-full text-sm">
           <thead className="bg-neutral-50 text-neutral-600">
             <tr>
-              {visible.map((c) => (
+              {orderedVisible.map((c) => (
                 <th
                   key={c}
                   className={`px-3 py-3 ${
@@ -527,21 +530,7 @@ export default function RecipientsPage() {
                       : "text-left"
                   }`}
                 >
-                  {
-                    (
-                      {
-                        name: "名前",
-                        company_name: "会社名",
-                        job_categories: "職種",
-                        gender: "性別",
-                        age: "年齢",
-                        created_at: "作成日",
-                        email: "メール",
-                        region: "都道府県",
-                        phone: "電話",
-                      } as const
-                    )[c]
-                  }
+                  {HEADERS[c]}
                 </th>
               ))}
               <th className="px-3 py-3 text-center">アクティブ</th>
@@ -551,7 +540,7 @@ export default function RecipientsPage() {
           <tbody>
             {filtered.map((r) => (
               <tr key={r.id} className="border-t border-neutral-200">
-                {visible.map((c) => (
+                {orderedVisible.map((c) => (
                   <td
                     key={c}
                     className={`px-3 py-3 ${
@@ -600,7 +589,7 @@ export default function RecipientsPage() {
             {filtered.length === 0 && (
               <tr>
                 <td
-                  colSpan={visible.length + 2}
+                  colSpan={orderedVisible.length + 2}
                   className="px-4 py-8 text-center text-neutral-400"
                 >
                   データがありません
