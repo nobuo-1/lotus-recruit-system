@@ -1,25 +1,31 @@
-// JobCategoriesCell.tsx（新規 or 既存ファイルの下に埋め込みでもOK）
+// web/src/components/JobCategoriesCell.tsx
 "use client";
-import { useState } from "react";
 
-export function JobCategoriesCell({ items }: { items: string[] | null }) {
-  const [open, setOpen] = useState(false);
-  const arr = items ?? [];
-  if (!arr.length) return <span className="text-gray-400">-</span>;
+type Pair = { large?: string | null; small?: string | null } | string;
 
-  const shown = open ? arr : arr.slice(0, 2);
+export function JobCategoriesCell({ items }: { items: Pair[] | null }) {
+  const labels = (items ?? [])
+    .map((it) => {
+      if (typeof it === "string") return it;
+      const L = (it?.large ?? "").trim();
+      const S = (it?.small ?? "").trim();
+      if (L && S) return `${L}（${S}）`;
+      if (L) return L;
+      if (S) return S;
+      return "";
+    })
+    .filter(Boolean);
+
+  if (!labels.length) return <span className="text-gray-400">-</span>;
+
+  // すべて表示（トグルなし）
   return (
-    <div className="flex items-center gap-1 flex-wrap">
-      {shown.map((it, i) => (
+    <div className="flex flex-wrap items-center gap-1">
+      {labels.map((label, i) => (
         <span key={i} className="px-2 py-0.5 rounded-full border">
-          {it}
+          {label}
         </span>
       ))}
-      {arr.length > 2 && (
-        <button className="text-sm underline" onClick={() => setOpen(!open)}>
-          {open ? "閉じる" : `+${arr.length - 2}件`}
-        </button>
-      )}
     </div>
   );
 }

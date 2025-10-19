@@ -7,6 +7,7 @@ import Toggle from "@/components/Toggle";
 import { PREFECTURES } from "@/constants/prefectures";
 import { JOB_CATEGORIES, JOB_LARGE } from "@/constants/jobCategories";
 import { Pencil, Trash2 } from "lucide-react";
+import { JobCategoriesCell } from "@/components/JobCategoriesCell";
 
 // 設定ページで切り替える列キー
 type RecipientColumnKey =
@@ -38,9 +39,11 @@ type Row = {
   gender: "male" | "female" | null;
   region: string | null;
   birthday: string | null;
+  // 既存の単一フィールド（後方互換）
   job_category_large: string | null;
   job_category_small: string | null;
-  job_categories?: string[] | null;
+  // 複数職種に対応（API で返却される想定）
+  job_categories?: { large?: string | null; small?: string | null }[] | null;
   is_active: boolean | null;
   consent: string | null;
   created_at?: string | null;
@@ -61,15 +64,6 @@ function ageFromBirthday(iso?: string | null): string {
   const mDiff = now.getMonth() - b.getMonth();
   if (mDiff < 0 || (mDiff === 0 && now.getDate() < b.getDate())) age--;
   return age >= 0 && age < 130 ? String(age) : "";
-}
-
-function formatJob(large?: string | null, small?: string | null): string {
-  const L = (large ?? "").trim();
-  const S = (small ?? "").trim();
-  if (L && S) return `${L}（${S}）`;
-  if (L) return L;
-  if (S) return S;
-  return "";
 }
 
 export default function RecipientsPage() {
@@ -149,11 +143,14 @@ export default function RecipientsPage() {
         !(r.company_name ?? "").includes(companyQ)
       )
         return false;
+
       if (visible.includes("gender") && gender && r.gender !== (gender as any))
         return false;
+
       if (visible.includes("region") && pref && r.region !== pref) return false;
 
       if (visible.includes("job_categories")) {
+        // 単一の大/小カテゴリに対するフィルタ（複数職種ありでもメインの1組で絞り込む）
         if (large && r.job_category_large !== large) return false;
         if (small && r.job_category_small !== small) return false;
       }
@@ -224,44 +221,58 @@ export default function RecipientsPage() {
             )}
           </div>
         );
+
       case "company_name":
         return <span className="text-neutral-700">{safe(r.company_name)}</span>;
-      case "job_categories":
-        return (
-          <span className="whitespace-nowrap text-neutral-600">
-            {formatJob(r.job_category_large, r.job_category_small)}
-          </span>
-        );
+
+      case "job_categories": {
+        // 複数職種があればそれを、無ければ後方互換で単一ペアを使う
+        const items =
+          Array.isArray(r.job_categories) && r.job_categories.length > 0
+            ? r.job_categories.map((it) => ({
+                large: it?.large ?? null,
+                small: it?.small ?? null,
+              }))
+            : [{ large: r.job_category_large, small: r.job_category_small }];
+
+        return <JobCategoriesCell items={items} />;
+      }
+
       case "gender":
         return (
           <span className="whitespace-nowrap">
             {r.gender === "male" ? "男性" : r.gender === "female" ? "女性" : ""}
           </span>
         );
+
       case "age":
         return (
           <span className="whitespace-nowrap">
             {ageFromBirthday(r.birthday)}
           </span>
         );
+
       case "created_at":
         return (
           <span className="whitespace-nowrap">
             {r.created_at?.slice(0, 10) ?? ""}
           </span>
         );
+
       case "email":
         return (
           <span className="whitespace-nowrap text-neutral-600">
             {safe(r.email)}
           </span>
         );
+
       case "region":
         return (
           <span className="whitespace-nowrap text-neutral-600">
             {safe(r.region)}
           </span>
         );
+
       case "phone":
         return (
           <span className="whitespace-nowrap text-neutral-600">
@@ -269,18 +280,6 @@ export default function RecipientsPage() {
           </span>
         );
     }
-  };
-
-  const HEADERS: Record<RecipientColumnKey, string> = {
-    name: "名前",
-    company_name: "会社名",
-    job_categories: "職種",
-    gender: "性別",
-    age: "年齢",
-    created_at: "作成日",
-    email: "メール",
-    region: "都道府県",
-    phone: "電話",
   };
 
   return (
@@ -337,6 +336,7 @@ export default function RecipientsPage() {
                   className="rounded-lg border border-neutral-300 px-3 py-2"
                 />
               )}
+
               {visible.includes("company_name") && (
                 <input
                   placeholder="会社名"
@@ -345,6 +345,7 @@ export default function RecipientsPage() {
                   className="rounded-lg border border-neutral-300 px-3 py-2"
                 />
               )}
+
               {visible.includes("age") && (
                 <div className="flex gap-2">
                   <input
@@ -365,6 +366,7 @@ export default function RecipientsPage() {
                   />
                 </div>
               )}
+
               {visible.includes("gender") && (
                 <select
                   value={gender}
@@ -376,6 +378,7 @@ export default function RecipientsPage() {
                   <option value="female">女性</option>
                 </select>
               )}
+
               {visible.includes("job_categories") && (
                 <>
                   <select
@@ -393,6 +396,7 @@ export default function RecipientsPage() {
                       </option>
                     ))}
                   </select>
+
                   <select
                     value={small}
                     onChange={(e) => setSmall(e.target.value)}
@@ -410,6 +414,7 @@ export default function RecipientsPage() {
                   </select>
                 </>
               )}
+
               {visible.includes("region") && (
                 <select
                   value={pref}
@@ -425,6 +430,7 @@ export default function RecipientsPage() {
                 </select>
               )}
             </div>
+
             <div className="flex justify-end">
               <button
                 type="button"
@@ -467,11 +473,12 @@ export default function RecipientsPage() {
                         email: "メール",
                         region: "都道府県",
                         phone: "電話",
-                      } as any
+                      } as const
                     )[c]
                   }
                 </th>
               ))}
+              {/* 常時表示 */}
               <th className="px-3 py-3 text-center">アクティブ</th>
               <th className="px-3 py-3 text-center">操作</th>
             </tr>
@@ -495,6 +502,8 @@ export default function RecipientsPage() {
                     {renderCell(c, r)}
                   </td>
                 ))}
+
+                {/* 常時表示 */}
                 <td className="px-2.5 py-2.5 text-center whitespace-nowrap">
                   <Toggle
                     checked={!!r.is_active}
@@ -523,6 +532,7 @@ export default function RecipientsPage() {
                 </td>
               </tr>
             ))}
+
             {filtered.length === 0 && (
               <tr>
                 <td

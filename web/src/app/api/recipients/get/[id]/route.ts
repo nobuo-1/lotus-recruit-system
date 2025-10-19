@@ -24,8 +24,25 @@ export async function GET(_: Request, ctx: { params: { id: string } }) {
       .maybeSingle();
     if (error)
       return NextResponse.json({ error: error.message }, { status: 400 });
+    if (!data) return NextResponse.json({ row: null });
 
-    return NextResponse.json({ row: data });
+    // ← ここで空なら単一列から補完
+    let jc: any[] = Array.isArray((data as any).job_categories)
+      ? (data as any).job_categories
+      : [];
+    if (
+      jc.length === 0 &&
+      (data.job_category_large || data.job_category_small)
+    ) {
+      jc = [
+        {
+          large: data.job_category_large ?? null,
+          small: data.job_category_small ?? null,
+        },
+      ];
+    }
+
+    return NextResponse.json({ row: { ...data, job_categories: jc } });
   } catch (e: any) {
     return NextResponse.json(
       { error: e?.message || "server error" },
