@@ -26,9 +26,9 @@ export async function GET(req: Request) {
     if (!tenant_id)
       return NextResponse.json({ error: "no tenant" }, { status: 400 });
 
-    // UIが参照するカラム
+    // 取得カラム（会社名 & job_categories を追加）
     const selectCols =
-      "id,name,company_name,job_categories,email,phone,gender,region,birthday,job_category_large,job_category_small,job_type,is_active,consent,created_at";
+      "id,name,company_name,email,phone,gender,region,birthday,job_category_large,job_category_small,job_type,is_active,consent,created_at,job_categories";
 
     const run = async (
       useDeletedFilter: boolean,
@@ -38,15 +38,12 @@ export async function GET(req: Request) {
         .from("recipients")
         .select(selectCols, { count: "exact" })
         .eq("tenant_id", tenant_id);
-
-      if (useDeletedFilter) q = q.eq("is_deleted", false); // あれば効く
+      if (useDeletedFilter) q = q.eq("is_deleted", false);
       if (onlyActive) q = q.eq("is_active", true);
-
       q = q.order(orderBy as any, { ascending: false }).limit(2000);
       return await q;
     };
 
-    // 列有無の違いにフォールバック
     const tries: Array<[boolean, "updated_at" | "id"]> = [
       [true, "updated_at"],
       [true, "id"],
@@ -73,7 +70,6 @@ export async function GET(req: Request) {
       }
     }
 
-    // 全滅でもUIは壊さない
     return NextResponse.json({ rows: [] });
   } catch (e: any) {
     return NextResponse.json(
@@ -81,15 +77,4 @@ export async function GET(req: Request) {
       { status: 500 }
     );
   }
-}
-
-export async function OPTIONS() {
-  return new NextResponse(null, {
-    status: 204,
-    headers: {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    },
-  });
 }
