@@ -14,7 +14,7 @@ import {
   Tooltip,
   CartesianGrid,
 } from "recharts";
-import { Settings, ChevronDown, Mail, Megaphone, Users } from "lucide-react";
+import { Settings, ChevronDown } from "lucide-react";
 
 type Summary = {
   campaignCount: number;
@@ -61,7 +61,6 @@ export default function EmailLanding() {
 
   return (
     <>
-      {/* グローバルヘッダー復活 */}
       <AppHeader />
 
       <main className="mx-auto max-w-6xl p-6">
@@ -88,17 +87,17 @@ export default function EmailLanding() {
             </p>
           </div>
 
-          {/* 機能メニューボタン（他ページの遷移ボタンと同サイズ） */}
+          {/* 機能メニューボタン：各ページ上部ボタンより少し大きく */}
           <div className="w-full sm:w-auto">
             <button
               type="button"
               onClick={() => setMenuOpen((v) => !v)}
-              className="inline-flex w-full items-center justify-between rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 sm:w-auto"
+              className="inline-flex w-full items-center justify-between rounded-xl border border-neutral-200 px-4 py-2 text-[1.05rem] font-medium hover:bg-neutral-50 sm:w-auto"
               aria-expanded={menuOpen}
             >
               機能メニュー
               <ChevronDown
-                className={`h-4 w-4 transition-transform ${
+                className={`h-5 w-5 transition-transform ${
                   menuOpen ? "rotate-180" : ""
                 }`}
               />
@@ -106,29 +105,23 @@ export default function EmailLanding() {
           </div>
         </div>
 
-        {/* 機能メニュー：見出しにのみアイコン／リンクはアイコン無し */}
+        {/* 機能メニュー：見出しテキスト自体が主要ページへのリンク。関連リンクも少し大きめに統一 */}
         {menuOpen && (
-          <div className="mb-4 rounded-2xl border border-neutral-200 p-4">
-            <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
+          <div className="mb-4 rounded-2xl border border-neutral-200 p-5">
+            <div className="grid grid-cols-1 gap-7 md:grid-cols-3">
               {/* メール */}
-              <section aria-labelledby="sec-mail">
-                <div className="mb-2 flex items-center gap-2">
-                  <Mail
-                    className="h-4 w-4 text-neutral-600"
-                    aria-hidden="true"
-                  />
-                  <h2
-                    id="sec-mail"
-                    className="text-base font-semibold text-neutral-800"
-                  >
-                    メール
-                  </h2>
-                </div>
-                <ul className="space-y-1">
+              <section>
+                <Link
+                  href="/mails"
+                  className="block text-left text-lg font-semibold tracking-tight text-neutral-900 hover:underline underline-offset-2"
+                >
+                  メール
+                </Link>
+                <ul className="mt-2 space-y-1.5">
                   <li>
                     <Link
                       href="/mails/new"
-                      className="text-sm text-neutral-700 underline-offset-2 hover:underline"
+                      className="text-[0.95rem] text-neutral-800 underline-offset-2 hover:underline"
                     >
                       新規メール
                     </Link>
@@ -136,7 +129,7 @@ export default function EmailLanding() {
                   <li>
                     <Link
                       href="/mails"
-                      className="text-sm text-neutral-700 underline-offset-2 hover:underline"
+                      className="text-[0.95rem] text-neutral-800 underline-offset-2 hover:underline"
                     >
                       メール一覧
                     </Link>
@@ -144,7 +137,7 @@ export default function EmailLanding() {
                   <li>
                     <Link
                       href="/mails/schedules"
-                      className="text-sm text-neutral-700 underline-offset-2 hover:underline"
+                      className="text-[0.95rem] text-neutral-800 underline-offset-2 hover:underline"
                     >
                       メール予約リスト
                     </Link>
@@ -153,24 +146,18 @@ export default function EmailLanding() {
               </section>
 
               {/* キャンペーン */}
-              <section aria-labelledby="sec-campaigns">
-                <div className="mb-2 flex items-center gap-2">
-                  <Megaphone
-                    className="h-4 w-4 text-neutral-600"
-                    aria-hidden="true"
-                  />
-                  <h2
-                    id="sec-campaigns"
-                    className="text-base font-semibold text-neutral-800"
-                  >
-                    キャンペーン
-                  </h2>
-                </div>
-                <ul className="space-y-1">
+              <section>
+                <Link
+                  href="/campaigns"
+                  className="block text-left text-lg font-semibold tracking-tight text-neutral-900 hover:underline underline-offset-2"
+                >
+                  キャンペーン
+                </Link>
+                <ul className="mt-2 space-y-1.5">
                   <li>
                     <Link
                       href="/campaigns/new"
-                      className="text-sm text-neutral-700 underline-offset-2 hover:underline"
+                      className="text-[0.95rem] text-neutral-800 underline-offset-2 hover:underline"
                     >
                       新規キャンペーン
                     </Link>
@@ -178,7 +165,7 @@ export default function EmailLanding() {
                   <li>
                     <Link
                       href="/campaigns"
-                      className="text-sm text-neutral-700 underline-offset-2 hover:underline"
+                      className="text-[0.95rem] text-neutral-800 underline-offset-2 hover:underline"
                     >
                       キャンペーン一覧
                     </Link>
@@ -186,7 +173,7 @@ export default function EmailLanding() {
                   <li>
                     <Link
                       href="/email/schedules"
-                      className="text-sm text-neutral-700 underline-offset-2 hover:underline"
+                      className="text-[0.95rem] text-neutral-800 underline-offset-2 hover:underline"
                     >
                       キャンペーン予約リスト
                     </Link>
@@ -195,24 +182,18 @@ export default function EmailLanding() {
               </section>
 
               {/* 受信者 */}
-              <section aria-labelledby="sec-recipients">
-                <div className="mb-2 flex items-center gap-2">
-                  <Users
-                    className="h-4 w-4 text-neutral-600"
-                    aria-hidden="true"
-                  />
-                  <h2
-                    id="sec-recipients"
-                    className="text-base font-semibold text-neutral-800"
-                  >
-                    受信者リスト
-                  </h2>
-                </div>
-                <ul className="space-y-1">
+              <section>
+                <Link
+                  href="/recipients"
+                  className="block text-left text-lg font-semibold tracking-tight text-neutral-900 hover:underline underline-offset-2"
+                >
+                  受信者リスト
+                </Link>
+                <ul className="mt-2 space-y-1.5">
                   <li>
                     <Link
                       href="/recipients"
-                      className="text-sm text-neutral-700 underline-offset-2 hover:underline"
+                      className="text-[0.95rem] text-neutral-800 underline-offset-2 hover:underline"
                     >
                       受信者リスト
                     </Link>
@@ -260,7 +241,7 @@ function ChartBlock({
   return (
     <div className="mt-6 rounded-2xl border border-neutral-200 p-4">
       <div className="mb-2 flex items-center justify-between">
-        <div className="text-sm text-neutral-500">
+        <div className="text-[0.95rem] font-medium text-neutral-700">
           直近{labelOf(range)}の配信数
         </div>
         <div className="flex flex-wrap gap-1">
@@ -283,8 +264,8 @@ function ChartBlock({
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={series}>
             <CartesianGrid strokeDasharray="3 3" />
-            <XAxis dataKey="date" tick={{ fontSize: 12 }} />
-            <YAxis allowDecimals={false} tick={{ fontSize: 12 }} />
+            <XAxis dataKey="date" tick={{ fontSize: 13 }} />
+            <YAxis allowDecimals={false} tick={{ fontSize: 13 }} />
             <Tooltip />
             <Line type="monotone" dataKey="count" dot={false} />
           </LineChart>

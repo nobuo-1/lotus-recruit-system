@@ -6,7 +6,7 @@ import { createClient } from "@supabase/supabase-js";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-/** ルート生存チェック（デバッグ用：必要なければ後で削除OK） */
+/** ルート確認用（不要になれば削除OK） */
 export async function GET() {
   return NextResponse.json({ ok: true, route: "/api/mails/send" });
 }
@@ -35,15 +35,6 @@ function makeTransport() {
     secure: port === 465,
     auth: { user, pass },
   });
-}
-
-function htmlToText(html: string) {
-  return html
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/p>/gi, "\n\n")
-    .replace(/<[^>]+>/g, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
 }
 
 /** 差出人の決定：email_settings → 環境変数（SMTP_FROM or SMTP_USER） */
@@ -85,14 +76,15 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "invalid payload" }, { status: 400 });
     }
 
-    // メール本体（from_email は参照しない）
+    // ★ mails.body_html を選択せず、存在する body_text のみ参照して 404/列エラーを根絶
     const { data: mail, error: me } = await supabase
       .from("mails")
-      .select("id, tenant_id, name, subject, body_text, body_html")
+      .select("id, tenant_id, name, subject, body_text")
       .eq("id", mailId)
       .maybeSingle();
 
     if (me || !mail) {
+      // PostgREST の列エラーを拾った場合も 404 で返っていたため、そのままエラーメッセージを返す
       return NextResponse.json(
         { error: me?.message ?? "mail not found" },
         { status: 404 }
@@ -101,7 +93,7 @@ export async function POST(req: Request) {
 
     const fromEmail = await resolveFromEmail(supabase, mail.tenant_id);
 
-    // 予約：*_schedules に積み、deliveries を scheduled 登録
+    // 予約：*_schedules に積み、deliveries を scheduled で作成
     if (scheduleAt) {
       const { error: se } = await supabase.from("mail_schedules").insert({
         mail_id: mailId,
@@ -124,7 +116,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, scheduled: ids.length });
     }
 
-    // 即時送信：プレーンテキスト
+    // 即時送信：プレーンテキスト（body_text を使用）
     const { data: recs, error: re } = await supabase
       .from("recipients")
       .select("id, email, name, consent")
@@ -134,8 +126,7 @@ export async function POST(req: Request) {
 
     const transporter = makeTransport();
     const subjectTpl = String(mail.subject ?? "");
-    const bodyTextRaw =
-      String(mail.body_text ?? "") || htmlToText(String(mail.body_html ?? ""));
+    const bodyTextRaw = String(mail.body_text ?? ""); // ← これだけを使う
 
     const results: { id: string; ok: boolean; message?: string }[] = [];
 
