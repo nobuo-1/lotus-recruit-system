@@ -6,12 +6,27 @@ import { createClient } from "@supabase/supabase-js";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-/** ルート確認用（不要になれば削除OK） */
+/** 任意: ルート確認用（不要なら削除可） */
 export async function GET() {
   return NextResponse.json({ ok: true, route: "/api/mails/send" });
 }
 
-/** Supabase Admin Client（サービスロール） */
+/** Row 型定義 */
+type MailRow = {
+  id: string;
+  tenant_id: string | null;
+  name: string | null;
+  subject: string | null;
+  body_text: string | null;
+};
+
+type RecipientRow = {
+  id: string;
+  email: string | null;
+  name: string | null;
+  consent: string | null;
+};
+
 function supabaseAdmin(): any {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL as string;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY as string;
@@ -23,7 +38,6 @@ function supabaseAdmin(): any {
   return createClient(url, key, { auth: { persistSession: false } }) as any;
 }
 
-/** Nodemailer Transport */
 function makeTransport() {
   const host = process.env.SMTP_HOST!;
   const port = +(process.env.SMTP_PORT ?? 587);
@@ -37,11 +51,10 @@ function makeTransport() {
   });
 }
 
-/** 差出人の決定：email_settings → 環境変数（SMTP_FROM or SMTP_USER） */
 async function resolveFromEmail(
   supabase: any,
   tenantId: string | null | undefined
-): Promise<string> {
+) {
   if (tenantId) {
     try {
       const { data } = await supabase
@@ -51,9 +64,7 @@ async function resolveFromEmail(
         .maybeSingle();
       const v = String(data?.from_email ?? "").trim();
       if (v) return v;
-    } catch {
-      /* no-op */
-    }
+    } catch {}
   }
   const envFrom = String(
     process.env.SMTP_FROM ?? process.env.SMTP_USER ?? ""
@@ -68,23 +79,24 @@ export async function POST(req: Request) {
   try {
     const supabase = supabaseAdmin();
     const body = await req.json();
-    const mailId = String(body.mailId || "");
-    const ids = (body.recipientIds ?? []) as string[];
+    const mailId: string = String(body.mailId || "");
+    const ids: string[] = (body.recipientIds ?? []) as string[];
     const scheduleAt = body.scheduleAt ? new Date(body.scheduleAt) : null;
 
     if (!mailId || !Array.isArray(ids) || ids.length === 0) {
       return NextResponse.json({ error: "invalid payload" }, { status: 400 });
     }
 
-    // ★ mails.body_html を選択せず、存在する body_text のみ参照して 404/列エラーを根絶
-    const { data: mail, error: me } = await supabase
+    // mails は body_text のみ参照（body_html は使わない）
+    const { data: mailRaw, error: me } = await supabase
       .from("mails")
       .select("id, tenant_id, name, subject, body_text")
       .eq("id", mailId)
-      .maybeSingle();
+      .maybeSingle(); // ← 呼び出し時ジェネリクスを使わない
+
+    const mail = (mailRaw as MailRow | null) ?? null;
 
     if (me || !mail) {
-      // PostgREST の列エラーを拾った場合も 404 で返っていたため、そのままエラーメッセージを返す
       return NextResponse.json(
         { error: me?.message ?? "mail not found" },
         { status: 404 }
@@ -93,13 +105,12 @@ export async function POST(req: Request) {
 
     const fromEmail = await resolveFromEmail(supabase, mail.tenant_id);
 
-    // 予約：*_schedules に積み、deliveries を scheduled で作成
+    // 予約：schedules + deliveries(scheduled)
     if (scheduleAt) {
       const { error: se } = await supabase.from("mail_schedules").insert({
         mail_id: mailId,
         scheduled_at: scheduleAt.toISOString(),
         status: "scheduled",
-        // tenant_id はスキーマに無い想定のため入れない
       });
       if (se) return NextResponse.json({ error: se.message }, { status: 500 });
 
@@ -113,31 +124,84 @@ export async function POST(req: Request) {
       const { error: de } = await supabase.from("mail_deliveries").insert(ins);
       if (de) return NextResponse.json({ error: de.message }, { status: 500 });
 
+      // （存在すれば）mails.status を queued にしておく（失敗しても無視）
+      try {
+        await supabase
+          .from("mails")
+          .update({ status: "queued" })
+          .eq("id", mailId);
+      } catch {}
       return NextResponse.json({ ok: true, scheduled: ids.length });
     }
 
-    // 即時送信：プレーンテキスト（body_text を使用）
-    const { data: recs, error: re } = await supabase
+    // 即時送信：先に queued を作成 → 成功で sent / 失敗で error に更新
+    const { data: recsRaw, error: re } = await supabase
       .from("recipients")
       .select("id, email, name, consent")
       .in("id", ids);
 
     if (re) return NextResponse.json({ error: re.message }, { status: 500 });
 
+    const recipients = (recsRaw as RecipientRow[] | null) ?? [];
+    if (recipients.length === 0) {
+      return NextResponse.json(
+        { error: "no recipients found" },
+        { status: 400 }
+      );
+    }
+
+    // 先に queued を作成
+    const queuedRows = recipients.map((r) => ({
+      mail_id: mailId,
+      recipient_id: r.id,
+      status: "queued",
+      sent_at: null,
+      meta: null,
+    }));
+    {
+      const { error: qe } = await supabase
+        .from("mail_deliveries")
+        .insert(queuedRows);
+      if (qe) return NextResponse.json({ error: qe.message }, { status: 500 });
+      try {
+        await supabase
+          .from("mails")
+          .update({ status: "queued" })
+          .eq("id", mailId);
+      } catch {}
+    }
+
     const transporter = makeTransport();
     const subjectTpl = String(mail.subject ?? "");
-    const bodyTextRaw = String(mail.body_text ?? ""); // ← これだけを使う
+    const bodyTextRaw = String(mail.body_text ?? "");
 
+    let sent = 0;
     const results: { id: string; ok: boolean; message?: string }[] = [];
 
-    for (const r of recs ?? []) {
+    for (const r of recipients) {
       try {
         if (!r.email) {
           results.push({ id: r.id, ok: false, message: "no email" });
+          await supabase
+            .from("mail_deliveries")
+            .update({
+              status: "error",
+              sent_at: new Date().toISOString(),
+              meta: { error: "no email" },
+            })
+            .match({ mail_id: mailId, recipient_id: r.id, status: "queued" });
           continue;
         }
         if (r.consent === "opt_out") {
           results.push({ id: r.id, ok: false, message: "opt-out" });
+          await supabase
+            .from("mail_deliveries")
+            .update({
+              status: "error",
+              sent_at: new Date().toISOString(),
+              meta: { error: "opt-out" },
+            })
+            .match({ mail_id: mailId, recipient_id: r.id, status: "queued" });
           continue;
         }
 
@@ -155,29 +219,32 @@ export async function POST(req: Request) {
           text,
         });
 
-        await supabase.from("mail_deliveries").insert({
-          mail_id: mailId,
-          recipient_id: r.id,
-          status: "sent",
-          sent_at: new Date().toISOString(),
-          meta: null,
-        });
+        await supabase
+          .from("mail_deliveries")
+          .update({
+            status: "sent",
+            sent_at: new Date().toISOString(),
+            meta: null,
+          })
+          .match({ mail_id: mailId, recipient_id: r.id, status: "queued" });
 
         results.push({ id: r.id, ok: true });
+        sent++;
       } catch (e: any) {
-        await supabase.from("mail_deliveries").insert({
-          mail_id: mailId,
-          recipient_id: r.id,
-          status: "error",
-          sent_at: new Date().toISOString(),
-          meta: { error: String(e?.message || e) },
-        });
+        await supabase
+          .from("mail_deliveries")
+          .update({
+            status: "error",
+            sent_at: new Date().toISOString(),
+            meta: { error: String(e?.message || e) },
+          })
+          .match({ mail_id: mailId, recipient_id: r.id, status: "queued" });
+
         results.push({ id: r.id, ok: false, message: String(e?.message || e) });
       }
     }
 
-    const okCount = results.filter((x) => x.ok).length;
-    return NextResponse.json({ ok: true, sent: okCount, results });
+    return NextResponse.json({ ok: true, sent, results });
   } catch (e: any) {
     return NextResponse.json(
       { error: String(e?.message || e) },

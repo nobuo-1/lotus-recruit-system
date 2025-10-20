@@ -14,7 +14,7 @@ import {
   Tooltip,
   CartesianGrid,
 } from "recharts";
-import { Settings, ChevronDown } from "lucide-react";
+import { Settings, ChevronDown, Mail, Megaphone, Users } from "lucide-react";
 
 type Summary = {
   campaignCount: number;
@@ -105,23 +105,23 @@ export default function EmailLanding() {
           </div>
         </div>
 
-        {/* 機能メニュー：見出しテキスト自体が主要ページへのリンク。関連リンクも少し大きめに統一 */}
+        {/* 機能メニュー：見出しは大＋アイコン（リンク無し）／項目のフォントは各ページ上部ボタンと同サイズ（text-base） */}
         {menuOpen && (
           <div className="mb-4 rounded-2xl border border-neutral-200 p-5">
             <div className="grid grid-cols-1 gap-7 md:grid-cols-3">
               {/* メール */}
               <section>
-                <Link
-                  href="/mails"
-                  className="block text-left text-lg font-semibold tracking-tight text-neutral-900 hover:underline underline-offset-2"
-                >
-                  メール
-                </Link>
-                <ul className="mt-2 space-y-1.5">
+                <div className="mb-2 flex items-center gap-2">
+                  <Mail className="h-5 w-5 text-neutral-700" />
+                  <h2 className="text-lg font-semibold tracking-tight text-neutral-900 sm:text-xl">
+                    メール
+                  </h2>
+                </div>
+                <ul className="mt-1 space-y-1.5">
                   <li>
                     <Link
                       href="/mails/new"
-                      className="text-[0.95rem] text-neutral-800 underline-offset-2 hover:underline"
+                      className="text-base text-neutral-800 underline-offset-2 hover:underline"
                     >
                       新規メール
                     </Link>
@@ -129,7 +129,7 @@ export default function EmailLanding() {
                   <li>
                     <Link
                       href="/mails"
-                      className="text-[0.95rem] text-neutral-800 underline-offset-2 hover:underline"
+                      className="text-base text-neutral-800 underline-offset-2 hover:underline"
                     >
                       メール一覧
                     </Link>
@@ -137,7 +137,7 @@ export default function EmailLanding() {
                   <li>
                     <Link
                       href="/mails/schedules"
-                      className="text-[0.95rem] text-neutral-800 underline-offset-2 hover:underline"
+                      className="text-base text-neutral-800 underline-offset-2 hover:underline"
                     >
                       メール予約リスト
                     </Link>
@@ -147,17 +147,17 @@ export default function EmailLanding() {
 
               {/* キャンペーン */}
               <section>
-                <Link
-                  href="/campaigns"
-                  className="block text-left text-lg font-semibold tracking-tight text-neutral-900 hover:underline underline-offset-2"
-                >
-                  キャンペーン
-                </Link>
-                <ul className="mt-2 space-y-1.5">
+                <div className="mb-2 flex items-center gap-2">
+                  <Megaphone className="h-5 w-5 text-neutral-700" />
+                  <h2 className="text-lg font-semibold tracking-tight text-neutral-900 sm:text-xl">
+                    キャンペーン
+                  </h2>
+                </div>
+                <ul className="mt-1 space-y-1.5">
                   <li>
                     <Link
                       href="/campaigns/new"
-                      className="text-[0.95rem] text-neutral-800 underline-offset-2 hover:underline"
+                      className="text-base text-neutral-800 underline-offset-2 hover:underline"
                     >
                       新規キャンペーン
                     </Link>
@@ -165,7 +165,7 @@ export default function EmailLanding() {
                   <li>
                     <Link
                       href="/campaigns"
-                      className="text-[0.95rem] text-neutral-800 underline-offset-2 hover:underline"
+                      className="text-base text-neutral-800 underline-offset-2 hover:underline"
                     >
                       キャンペーン一覧
                     </Link>
@@ -173,7 +173,7 @@ export default function EmailLanding() {
                   <li>
                     <Link
                       href="/email/schedules"
-                      className="text-[0.95rem] text-neutral-800 underline-offset-2 hover:underline"
+                      className="text-base text-neutral-800 underline-offset-2 hover:underline"
                     >
                       キャンペーン予約リスト
                     </Link>
@@ -183,17 +183,17 @@ export default function EmailLanding() {
 
               {/* 受信者 */}
               <section>
-                <Link
-                  href="/recipients"
-                  className="block text-left text-lg font-semibold tracking-tight text-neutral-900 hover:underline underline-offset-2"
-                >
-                  受信者リスト
-                </Link>
-                <ul className="mt-2 space-y-1.5">
+                <div className="mb-2 flex items-center gap-2">
+                  <Users className="h-5 w-5 text-neutral-700" />
+                  <h2 className="text-lg font-semibold tracking-tight text-neutral-900 sm:text-xl">
+                    受信者リスト
+                  </h2>
+                </div>
+                <ul className="mt-1 space-y-1.5">
                   <li>
                     <Link
                       href="/recipients"
-                      className="text-[0.95rem] text-neutral-800 underline-offset-2 hover:underline"
+                      className="text-base text-neutral-800 underline-offset-2 hover:underline"
                     >
                       受信者リスト
                     </Link>
@@ -241,7 +241,7 @@ function ChartBlock({
   return (
     <div className="mt-6 rounded-2xl border border-neutral-200 p-4">
       <div className="mb-2 flex items-center justify-between">
-        <div className="text-[0.95rem] font-medium text-neutral-700">
+        <div className="text-base font-medium text-neutral-700">
           直近{labelOf(range)}の配信数
         </div>
         <div className="flex flex-wrap gap-1">

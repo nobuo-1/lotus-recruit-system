@@ -1,9 +1,15 @@
+// web/src/app/mails/[id]/page.tsx
 import React from "react";
 import Link from "next/link";
 import { supabaseServer } from "@/lib/supabaseServer";
 import { formatJpDateTime } from "@/lib/formatDate";
 
 export const dynamic = "force-dynamic";
+
+type ScheduleRow = {
+  scheduled_at: string | null;
+  status: string | null;
+};
 
 type DeliveryRow = {
   recipient_id: string;
@@ -26,35 +32,78 @@ function toS(v: unknown): string {
   return typeof v === "string" ? v : v == null ? "" : String(v);
 }
 
-function normalizeJobs(rec: NonNullable<DeliveryRow["recipients"]>): string[] {
-  const toStr = (v: unknown) => (typeof v === "string" ? v.trim() : "");
-  const arr = rec?.job_categories;
+// 文字列JSON/配列/オブジェクトの混在に耐える正規化（「大（小）」）
+function normalizeJobsFlexible(
+  rec: NonNullable<DeliveryRow["recipients"]>
+): string[] {
+  const raw = rec?.job_categories;
+  const L1 = toS(rec?.job_category_large).trim();
+  const S1 = toS(rec?.job_category_small).trim();
+  const fallback =
+    L1 || S1
+      ? [`${L1}${L1 && S1 ? "（" : ""}${S1}${L1 && S1 ? "）" : ""}`]
+      : [];
 
-  if (Array.isArray(arr) && arr.length > 0) {
-    return arr
-      .map((it) => {
-        if (typeof it === "string") return toStr(it);
-        if (it && typeof it === "object") {
-          const L = toStr((it as any).large);
-          const S = toStr((it as any).small);
-          return L && S ? `${L}（${S}）` : L || S || "";
+  if (!Array.isArray(raw) || raw.length === 0) return fallback;
+
+  const toPretty = (x: unknown): string => {
+    if (typeof x === "string") {
+      const s = x.trim();
+      if (s.startsWith("{") || s.startsWith("[")) {
+        try {
+          const j = JSON.parse(s);
+          if (Array.isArray(j))
+            return j.map(toPretty).filter(Boolean).join(" / ");
+          if (j && typeof j === "object") {
+            const ll = toS((j as any).large).trim();
+            const ss = toS((j as any).small).trim();
+            return ll && ss ? `${ll}（${ss}）` : ll || ss || "";
+          }
+        } catch {
+          /* treat as plain string */
         }
-        return "";
-      })
-      .filter(Boolean);
-  }
+      }
+      return s;
+    }
+    if (x && typeof x === "object") {
+      const ll = toS((x as any).large).trim();
+      const ss = toS((x as any).small).trim();
+      return ll && ss ? `${ll}（${ss}）` : ll || ss || "";
+    }
+    return "";
+  };
 
-  const L = toStr(rec?.job_category_large);
-  const S = toStr(rec?.job_category_small);
-  return L || S ? [L && S ? `${L}（${S}）` : L || S] : [];
+  const arr = raw.map(toPretty).filter(Boolean);
+  return arr.length > 0 ? arr : fallback;
+}
+
+function deriveStatus(schedules: ScheduleRow[], deliveries: DeliveryRow[]) {
+  const now = Date.now();
+  const hasFuture =
+    schedules?.some(
+      (s) =>
+        s.scheduled_at &&
+        s.status !== "cancelled" &&
+        Date.parse(s.scheduled_at) > now
+    ) ?? false;
+  const dStatuses = (deliveries ?? []).map((d) =>
+    String(d.status ?? "").toLowerCase()
+  );
+  const hasQueued = dStatuses.some((s) => s === "queued" || s === "processing");
+  const hasSent = dStatuses.some((s) => s === "sent");
+  if (hasFuture && hasSent) return "scheduled/partial";
+  if (hasFuture) return "scheduled";
+  if (hasQueued) return "queued";
+  if (hasSent) return "sent";
+  return "draft";
 }
 
 export default async function MailDetailPage({
   params,
 }: {
-  params: Promise<{ id: string }>;
+  params: { id: string };
 }) {
-  const { id } = await params;
+  const { id } = params;
   const supabase = await supabaseServer();
 
   const { data: u } = await supabase.auth.getUser();
@@ -66,17 +115,32 @@ export default async function MailDetailPage({
     );
   }
 
-  // 本体
-  const { data: mail } = await supabase
+  // メール本体（存在するカラムに限定）
+  const { data: mail, error: mailErr } = await supabase
     .from("mails")
-    .select(
-      "id, name, subject, status, created_at, from_email, body_text, body_html"
-    )
+    .select("id, name, subject, created_at, body_text, body_html")
     .eq("id", id)
     .maybeSingle();
 
+  if (mailErr || !mail) {
+    return (
+      <main className="mx-auto max-w-6xl p-6">
+        <p className="text-red-600">
+          メールが見つかりません: {mailErr?.message}
+        </p>
+      </main>
+    );
+  }
+
+  // 予約情報
+  const { data: schedules } = await supabase
+    .from("mail_schedules")
+    .select("scheduled_at, status")
+    .eq("mail_id", id)
+    .returns<ScheduleRow[]>();
+
   // 配信先
-  const { data: rows } = await supabase
+  const { data: deliveries } = await supabase
     .from("mail_deliveries")
     .select(
       "recipient_id, status, sent_at, recipients(name, email, region, gender, job_category_large, job_category_small, job_categories)"
@@ -85,9 +149,11 @@ export default async function MailDetailPage({
     .order("sent_at", { ascending: false })
     .returns<DeliveryRow[]>();
 
-  const sentCount = rows?.length ?? 0;
+  const rows = deliveries ?? [];
+  const sentCount = rows.length;
+  const statusText = deriveStatus(schedules ?? [], rows);
 
-  // 本文は body_text を優先、なければ HTML をテキスト化
+  // 本文：body_text を優先、なければ HTML をテキスト化
   const bodyText =
     toS(mail?.body_text) ||
     toS(mail?.body_html)
@@ -135,7 +201,7 @@ export default async function MailDetailPage({
           </div>
           <div>
             <div className="text-sm text-neutral-500">ステータス</div>
-            <div className="text-neutral-900">{toS(mail?.status) || "-"}</div>
+            <div className="text-neutral-900">{statusText}</div>
           </div>
           <div>
             <div className="text-sm text-neutral-500">作成日</div>
@@ -172,9 +238,9 @@ export default async function MailDetailPage({
               </tr>
             </thead>
             <tbody>
-              {(rows ?? []).map((r) => {
+              {rows.map((r) => {
                 const rec = r.recipients ?? null;
-                const jobs = rec ? normalizeJobs(rec) : [];
+                const jobs = rec ? normalizeJobsFlexible(rec) : [];
                 return (
                   <tr
                     key={r.recipient_id}
@@ -202,7 +268,7 @@ export default async function MailDetailPage({
                   </tr>
                 );
               })}
-              {(rows ?? []).length === 0 && (
+              {rows.length === 0 && (
                 <tr>
                   <td
                     colSpan={7}
