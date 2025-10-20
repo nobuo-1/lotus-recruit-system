@@ -1,243 +1,281 @@
 // web/src/app/api/mails/send/route.ts
-import { NextResponse } from "next/server";
-import nodemailer from "nodemailer";
-import { createClient } from "@supabase/supabase-js";
-
-export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-/** 任意: 動作確認用（不要なら削除可） */
-export async function GET() {
-  return NextResponse.json({ ok: true, route: "/api/mails/send" });
-}
+import { NextResponse } from "next/server";
+import { supabaseServer } from "@/lib/supabaseServer";
+import { emailQueue } from "@/server/queue";
+import type { DirectEmailJob } from "@/server/queue";
 
-/** Row 型定義 */
-type MailRow = {
-  id: string;
-  tenant_id: string | null;
-  name: string | null;
-  subject: string | null;
-  body_text: string | null;
+/* ================= ユーティリティ ================= */
+type Body = {
+  mailId?: string;
+  recipientIds?: string[];
+  scheduleAt?: string | null;
 };
 
-type RecipientRow = {
-  id: string;
-  email: string | null;
-  name: string | null;
-  consent: string | null;
-};
-
-function supabaseAdmin(): any {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL as string;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY as string;
-  if (!url || !key) {
-    throw new Error(
-      "Missing SUPABASE envs (NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY)"
-    );
-  }
-  return createClient(url, key, { auth: { persistSession: false } }) as any;
+function chunk<T>(arr: T[], size: number): T[][] {
+  const a = [...arr];
+  const out: T[][] = [];
+  while (a.length) out.push(a.splice(0, size));
+  return out;
 }
 
-function makeTransport() {
-  const host = process.env.SMTP_HOST!;
-  const port = +(process.env.SMTP_PORT ?? 587);
-  const user = process.env.SMTP_USER!;
-  const pass = process.env.SMTP_PASS!;
-  return nodemailer.createTransport({
-    host,
-    port,
-    secure: port === 465,
-    auth: { user, pass },
-  });
-}
+const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
+  /\/+$/,
+  ""
+);
 
-async function resolveFromEmail(
-  supabase: any,
-  tenantId: string | null | undefined
+function htmlEscape(s: string) {
+  return String(s)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+function identity(s: string) {
+  return String(s);
+}
+function personalize(
+  input: string,
+  vars: { name?: string | null; email?: string | null },
+  encode: (s: string) => string
 ) {
-  if (tenantId) {
-    try {
-      const { data } = await supabase
-        .from("email_settings")
-        .select("from_email")
-        .eq("tenant_id", tenantId)
-        .maybeSingle();
-      const v = String(data?.from_email ?? "").trim();
-      if (v) return v;
-    } catch {}
-  }
-  const envFrom = String(
-    process.env.SMTP_FROM ?? process.env.SMTP_USER ?? ""
-  ).trim();
-  if (envFrom) return envFrom;
-  throw new Error(
-    "差出人メールが見つかりません（email_settings.from_email または SMTP_FROM/SMTP_USER を設定してください）"
-  );
+  const name = (vars.name ?? "").trim() || "ご担当者";
+  const email = (vars.email ?? "").trim();
+  return input
+    .replaceAll(/\{\{\s*NAME\s*\}\}/g, encode(name))
+    .replaceAll(/\{\{\s*EMAIL\s*\}\}/g, encode(email));
 }
 
+/** 1行目だけ太字化した軽量HTMLをプレーンテキストから生成 */
+function buildLightHtmlFromPlainText(raw: string) {
+  const t = (raw ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  if (!t) return "";
+  const idx = t.indexOf("\n");
+  if (idx === -1) {
+    return `<strong style="font-weight:700;color:#0b1220;">${htmlEscape(
+      t
+    )}</strong>`;
+  }
+  const first = t.slice(0, idx);
+  const rest = t.slice(idx + 1);
+  return `<strong style="font-weight:700;color:#0b1220;">${htmlEscape(
+    first
+  )}</strong><br />${htmlEscape(rest).replace(/\n/g, "<br />")}`;
+}
+
+/* “カード化”＋開封ピクセル。キャンペーンと同じ見た目に寄せる（簡略版） */
+function wrapAsCard(html: string, deliveryId: string) {
+  const pixel = `<img src="${appUrl}/api/email/open?id=${encodeURIComponent(
+    deliveryId
+  )}" alt="" width="1" height="1" style="display:block;max-width:1px;max-height:1px;border:0;outline:none;" />`;
+  return `<table role="presentation" width="100%" bgcolor="#f3f4f6" style="background:#f3f4f6 !important;padding:16px 0;">
+  <tr><td align="center" bgcolor="#f3f4f6" style="padding:0 12px;">
+    <table role="presentation" width="100%" bgcolor="#ffffff" style="max-width:640px;border-radius:14px;background:#ffffff !important;box-shadow:0 4px 16px rgba(0,0,0,.08);border:1px solid #e5e7eb !important;">
+      <tr><td bgcolor="#ffffff" style="padding:20px;font:16px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111827 !important;">
+        ${html}
+        ${pixel}
+      </td></tr>
+    </table>
+  </td></tr>
+</table>`;
+}
+
+/** 安全JSON */
+async function safeJson<T = any>(req: Request): Promise<T | {}> {
+  try {
+    if (!req.headers.get("content-length")) return {};
+    return (await req.json()) as T;
+  } catch {
+    return {};
+  }
+}
+
+/* ================= ハンドラ ================= */
 export async function POST(req: Request) {
   try {
-    const supabase = supabaseAdmin();
-    const body = await req.json();
-    const mailId: string = String(body.mailId || "");
-    const ids: string[] = (body.recipientIds ?? []) as string[];
-    const scheduleAt = body.scheduleAt ? new Date(body.scheduleAt) : null;
+    const body = (await safeJson<Body>(req)) as Body;
+    const mailId = String(body.mailId ?? "");
+    const ids = Array.isArray(body.recipientIds) ? body.recipientIds : [];
+    const scheduleAtISO = body.scheduleAt ?? null;
 
-    if (!mailId || !Array.isArray(ids) || ids.length === 0) {
-      return NextResponse.json({ error: "invalid payload" }, { status: 400 });
+    if (!mailId || ids.length === 0) {
+      return NextResponse.json(
+        { error: "mailId と recipientIds は必須です" },
+        { status: 400 }
+      );
     }
 
-    // mails は body_text のみ参照（body_html は使わない）
-    const { data: mailRaw, error: me } = await supabase
+    // RLSありのサーバークライアント
+    const sb = await supabaseServer();
+
+    // 認証 & テナント
+    const { data: u } = await sb.auth.getUser();
+    if (!u?.user) {
+      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    }
+    const { data: prof } = await sb
+      .from("profiles")
+      .select("tenant_id")
+      .eq("id", u.user.id)
+      .maybeSingle();
+    const tenantId = (prof?.tenant_id as string | undefined) ?? undefined;
+    if (!tenantId) {
+      return NextResponse.json({ error: "no tenant" }, { status: 400 });
+    }
+
+    // メール本体（body_textのみ使用）
+    const { data: mail, error: me } = await sb
       .from("mails")
-      .select("id, tenant_id, name, subject, body_text")
+      .select("id, tenant_id, subject, body_text, from_email")
       .eq("id", mailId)
       .maybeSingle();
-
-    const mail = (mailRaw as MailRow | null) ?? null;
     if (me || !mail) {
       return NextResponse.json(
         { error: me?.message ?? "mail not found" },
         { status: 404 }
       );
     }
-
-    const fromEmail = await resolveFromEmail(supabase, mail.tenant_id);
-
-    // 予約：schedules + deliveries(scheduled)
-    if (scheduleAt) {
-      const { error: se } = await supabase.from("mail_schedules").insert({
-        mail_id: mailId,
-        scheduled_at: scheduleAt.toISOString(),
-        status: "scheduled",
-      });
-      if (se) return NextResponse.json({ error: se.message }, { status: 500 });
-
-      const ins = ids.map((rid: string) => ({
-        mail_id: mailId,
-        recipient_id: rid,
-        status: "scheduled",
-        sent_at: null,
-      }));
-      const { error: de } = await supabase.from("mail_deliveries").insert(ins);
-      if (de) return NextResponse.json({ error: de.message }, { status: 500 });
-
-      // （存在すれば）mails.status を queued に（失敗しても無視）
-      try {
-        await supabase
-          .from("mails")
-          .update({ status: "queued" })
-          .eq("id", mailId);
-      } catch {}
-      return NextResponse.json({ ok: true, scheduled: ids.length });
+    if ((mail as any).tenant_id && (mail as any).tenant_id !== tenantId) {
+      return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
 
-    // 即時送信：先に queued を作成 → 成功で sent / 失敗で error に更新
-    const { data: recsRaw, error: re } = await supabase
+    // 宛先（opt-out/非アクティブ除外）
+    const { data: recs, error: re } = await sb
       .from("recipients")
-      .select("id, email, name, consent")
-      .in("id", ids);
-
-    if (re) return NextResponse.json({ error: re.message }, { status: 500 });
-
-    const recipients = (recsRaw as RecipientRow[] | null) ?? [];
-    if (recipients.length === 0) {
-      return NextResponse.json(
-        { error: "no recipients found" },
-        { status: 400 }
-      );
+      .select("id, name, email, consent, is_active, unsubscribe_token")
+      .in("id", ids)
+      .eq("tenant_id", tenantId);
+    if (re) {
+      return NextResponse.json({ error: re.message }, { status: 500 });
+    }
+    const candidates = (recs ?? []).filter(
+      (r: any) => r?.email && (r?.is_active ?? true) && r?.consent !== "opt_out"
+    );
+    if (candidates.length === 0) {
+      return NextResponse.json({ error: "no recipients" }, { status: 400 });
     }
 
-    // 先に queued を作成（meta列は使わない）
-    const queuedRows = recipients.map((r) => ({
+    // 二重送信防止：既に scheduled/queued/sent の宛先は除外
+    const { data: already } = await sb
+      .from("mail_deliveries")
+      .select("recipient_id")
+      .eq("mail_id", mailId)
+      .in("status", ["scheduled", "queued", "sent"]);
+    const exclude = new Set((already ?? []).map((d: any) => d.recipient_id));
+    const targets = candidates.filter((r: any) => !exclude.has(r.id));
+    if (targets.length === 0) {
+      return NextResponse.json({ ok: true, queued: 0, skipped: ids.length });
+    }
+
+    // 予約/即時の判定
+    let delayMs = 0;
+    let scheduledISO: string | null = null;
+    if (scheduleAtISO) {
+      const ts = Date.parse(scheduleAtISO);
+      if (Number.isNaN(ts)) {
+        return NextResponse.json(
+          { error: "scheduleAt が不正です" },
+          { status: 400 }
+        );
+      }
+      delayMs = Math.max(0, ts - Date.now());
+      scheduledISO = new Date(ts).toISOString();
+    }
+
+    // mail_deliveries に記録（scheduled/queued）
+    const baseRows = targets.map((r: any) => ({
       mail_id: mailId,
       recipient_id: r.id,
-      status: "queued",
+      status: scheduledISO ? ("scheduled" as const) : ("queued" as const),
+      // scheduled_at 列が存在するDBなら入る。存在しない場合は後段のフォールバックで無しINSERT。
+      scheduled_at: scheduledISO ?? null,
       sent_at: null,
     }));
-    {
-      const { error: qe } = await supabase
-        .from("mail_deliveries")
-        .insert(queuedRows);
-      if (qe) return NextResponse.json({ error: qe.message }, { status: 500 });
-      try {
-        await supabase
-          .from("mails")
-          .update({ status: "queued" })
-          .eq("id", mailId);
-      } catch {}
-    }
 
-    const transporter = makeTransport();
-    const subjectTpl = String(mail.subject ?? "");
-    const bodyTextRaw = String(mail.body_text ?? "");
-
-    let sent = 0;
-    const results: { id: string; ok: boolean; message?: string }[] = [];
-
-    for (const r of recipients) {
-      try {
-        if (!r.email) {
-          results.push({ id: r.id, ok: false, message: "no email" });
-          await supabase
-            .from("mail_deliveries")
-            .update({
-              status: "error",
-              sent_at: new Date().toISOString(),
-            })
-            .match({ mail_id: mailId, recipient_id: r.id, status: "queued" });
-          continue;
-        }
-        if (r.consent === "opt_out") {
-          results.push({ id: r.id, ok: false, message: "opt-out" });
-          await supabase
-            .from("mail_deliveries")
-            .update({
-              status: "error",
-              sent_at: new Date().toISOString(),
-            })
-            .match({ mail_id: mailId, recipient_id: r.id, status: "queued" });
-          continue;
-        }
-
-        const subject = subjectTpl
-          .replaceAll("{{NAME}}", String(r.name ?? ""))
-          .replaceAll("{{EMAIL}}", String(r.email));
-        const text = bodyTextRaw
-          .replaceAll("{{NAME}}", String(r.name ?? ""))
-          .replaceAll("{{EMAIL}}", String(r.email));
-
-        await transporter.sendMail({
-          from: fromEmail,
-          to: r.email,
-          subject,
-          text,
+    // scheduled_at の有無に耐えるフォールバックINSERT
+    const tryInsert = async () => {
+      const { error: e1 } = await sb.from("mail_deliveries").insert(baseRows);
+      if (e1 && /scheduled_at/i.test(e1.message)) {
+        const rowsNoSched = baseRows.map((r) => {
+          const { scheduled_at, ...rest } = r;
+          return rest;
         });
-
-        await supabase
+        const { error: e2 } = await sb
           .from("mail_deliveries")
-          .update({ status: "sent", sent_at: new Date().toISOString() })
-          .match({ mail_id: mailId, recipient_id: r.id, status: "queued" });
-
-        results.push({ id: r.id, ok: true });
-        sent++;
-      } catch (e: any) {
-        await supabase
-          .from("mail_deliveries")
-          .update({
-            status: "error",
-            sent_at: new Date().toISOString(),
-          })
-          .match({ mail_id: mailId, recipient_id: r.id, status: "queued" });
-
-        results.push({ id: r.id, ok: false, message: String(e?.message || e) });
+          .insert(rowsNoSched);
+        if (e2) throw e2;
+      } else if (e1) {
+        throw e1;
       }
+    };
+    await tryInsert();
+
+    // ワーカーに投入（キャンペーンと同じDirectEmailJob）
+    const subjectRaw = String((mail as any).subject ?? "");
+    const textRaw = String((mail as any).body_text ?? "");
+    const fromOverride =
+      ((mail as any).from_email as string | null) ?? undefined;
+
+    let queued = 0;
+    for (const r of targets as any[]) {
+      const deliveryId = ""; // （必要なら mail_deliveries.id をselectで取得して紐付け可能）
+
+      // HTML版（プレーン→軽量HTML化＋1行目太字）
+      const html = wrapAsCard(
+        buildLightHtmlFromPlainText(
+          personalize(textRaw, { name: r.name, email: r.email }, htmlEscape)
+        ),
+        deliveryId
+      );
+
+      const subject = personalize(
+        subjectRaw,
+        { name: r.name, email: r.email },
+        identity
+      );
+      const text = personalize(
+        textRaw,
+        { name: r.name, email: r.email },
+        identity
+      );
+
+      const job: DirectEmailJob = {
+        kind: "direct_email",
+        to: String(r.email),
+        subject,
+        html,
+        text,
+        tenantId,
+        unsubscribeToken: (r as any).unsubscribe_token ?? undefined,
+        fromOverride, // 未設定ならワーカーの既定を使用
+      };
+
+      await emailQueue.add("direct_email", job, {
+        jobId: `mail:${mailId}:rcpt:${r.id}:${Date.now()}`,
+        delay: delayMs,
+        removeOnComplete: 1000,
+        removeOnFail: 1000,
+      });
+      queued++;
     }
 
-    return NextResponse.json({ ok: true, sent, results });
+    // mails.status を見た目用に更新
+    await sb
+      .from("mails")
+      .update({ status: scheduledISO ? "scheduled" : "queued" })
+      .eq("id", mailId);
+
+    return NextResponse.json({
+      ok: true,
+      queued,
+      scheduled_at: scheduledISO ?? null,
+    });
   } catch (e: any) {
     return NextResponse.json(
-      { error: String(e?.message || e) },
+      { error: e?.message || "server error" },
       { status: 500 }
     );
   }

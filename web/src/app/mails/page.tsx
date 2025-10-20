@@ -1,15 +1,10 @@
+// web/src/app/mails/page.tsx
 import React from "react";
 export const dynamic = "force-dynamic";
 
 import Link from "next/link";
 import { supabaseServer } from "@/lib/supabaseServer";
 import { formatJpDateTime } from "@/lib/formatDate";
-
-type Schedule = {
-  mail_id: string;
-  scheduled_at: string | null;
-  status: string | null;
-};
 
 type MailRow = {
   id: string;
@@ -20,45 +15,32 @@ type MailRow = {
   created_at: string | null;
 };
 
-function deriveStatus(baseStatus: string | null, schedules: Schedule[]) {
-  const base = (baseStatus ?? "draft").toLowerCase();
-  const now = Date.now();
-  const isFuture = (s: Schedule) =>
-    s.scheduled_at &&
-    s.status !== "cancelled" &&
-    Date.parse(s.scheduled_at) > now;
-  const isExecuted = (s: Schedule) => {
-    const st = (s.status ?? "").toLowerCase();
-    return (
-      st === "queued" || st === "sent" || st === "processing" || st === "done"
-    );
-  };
-  const futureCount = schedules.filter(isFuture).length;
-  const executedCount = schedules.filter(isExecuted).length;
-  if (futureCount > 0 && executedCount > 0) return "scheduled/queued";
-  if (futureCount > 0) return "scheduled";
-  if (executedCount > 0) return "queued";
-  return base;
-}
+type DeliLite = {
+  mail_id: string;
+  status: string | null;
+  scheduled_at?: string | null; // ← 無い環境もあるので optional
+};
 
-function nextScheduleText(schedules: Schedule[]) {
+function deriveStatusFromDeliveries(ds: DeliLite[]) {
   const now = Date.now();
-  const future = schedules.filter(
-    (s) =>
-      s.scheduled_at &&
-      s.status !== "cancelled" &&
-      Date.parse(s.scheduled_at) > now
+  const hasFuture = ds.some((d) => {
+    if ((d.status ?? "").toLowerCase() !== "scheduled") return false;
+    // scheduled_at が無いDBは「scheduledがあれば未来扱い」とする
+    if (d.scheduled_at == null) return true;
+    const ts = Date.parse(d.scheduled_at);
+    return Number.isNaN(ts) ? true : ts > now;
+  });
+  const hasQueued = ds.some(
+    (d) =>
+      (d.status ?? "").toLowerCase() === "queued" ||
+      (d.status ?? "").toLowerCase() === "processing"
   );
-  if (future.length === 0) return "";
-  future.sort(
-    (a, b) =>
-      Date.parse(a.scheduled_at as string) -
-      Date.parse(b.scheduled_at as string)
-  );
-  const first = future[0];
-  const rest = future.length - 1;
-  const when = formatJpDateTime(first.scheduled_at);
-  return `${when}${rest > 0 ? `  +${rest}` : ""}`;
+  const hasSent = ds.some((d) => (d.status ?? "").toLowerCase() === "sent");
+
+  if (hasFuture && (hasQueued || hasSent)) return "scheduled/queued";
+  if (hasFuture) return "scheduled";
+  if (hasQueued || hasSent) return "queued";
+  return "draft";
 }
 
 export default async function MailsPage() {
@@ -102,26 +84,41 @@ export default async function MailsPage() {
 
   const rows = mails ?? [];
   const ids = rows.map((r) => r.id);
-  const byMail = new Map<string, Schedule[]>();
 
+  // mail_deliveries から予約・キュー状況を集計（scheduled_atが無い環境にも対応）
+  const byMail = new Map<string, DeliLite[]>();
   if (ids.length > 0) {
-    try {
-      const { data: sch } = await supabase
-        .from("mail_schedules")
-        .select("mail_id, scheduled_at, status")
-        .in("mail_id", ids)
-        .returns<Schedule[]>();
-      (sch ?? []).forEach((s) => {
-        const arr = byMail.get(s.mail_id) ?? [];
-        arr.push(s);
-        byMail.set(s.mail_id, arr);
-      });
-    } catch {}
+    // まず scheduled_at つきで試す
+    let dels: any[] | null = null;
+    let tryNoSched = false;
+    {
+      const { data, error } = await supabase
+        .from("mail_deliveries")
+        .select("mail_id, status, scheduled_at")
+        .in("mail_id", ids);
+      if (error && /scheduled_at/i.test(error.message)) {
+        tryNoSched = true;
+      } else {
+        dels = data as any[] | null;
+      }
+    }
+    if (tryNoSched) {
+      const { data } = await supabase
+        .from("mail_deliveries")
+        .select("mail_id, status")
+        .in("mail_id", ids);
+      dels = data as any[] | null;
+    }
+    (dels ?? []).forEach((d) => {
+      const arr = byMail.get(d.mail_id) ?? [];
+      arr.push(d as DeliLite);
+      byMail.set(d.mail_id, arr);
+    });
   }
 
   return (
     <main className="mx-auto max-w-6xl p-6">
-      {/* ヘッダー：キャンペーン一覧のデザインに準拠 */}
+      {/* ヘッダー */}
       <div className="mb-6 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
           <h1 className="whitespace-nowrap text-2xl font-semibold text-neutral-900">
@@ -135,12 +132,6 @@ export default async function MailsPage() {
             className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
           >
             メール配信トップ
-          </Link>
-          <Link
-            href="/mails/schedules"
-            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
-          >
-            メール予約リスト
           </Link>
           <Link
             href="/mails/new"
@@ -158,16 +149,14 @@ export default async function MailsPage() {
               <th className="px-3 py-3 text-left">メール名</th>
               <th className="px-3 py-3 text-left">件名</th>
               <th className="px-3 py-3 text-left">ステータス</th>
-              <th className="px-3 py-3 text-left">予約</th>
               <th className="px-3 py-3 text-left">作成日</th>
               <th className="px-3 py-3 text-left">操作</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((r) => {
-              const schedules = byMail.get(r.id) ?? [];
-              const status = deriveStatus(r.status, schedules);
-              const nextText = nextScheduleText(schedules);
+              const d = byMail.get(r.id) ?? [];
+              const status = deriveStatusFromDeliveries(d);
               return (
                 <tr key={r.id} className="border-t border-neutral-200">
                   <td className="px-3 py-3">{r.name ?? ""}</td>
@@ -175,7 +164,6 @@ export default async function MailsPage() {
                     {r.subject ?? ""}
                   </td>
                   <td className="px-3 py-3">{status}</td>
-                  <td className="px-3 py-3">{nextText}</td>
                   <td className="px-3 py-3">
                     {formatJpDateTime(r.created_at)}
                   </td>
@@ -201,7 +189,7 @@ export default async function MailsPage() {
             {rows.length === 0 && (
               <tr>
                 <td
-                  colSpan={6}
+                  colSpan={5}
                   className="px-4 py-8 text-center text-neutral-400"
                 >
                   メールはありません
