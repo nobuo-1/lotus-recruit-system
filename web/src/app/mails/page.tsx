@@ -134,6 +134,12 @@ export default async function MailsPage() {
             メール配信トップ
           </Link>
           <Link
+            href="/email/schedules"
+            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
+          >
+            メール予約リスト
+          </Link>
+          <Link
             href="/mails/new"
             className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
           >

@@ -6,6 +6,11 @@ import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
 import { emailQueue } from "@/server/queue";
 
+const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
+  /\/+$/,
+  ""
+);
+
 type Body = {
   mailId?: string;
   recipientIds?: string[];
@@ -28,7 +33,6 @@ function chunk<T>(arr: T[], size: number): T[][] {
   return out;
 }
 
-// 変数差し込み（{{NAME}}, {{EMAIL}}）— テキスト版のみ
 function personalize(
   input: string,
   vars: { name?: string | null; email?: string | null }
@@ -40,7 +44,96 @@ function personalize(
     .replaceAll(/\{\{\s*EMAIL\s*\}\}/g, email);
 }
 
-/** CORS（必要なら） */
+async function loadBrandForCurrentUser() {
+  const sb = await supabaseServer();
+  const { data: u } = await sb.auth.getUser();
+  const user = u?.user;
+  if (!user)
+    return {
+      tenantId: undefined as string | undefined,
+      brand: {
+        company: undefined as string | undefined,
+        address: undefined as string | undefined,
+        support: undefined as string | undefined,
+        from: undefined as string | undefined,
+      },
+    };
+
+  const { data: prof } = await sb
+    .from("profiles")
+    .select("tenant_id")
+    .eq("id", user.id)
+    .maybeSingle();
+  const tenantId = (prof?.tenant_id as string | undefined) ?? undefined;
+
+  let company: string | undefined,
+    address: string | undefined,
+    support: string | undefined,
+    from: string | undefined;
+
+  // 1) email_settings（user優先 → tenant）
+  const byUser = await sb
+    .from("email_settings")
+    .select("company_name,company_address,support_email,from_email")
+    .eq("user_id", user.id)
+    .maybeSingle();
+  if (byUser.data) {
+    company = (byUser.data as any).company_name || company;
+    address = (byUser.data as any).company_address || address;
+    support = (byUser.data as any).support_email || support;
+    from = (byUser.data as any).from_email || from;
+  }
+  if ((!company || !from) && tenantId) {
+    const byTenant = await sb
+      .from("email_settings")
+      .select("company_name,company_address,support_email,from_email")
+      .eq("tenant_id", tenantId)
+      .maybeSingle();
+    if (byTenant.data) {
+      company ||= (byTenant.data as any).company_name || undefined;
+      address ||= (byTenant.data as any).company_address || undefined;
+      support ||= (byTenant.data as any).support_email || undefined;
+      from ||= (byTenant.data as any).from_email || undefined;
+    }
+  }
+
+  // 2) tenants を最後のフォールバック
+  if (tenantId && (!company || !from)) {
+    const { data: t } = await sb
+      .from("tenants")
+      .select("company_name, company_address, support_email, from_email")
+      .eq("id", tenantId)
+      .maybeSingle();
+    if (t) {
+      company ||= (t as any).company_name || undefined;
+      address ||= (t as any).company_address || undefined;
+      support ||= (t as any).support_email || undefined;
+      from ||= (t as any).from_email || undefined;
+    }
+  }
+
+  return {
+    tenantId,
+    brand: { company, address, support, from },
+  };
+}
+
+function buildTextFooter(opts: {
+  company?: string;
+  address?: string;
+  support?: string;
+  unsubscribeUrl?: string | null;
+}) {
+  const L: string[] = [];
+  if (opts.company) L.push(`運営：${opts.company}`);
+  if (opts.address) L.push(`所在地：${opts.address}`);
+  if (opts.support) L.push(`連絡先：${opts.support}`);
+  if (opts.unsubscribeUrl) L.push(`配信停止：${opts.unsubscribeUrl}`);
+  if (L.length === 0) return "";
+  return ["", "――", ...L].join("\n");
+}
+
+/** CORS */
 export async function OPTIONS() {
   return new NextResponse(null, {
     status: 204,
@@ -74,18 +167,12 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
     }
 
-    // テナント
-    const { data: prof } = await sb
-      .from("profiles")
-      .select("tenant_id")
-      .eq("id", u.user.id)
-      .maybeSingle();
-    const tenantId = (prof?.tenant_id as string | undefined) ?? undefined;
+    const { tenantId, brand } = await loadBrandForCurrentUser();
     if (!tenantId) {
       return NextResponse.json({ error: "no tenant" }, { status: 400 });
     }
 
-    // メール本体：プレーンテキストのみ使用（デザイン無し）
+    // メール本体：プレーンテキストのみ使用
     const { data: mail, error: me } = await sb
       .from("mails")
       .select("id, tenant_id, subject, body_text")
@@ -116,7 +203,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "no recipients" }, { status: 400 });
     }
 
-    // 既に登録済（scheduled/queued/sent）は除外
+    // 既登録（scheduled/queued/sent）は除外
     const { data: already } = await sb
       .from("mail_deliveries")
       .select("recipient_id")
@@ -147,9 +234,21 @@ export async function POST(req: Request) {
       scheduled = delayMs > 0;
     }
 
-    // --- ここがポイント ---
-    // 重複は事前除外しているので、DBは通常の INSERT でOK（ON CONFLICTは使わない）
-    // ※ スキーマに scheduled_at/sent_at が無くても動くよう、必須列だけ入れる
+    // スケジュール記録（存在しない列/テーブルでも送信は成功させる）
+    if (scheduled) {
+      try {
+        await sb.from("mail_schedules").insert({
+          tenant_id: tenantId,
+          mail_id: mailId,
+          scheduled_at: new Date(scheduleAtISO as string).toISOString(),
+          status: "scheduled",
+        } as any);
+      } catch {
+        // no-op（一覧への反映だけスキップ）
+      }
+    }
+
+    // mail_deliveries へ記録（通常の insert）
     const rows = targets.map((r: any) => ({
       mail_id: mailId,
       recipient_id: r.id,
@@ -162,24 +261,39 @@ export async function POST(req: Request) {
       }
     }
 
-    // キュー投入（テキストのみ / デザイン無し）
+    // キュー投入（テキスト＋フッター）
     let queued = 0;
     for (const r of targets as any[]) {
-      const text = personalize(textRaw, { name: r.name, email: r.email });
+      const unsubUrl = r.unsubscribe_token
+        ? `${appUrl}/api/unsubscribe?token=${encodeURIComponent(
+            r.unsubscribe_token
+          )}`
+        : null;
+
+      const textBody = personalize(textRaw, { name: r.name, email: r.email });
+      const footer = buildTextFooter({
+        company: brand.company,
+        address: brand.address,
+        support: brand.support,
+        unsubscribeUrl: unsubUrl,
+      });
+
       const subject = personalize(subjectRaw, {
         name: r.name,
         email: r.email,
       });
 
-      const job /* : DirectEmailJob */ = {
+      const job /*: DirectEmailJob*/ = {
         kind: "direct_email",
         to: String(r.email),
         subject,
-        // ← HTMLは付けない（デザイン無し）
-        text,
+        text: footer ? `${textBody}\n\n${footer}` : textBody,
         tenantId,
         unsubscribeToken: (r as any).unsubscribe_token ?? undefined,
-        // fromOverride / brand 情報も付けない（シンプル送信）
+        fromOverride: brand.from || undefined,
+        brandCompany: brand.company || undefined,
+        brandAddress: brand.address || undefined,
+        brandSupport: brand.support || undefined,
       } as any;
 
       await emailQueue.add("direct_email", job, {

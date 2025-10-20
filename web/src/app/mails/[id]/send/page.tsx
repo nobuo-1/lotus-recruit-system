@@ -277,8 +277,12 @@ export default function MailSendPage() {
       toastSuccess(
         mode === "now" ? "送信キューに追加しました" : "予約を作成しました"
       );
-      // UX: 送信後は一覧へ戻る
-      router.push("/mails");
+      // ★ 予約は予約リストへ、即時は一覧へ
+      if (mode === "reserve") {
+        router.push("/email/schedules");
+      } else {
+        router.push("/mails");
+      }
     } else {
       toastError(`送信/予約に失敗しました（${res.status}）`);
       alert(`送信/予約に失敗しました: ${res.status}\n${t}`);
