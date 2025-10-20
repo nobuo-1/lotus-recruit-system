@@ -6,7 +6,7 @@ import { createClient } from "@supabase/supabase-js";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-/** 任意: ルート確認用（不要なら削除可） */
+/** 任意: 動作確認用（不要なら削除可） */
 export async function GET() {
   return NextResponse.json({ ok: true, route: "/api/mails/send" });
 }
@@ -92,10 +92,9 @@ export async function POST(req: Request) {
       .from("mails")
       .select("id, tenant_id, name, subject, body_text")
       .eq("id", mailId)
-      .maybeSingle(); // ← 呼び出し時ジェネリクスを使わない
+      .maybeSingle();
 
     const mail = (mailRaw as MailRow | null) ?? null;
-
     if (me || !mail) {
       return NextResponse.json(
         { error: me?.message ?? "mail not found" },
@@ -119,12 +118,11 @@ export async function POST(req: Request) {
         recipient_id: rid,
         status: "scheduled",
         sent_at: null,
-        meta: null,
       }));
       const { error: de } = await supabase.from("mail_deliveries").insert(ins);
       if (de) return NextResponse.json({ error: de.message }, { status: 500 });
 
-      // （存在すれば）mails.status を queued にしておく（失敗しても無視）
+      // （存在すれば）mails.status を queued に（失敗しても無視）
       try {
         await supabase
           .from("mails")
@@ -150,13 +148,12 @@ export async function POST(req: Request) {
       );
     }
 
-    // 先に queued を作成
+    // 先に queued を作成（meta列は使わない）
     const queuedRows = recipients.map((r) => ({
       mail_id: mailId,
       recipient_id: r.id,
       status: "queued",
       sent_at: null,
-      meta: null,
     }));
     {
       const { error: qe } = await supabase
@@ -187,7 +184,6 @@ export async function POST(req: Request) {
             .update({
               status: "error",
               sent_at: new Date().toISOString(),
-              meta: { error: "no email" },
             })
             .match({ mail_id: mailId, recipient_id: r.id, status: "queued" });
           continue;
@@ -199,7 +195,6 @@ export async function POST(req: Request) {
             .update({
               status: "error",
               sent_at: new Date().toISOString(),
-              meta: { error: "opt-out" },
             })
             .match({ mail_id: mailId, recipient_id: r.id, status: "queued" });
           continue;
@@ -221,11 +216,7 @@ export async function POST(req: Request) {
 
         await supabase
           .from("mail_deliveries")
-          .update({
-            status: "sent",
-            sent_at: new Date().toISOString(),
-            meta: null,
-          })
+          .update({ status: "sent", sent_at: new Date().toISOString() })
           .match({ mail_id: mailId, recipient_id: r.id, status: "queued" });
 
         results.push({ id: r.id, ok: true });
@@ -236,7 +227,6 @@ export async function POST(req: Request) {
           .update({
             status: "error",
             sent_at: new Date().toISOString(),
-            meta: { error: String(e?.message || e) },
           })
           .match({ mail_id: mailId, recipient_id: r.id, status: "queued" });
 

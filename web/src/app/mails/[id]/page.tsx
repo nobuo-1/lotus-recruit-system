@@ -115,10 +115,10 @@ export default async function MailDetailPage({
     );
   }
 
-  // メール本体（存在するカラムに限定）
+  // メール本体：body_html を一切参照しない（列が無い環境でも安全）
   const { data: mail, error: mailErr } = await supabase
     .from("mails")
-    .select("id, name, subject, created_at, body_text, body_html")
+    .select("id, name, subject, created_at, body_text")
     .eq("id", id)
     .maybeSingle();
 
@@ -153,14 +153,8 @@ export default async function MailDetailPage({
   const sentCount = rows.length;
   const statusText = deriveStatus(schedules ?? [], rows);
 
-  // 本文：body_text を優先、なければ HTML をテキスト化
-  const bodyText =
-    toS(mail?.body_text) ||
-    toS(mail?.body_html)
-      .replace(/<br\s*\/?>/gi, "\n")
-      .replace(/<\/p>/gi, "\n\n")
-      .replace(/<[^>]+>/g, "")
-      .trim();
+  // 本文：body_text のみ
+  const bodyText = toS(mail?.body_text);
 
   return (
     <main className="mx-auto max-w-6xl p-6">
