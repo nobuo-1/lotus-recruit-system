@@ -4,7 +4,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import KpiCard from "@/components/KpiCard";
-import AppHeader from "@/components/AppHeader"; // ★ 追加：ヘッダー復活
+import AppHeader from "@/components/AppHeader";
 import {
   ResponsiveContainer,
   LineChart,
@@ -14,7 +14,16 @@ import {
   Tooltip,
   CartesianGrid,
 } from "recharts";
-import { Settings, ChevronDown } from "lucide-react";
+import {
+  Settings,
+  ChevronDown,
+  Mail,
+  Megaphone,
+  Users,
+  CirclePlus,
+  List,
+  CalendarClock,
+} from "lucide-react";
 
 type Summary = {
   campaignCount: number;
@@ -61,11 +70,10 @@ export default function EmailLanding() {
 
   return (
     <>
-      {/* ★ 追加：グローバルヘッダー */}
       <AppHeader />
 
       <main className="mx-auto max-w-6xl p-6">
-        {/* タイトル行（左：タイトル＋設定、右：メニュー開閉ボタン） */}
+        {/* タイトル行 */}
         <div className="mb-3 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
@@ -88,7 +96,7 @@ export default function EmailLanding() {
             </p>
           </div>
 
-          {/* 使う機能メニュー（位置は現状のまま） */}
+          {/* 機能メニュー */}
           <div className="w-full sm:w-auto">
             <button
               type="button"
@@ -106,94 +114,147 @@ export default function EmailLanding() {
           </div>
         </div>
 
-        {/* ★ 変更点：開いたパネルは“以前のコードの感じ”（フル幅・3カラムの羅列）に戻す。
-             色味は現状のまま（ニュートラル系・下線ホバー） */}
+        {/* 機能メニューの中身（タイトル大・太／リンク小・通常、アイコン付き） */}
         {menuOpen && (
           <div className="mb-4 rounded-2xl border border-neutral-200 p-4">
             <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
               {/* メール */}
-              <div>
-                <div className="mb-2 text-sm font-medium text-neutral-700">
-                  メール
+              <section aria-labelledby="sec-mail">
+                <div className="mb-2 flex items-center gap-2">
+                  <Mail
+                    className="h-4 w-4 text-neutral-600"
+                    aria-hidden="true"
+                  />
+                  <h2
+                    id="sec-mail"
+                    className="text-base font-semibold text-neutral-800"
+                  >
+                    メール
+                  </h2>
                 </div>
-                <ul className="space-y-1 text-sm">
+                <ul className="space-y-1">
                   <li>
                     <Link
                       href="/mails/new"
-                      className="text-neutral-700 underline-offset-2 hover:underline"
+                      className="inline-flex items-center gap-2 text-sm text-neutral-700 underline-offset-2 hover:underline"
                     >
+                      <CirclePlus
+                        className="h-4 w-4 text-neutral-600"
+                        aria-hidden="true"
+                      />
                       新規メール
                     </Link>
                   </li>
                   <li>
                     <Link
                       href="/mails"
-                      className="text-neutral-700 underline-offset-2 hover:underline"
+                      className="inline-flex items-center gap-2 text-sm text-neutral-700 underline-offset-2 hover:underline"
                     >
+                      <List
+                        className="h-4 w-4 text-neutral-600"
+                        aria-hidden="true"
+                      />
                       メール一覧
                     </Link>
                   </li>
                   <li>
-                    {/* ルートは仕様準拠で /mails/schedules */}
                     <Link
                       href="/mails/schedules"
-                      className="text-neutral-700 underline-offset-2 hover:underline"
+                      className="inline-flex items-center gap-2 text-sm text-neutral-700 underline-offset-2 hover:underline"
                     >
+                      <CalendarClock
+                        className="h-4 w-4 text-neutral-600"
+                        aria-hidden="true"
+                      />
                       メール予約リスト
                     </Link>
                   </li>
                 </ul>
-              </div>
+              </section>
 
               {/* キャンペーン */}
-              <div>
-                <div className="mb-2 text-sm font-medium text-neutral-700">
-                  キャンペーン
+              <section aria-labelledby="sec-campaigns">
+                <div className="mb-2 flex items-center gap-2">
+                  <Megaphone
+                    className="h-4 w-4 text-neutral-600"
+                    aria-hidden="true"
+                  />
+                  <h2
+                    id="sec-campaigns"
+                    className="text-base font-semibold text-neutral-800"
+                  >
+                    キャンペーン
+                  </h2>
                 </div>
-                <ul className="space-y-1 text-sm">
+                <ul className="space-y-1">
                   <li>
                     <Link
                       href="/campaigns/new"
-                      className="text-neutral-700 underline-offset-2 hover:underline"
+                      className="inline-flex items-center gap-2 text-sm text-neutral-700 underline-offset-2 hover:underline"
                     >
+                      <CirclePlus
+                        className="h-4 w-4 text-neutral-600"
+                        aria-hidden="true"
+                      />
                       新規キャンペーン
                     </Link>
                   </li>
                   <li>
                     <Link
                       href="/campaigns"
-                      className="text-neutral-700 underline-offset-2 hover:underline"
+                      className="inline-flex items-center gap-2 text-sm text-neutral-700 underline-offset-2 hover:underline"
                     >
+                      <List
+                        className="h-4 w-4 text-neutral-600"
+                        aria-hidden="true"
+                      />
                       キャンペーン一覧
                     </Link>
                   </li>
                   <li>
                     <Link
                       href="/email/schedules"
-                      className="text-neutral-700 underline-offset-2 hover:underline"
+                      className="inline-flex items-center gap-2 text-sm text-neutral-700 underline-offset-2 hover:underline"
                     >
+                      <CalendarClock
+                        className="h-4 w-4 text-neutral-600"
+                        aria-hidden="true"
+                      />
                       キャンペーン予約リスト
                     </Link>
                   </li>
                 </ul>
-              </div>
+              </section>
 
               {/* 受信者 */}
-              <div>
-                <div className="mb-2 text-sm font-medium text-neutral-700">
-                  受信者リスト
+              <section aria-labelledby="sec-recipients">
+                <div className="mb-2 flex items-center gap-2">
+                  <Users
+                    className="h-4 w-4 text-neutral-600"
+                    aria-hidden="true"
+                  />
+                  <h2
+                    id="sec-recipients"
+                    className="text-base font-semibold text-neutral-800"
+                  >
+                    受信者リスト
+                  </h2>
                 </div>
-                <ul className="space-y-1 text-sm">
+                <ul className="space-y-1">
                   <li>
                     <Link
                       href="/recipients"
-                      className="text-neutral-700 underline-offset-2 hover:underline"
+                      className="inline-flex items-center gap-2 text-sm text-neutral-700 underline-offset-2 hover:underline"
                     >
+                      <Users
+                        className="h-4 w-4 text-neutral-600"
+                        aria-hidden="true"
+                      />
                       受信者リスト
                     </Link>
                   </li>
                 </ul>
-              </div>
+              </section>
             </div>
           </div>
         )}
