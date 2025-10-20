@@ -6,8 +6,12 @@ import { createClient } from "@supabase/supabase-js";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-// --- Supabase Admin Client（サービスロール） ---
-// 型ループ回避のため any 化
+/** ルート生存チェック（デバッグ用：必要なければ後で削除OK） */
+export async function GET() {
+  return NextResponse.json({ ok: true, route: "/api/mails/send" });
+}
+
+/** Supabase Admin Client（サービスロール） */
 function supabaseAdmin(): any {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL as string;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY as string;
@@ -19,7 +23,7 @@ function supabaseAdmin(): any {
   return createClient(url, key, { auth: { persistSession: false } }) as any;
 }
 
-// --- SMTP Transport ---
+/** Nodemailer Transport */
 function makeTransport() {
   const host = process.env.SMTP_HOST!;
   const port = +(process.env.SMTP_PORT ?? 587);
@@ -42,34 +46,28 @@ function htmlToText(html: string) {
     .trim();
 }
 
-// 差出人メール取得：email_settings → env（SMTP_FROM or SMTP_USER）
-// supabase 引数は any にしてジェネリクス起因の型エラーを回避
+/** 差出人の決定：email_settings → 環境変数（SMTP_FROM or SMTP_USER） */
 async function resolveFromEmail(
   supabase: any,
   tenantId: string | null | undefined
 ): Promise<string> {
-  // 1) email_settings テーブルから
   if (tenantId) {
     try {
-      type EmailSettingsRow = { from_email: string | null };
-      const { data } = (await supabase
+      const { data } = await supabase
         .from("email_settings")
         .select("from_email")
         .eq("tenant_id", tenantId)
-        .maybeSingle()) as { data: EmailSettingsRow | null; error: any | null };
-
+        .maybeSingle();
       const v = String(data?.from_email ?? "").trim();
       if (v) return v;
     } catch {
-      /* ignore and fallback */
+      /* no-op */
     }
   }
-  // 2) 環境変数（優先: SMTP_FROM、次点: SMTP_USER）
   const envFrom = String(
     process.env.SMTP_FROM ?? process.env.SMTP_USER ?? ""
   ).trim();
   if (envFrom) return envFrom;
-
   throw new Error(
     "差出人メールが見つかりません（email_settings.from_email または SMTP_FROM/SMTP_USER を設定してください）"
   );
@@ -87,20 +85,12 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "invalid payload" }, { status: 400 });
     }
 
-    // --- メール本体（from_email は参照しない）---
-    type MailRow = {
-      id: string;
-      tenant_id: string | null;
-      name: string | null;
-      subject: string | null;
-      body_text: string | null;
-      body_html: string | null;
-    };
-    const { data: mail, error: me } = (await supabase
+    // メール本体（from_email は参照しない）
+    const { data: mail, error: me } = await supabase
       .from("mails")
       .select("id, tenant_id, name, subject, body_text, body_html")
       .eq("id", mailId)
-      .maybeSingle()) as { data: MailRow | null; error: any | null };
+      .maybeSingle();
 
     if (me || !mail) {
       return NextResponse.json(
@@ -109,20 +99,18 @@ export async function POST(req: Request) {
       );
     }
 
-    // 差出人を決定（email_settings → env）
     const fromEmail = await resolveFromEmail(supabase, mail.tenant_id);
 
-    // --- 予約登録 ---
+    // 予約：*_schedules に積み、deliveries を scheduled 登録
     if (scheduleAt) {
       const { error: se } = await supabase.from("mail_schedules").insert({
         mail_id: mailId,
         scheduled_at: scheduleAt.toISOString(),
         status: "scheduled",
-        tenant_id: mail.tenant_id,
+        // tenant_id はスキーマに無い想定のため入れない
       });
       if (se) return NextResponse.json({ error: se.message }, { status: 500 });
 
-      // 予約対象の recipients を scheduled で投入
       const ins = ids.map((rid: string) => ({
         mail_id: mailId,
         recipient_id: rid,
@@ -136,17 +124,12 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, scheduled: ids.length });
     }
 
-    // --- 即時送信 ---
-    type RecRow = {
-      id: string;
-      email: string | null;
-      name: string | null;
-      consent: string | null;
-    };
-    const { data: recs, error: re } = (await supabase
+    // 即時送信：プレーンテキスト
+    const { data: recs, error: re } = await supabase
       .from("recipients")
       .select("id, email, name, consent")
-      .in("id", ids)) as { data: RecRow[] | null; error: any | null };
+      .in("id", ids);
+
     if (re) return NextResponse.json({ error: re.message }, { status: 500 });
 
     const transporter = makeTransport();

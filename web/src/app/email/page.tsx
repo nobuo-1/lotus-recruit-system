@@ -14,16 +14,7 @@ import {
   Tooltip,
   CartesianGrid,
 } from "recharts";
-import {
-  Settings,
-  ChevronDown,
-  Mail,
-  Megaphone,
-  Users,
-  CirclePlus,
-  List,
-  CalendarClock,
-} from "lucide-react";
+import { Settings, ChevronDown, Mail, Megaphone, Users } from "lucide-react";
 
 type Summary = {
   campaignCount: number;
@@ -70,6 +61,7 @@ export default function EmailLanding() {
 
   return (
     <>
+      {/* グローバルヘッダー復活 */}
       <AppHeader />
 
       <main className="mx-auto max-w-6xl p-6">
@@ -82,13 +74,13 @@ export default function EmailLanding() {
               </h1>
               <Link
                 href="/email/settings"
-                className="inline-flex items-center gap-1.5 rounded-xl border border-neutral-200 px-3 py-1.5 text-sm hover:bg-neutral-50 whitespace-nowrap"
+                className="inline-flex items-center gap-1.5 rounded-xl border border-neutral-200 px-3 py-1.5 whitespace-nowrap hover:bg-neutral-50"
               >
                 <Settings
                   className="h-4 w-4 text-neutral-600"
                   strokeWidth={1.6}
                 />
-                <span className="whitespace-nowrap">メール用設定</span>
+                <span className="whitespace-nowrap text-sm">メール用設定</span>
               </Link>
             </div>
             <p className="mt-1 text-sm text-neutral-500">
@@ -96,12 +88,12 @@ export default function EmailLanding() {
             </p>
           </div>
 
-          {/* 機能メニュー */}
+          {/* 機能メニューボタン（他ページの遷移ボタンと同サイズ） */}
           <div className="w-full sm:w-auto">
             <button
               type="button"
               onClick={() => setMenuOpen((v) => !v)}
-              className="inline-flex w-full items-center justify-between rounded-xl border border-neutral-200 px-4 py-2 text-sm hover:bg-neutral-50 sm:w-auto"
+              className="inline-flex w-full items-center justify-between rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 sm:w-auto"
               aria-expanded={menuOpen}
             >
               機能メニュー
@@ -114,7 +106,7 @@ export default function EmailLanding() {
           </div>
         </div>
 
-        {/* 機能メニューの中身（タイトル大・太／リンク小・通常、アイコン付き） */}
+        {/* 機能メニュー：見出しにのみアイコン／リンクはアイコン無し */}
         {menuOpen && (
           <div className="mb-4 rounded-2xl border border-neutral-200 p-4">
             <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
@@ -136,36 +128,24 @@ export default function EmailLanding() {
                   <li>
                     <Link
                       href="/mails/new"
-                      className="inline-flex items-center gap-2 text-sm text-neutral-700 underline-offset-2 hover:underline"
+                      className="text-sm text-neutral-700 underline-offset-2 hover:underline"
                     >
-                      <CirclePlus
-                        className="h-4 w-4 text-neutral-600"
-                        aria-hidden="true"
-                      />
                       新規メール
                     </Link>
                   </li>
                   <li>
                     <Link
                       href="/mails"
-                      className="inline-flex items-center gap-2 text-sm text-neutral-700 underline-offset-2 hover:underline"
+                      className="text-sm text-neutral-700 underline-offset-2 hover:underline"
                     >
-                      <List
-                        className="h-4 w-4 text-neutral-600"
-                        aria-hidden="true"
-                      />
                       メール一覧
                     </Link>
                   </li>
                   <li>
                     <Link
                       href="/mails/schedules"
-                      className="inline-flex items-center gap-2 text-sm text-neutral-700 underline-offset-2 hover:underline"
+                      className="text-sm text-neutral-700 underline-offset-2 hover:underline"
                     >
-                      <CalendarClock
-                        className="h-4 w-4 text-neutral-600"
-                        aria-hidden="true"
-                      />
                       メール予約リスト
                     </Link>
                   </li>
@@ -190,36 +170,24 @@ export default function EmailLanding() {
                   <li>
                     <Link
                       href="/campaigns/new"
-                      className="inline-flex items-center gap-2 text-sm text-neutral-700 underline-offset-2 hover:underline"
+                      className="text-sm text-neutral-700 underline-offset-2 hover:underline"
                     >
-                      <CirclePlus
-                        className="h-4 w-4 text-neutral-600"
-                        aria-hidden="true"
-                      />
                       新規キャンペーン
                     </Link>
                   </li>
                   <li>
                     <Link
                       href="/campaigns"
-                      className="inline-flex items-center gap-2 text-sm text-neutral-700 underline-offset-2 hover:underline"
+                      className="text-sm text-neutral-700 underline-offset-2 hover:underline"
                     >
-                      <List
-                        className="h-4 w-4 text-neutral-600"
-                        aria-hidden="true"
-                      />
                       キャンペーン一覧
                     </Link>
                   </li>
                   <li>
                     <Link
                       href="/email/schedules"
-                      className="inline-flex items-center gap-2 text-sm text-neutral-700 underline-offset-2 hover:underline"
+                      className="text-sm text-neutral-700 underline-offset-2 hover:underline"
                     >
-                      <CalendarClock
-                        className="h-4 w-4 text-neutral-600"
-                        aria-hidden="true"
-                      />
                       キャンペーン予約リスト
                     </Link>
                   </li>
@@ -244,12 +212,8 @@ export default function EmailLanding() {
                   <li>
                     <Link
                       href="/recipients"
-                      className="inline-flex items-center gap-2 text-sm text-neutral-700 underline-offset-2 hover:underline"
+                      className="text-sm text-neutral-700 underline-offset-2 hover:underline"
                     >
-                      <Users
-                        className="h-4 w-4 text-neutral-600"
-                        aria-hidden="true"
-                      />
                       受信者リスト
                     </Link>
                   </li>
