@@ -7,24 +7,20 @@ import { supabaseServer } from "@/lib/supabaseServer";
 import { emailQueue } from "@/server/queue";
 import type { DirectEmailJob } from "@/server/queue";
 
-/* ================= ユーティリティ ================= */
 type Body = {
   mailId?: string;
   recipientIds?: string[];
   scheduleAt?: string | null;
 };
 
-function chunk<T>(arr: T[], size: number): T[][] {
-  const a = [...arr];
-  const out: T[][] = [];
-  while (a.length) out.push(a.splice(0, size));
-  return out;
+async function safeJson<T = any>(req: Request): Promise<T | {}> {
+  try {
+    if (!req.headers.get("content-length")) return {};
+    return (await req.json()) as T;
+  } catch {
+    return {};
+  }
 }
-
-const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
-  /\/+$/,
-  ""
-);
 
 function htmlEscape(s: string) {
   return String(s)
@@ -49,7 +45,7 @@ function personalize(
     .replaceAll(/\{\{\s*EMAIL\s*\}\}/g, encode(email));
 }
 
-/** 1行目だけ太字化した軽量HTMLをプレーンテキストから生成 */
+// プレーンテキスト → 軽量HTML（1行目太字）
 function buildLightHtmlFromPlainText(raw: string) {
   const t = (raw ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   if (!t) return "";
@@ -66,34 +62,6 @@ function buildLightHtmlFromPlainText(raw: string) {
   )}</strong><br />${htmlEscape(rest).replace(/\n/g, "<br />")}`;
 }
 
-/* “カード化”＋開封ピクセル。キャンペーンと同じ見た目に寄せる（簡略版） */
-function wrapAsCard(html: string, deliveryId: string) {
-  const pixel = `<img src="${appUrl}/api/email/open?id=${encodeURIComponent(
-    deliveryId
-  )}" alt="" width="1" height="1" style="display:block;max-width:1px;max-height:1px;border:0;outline:none;" />`;
-  return `<table role="presentation" width="100%" bgcolor="#f3f4f6" style="background:#f3f4f6 !important;padding:16px 0;">
-  <tr><td align="center" bgcolor="#f3f4f6" style="padding:0 12px;">
-    <table role="presentation" width="100%" bgcolor="#ffffff" style="max-width:640px;border-radius:14px;background:#ffffff !important;box-shadow:0 4px 16px rgba(0,0,0,.08);border:1px solid #e5e7eb !important;">
-      <tr><td bgcolor="#ffffff" style="padding:20px;font:16px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111827 !important;">
-        ${html}
-        ${pixel}
-      </td></tr>
-    </table>
-  </td></tr>
-</table>`;
-}
-
-/** 安全JSON */
-async function safeJson<T = any>(req: Request): Promise<T | {}> {
-  try {
-    if (!req.headers.get("content-length")) return {};
-    return (await req.json()) as T;
-  } catch {
-    return {};
-  }
-}
-
-/* ================= ハンドラ ================= */
 export async function POST(req: Request) {
   try {
     const body = (await safeJson<Body>(req)) as Body;
@@ -108,14 +76,13 @@ export async function POST(req: Request) {
       );
     }
 
-    // RLSありのサーバークライアント
     const sb = await supabaseServer();
-
-    // 認証 & テナント
     const { data: u } = await sb.auth.getUser();
     if (!u?.user) {
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
     }
+
+    // テナント
     const { data: prof } = await sb
       .from("profiles")
       .select("tenant_id")
@@ -126,17 +93,17 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "no tenant" }, { status: 400 });
     }
 
-    // メール本体（body_textのみ使用）
+    // メール本体（from_email は参照しない）
     const { data: mail, error: me } = await sb
       .from("mails")
-      .select("id, tenant_id, subject, body_text, from_email")
+      .select("id, tenant_id, subject, body_text")
       .eq("id", mailId)
       .maybeSingle();
-    if (me || !mail) {
-      return NextResponse.json(
-        { error: me?.message ?? "mail not found" },
-        { status: 404 }
-      );
+    if (me) {
+      return NextResponse.json({ error: me.message }, { status: 500 });
+    }
+    if (!mail) {
+      return NextResponse.json({ error: "mail not found" }, { status: 404 });
     }
     if ((mail as any).tenant_id && (mail as any).tenant_id !== tenantId) {
       return NextResponse.json({ error: "forbidden" }, { status: 403 });
@@ -158,7 +125,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "no recipients" }, { status: 400 });
     }
 
-    // 二重送信防止：既に scheduled/queued/sent の宛先は除外
+    // 既登録（scheduled/queued/sent）は除外
     const { data: already } = await sb
       .from("mail_deliveries")
       .select("recipient_id")
@@ -170,7 +137,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, queued: 0, skipped: ids.length });
     }
 
-    // 予約/即時の判定
+    // 予約 or 即時
     let delayMs = 0;
     let scheduledISO: string | null = null;
     if (scheduleAtISO) {
@@ -185,52 +152,51 @@ export async function POST(req: Request) {
       scheduledISO = new Date(ts).toISOString();
     }
 
-    // mail_deliveries に記録（scheduled/queued）
-    const baseRows = targets.map((r: any) => ({
+    // mail_deliveries へ upsert（scheduled_at が無いDBでも自動フォールバック）
+    const rows = targets.map((r: any) => ({
       mail_id: mailId,
       recipient_id: r.id,
       status: scheduledISO ? ("scheduled" as const) : ("queued" as const),
-      // scheduled_at 列が存在するDBなら入る。存在しない場合は後段のフォールバックで無しINSERT。
       scheduled_at: scheduledISO ?? null,
       sent_at: null,
     }));
 
-    // scheduled_at の有無に耐えるフォールバックINSERT
-    const tryInsert = async () => {
-      const { error: e1 } = await sb.from("mail_deliveries").insert(baseRows);
-      if (e1 && /scheduled_at/i.test(e1.message)) {
-        const rowsNoSched = baseRows.map((r) => {
-          const { scheduled_at, ...rest } = r;
-          return rest;
-        });
-        const { error: e2 } = await sb
+    const tryWithSched = await sb
+      .from("mail_deliveries")
+      .upsert(rows, { onConflict: "mail_id,recipient_id" })
+      .select("id, recipient_id");
+    if (tryWithSched.error) {
+      if (/scheduled_at/i.test(tryWithSched.error.message || "")) {
+        const rowsNoSched = rows.map(({ scheduled_at, ...rest }) => rest);
+        const tryNoSched = await sb
           .from("mail_deliveries")
-          .insert(rowsNoSched);
-        if (e2) throw e2;
-      } else if (e1) {
-        throw e1;
+          .upsert(rowsNoSched as any[], {
+            onConflict: "mail_id,recipient_id",
+          })
+          .select("id, recipient_id");
+        if (tryNoSched.error) {
+          return NextResponse.json(
+            { error: tryNoSched.error.message },
+            { status: 500 }
+          );
+        }
+      } else {
+        return NextResponse.json(
+          { error: tryWithSched.error.message },
+          { status: 500 }
+        );
       }
-    };
-    await tryInsert();
+    }
 
-    // ワーカーに投入（キャンペーンと同じDirectEmailJob）
+    // キューへ投入（キャンペーンと同じ DirectEmailJob）
     const subjectRaw = String((mail as any).subject ?? "");
     const textRaw = String((mail as any).body_text ?? "");
-    const fromOverride =
-      ((mail as any).from_email as string | null) ?? undefined;
 
     let queued = 0;
     for (const r of targets as any[]) {
-      const deliveryId = ""; // （必要なら mail_deliveries.id をselectで取得して紐付け可能）
-
-      // HTML版（プレーン→軽量HTML化＋1行目太字）
-      const html = wrapAsCard(
-        buildLightHtmlFromPlainText(
-          personalize(textRaw, { name: r.name, email: r.email }, htmlEscape)
-        ),
-        deliveryId
+      const html = buildLightHtmlFromPlainText(
+        personalize(textRaw, { name: r.name, email: r.email }, htmlEscape)
       );
-
       const subject = personalize(
         subjectRaw,
         { name: r.name, email: r.email },
@@ -250,7 +216,7 @@ export async function POST(req: Request) {
         text,
         tenantId,
         unsubscribeToken: (r as any).unsubscribe_token ?? undefined,
-        fromOverride, // 未設定ならワーカーの既定を使用
+        // fromOverride は未指定 → ワーカー既定値を使用
       };
 
       await emailQueue.add("direct_email", job, {
@@ -262,7 +228,7 @@ export async function POST(req: Request) {
       queued++;
     }
 
-    // mails.status を見た目用に更新
+    // 見た目用にステータス更新
     await sb
       .from("mails")
       .update({ status: scheduledISO ? "scheduled" : "queued" })
