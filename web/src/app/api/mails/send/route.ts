@@ -157,7 +157,7 @@ export async function POST(req: Request) {
       scheduleAt = new Date(ts).toISOString();
     }
 
-    // deliveries へ事前登録（ユニーク制約を使わない）
+    // deliveries へ事前登録
     if (scheduleAt) {
       for (const part of chunk(
         targets.map((r: any) => ({
@@ -173,19 +173,18 @@ export async function POST(req: Request) {
         if (error)
           return NextResponse.json({ error: error.message }, { status: 400 });
       }
-      // 予約テーブル（列名は schedule_at）
+      // 予約テーブル（← recipient_ids は “JS配列” をそのまま渡す）
       {
         const { error } = await sb.from("mail_schedules").insert({
           tenant_id: tenantId ?? null,
           mail_id: mailId,
-          schedule_at: scheduleAt,
+          schedule_at: scheduleAt, // ← カラム名は schedule_at
           status: "scheduled",
-          recipient_ids: JSON.stringify(targets.map((t: any) => t.id)),
+          recipient_ids: targets.map((t: any) => t.id), // ★修正: 配列そのまま
         });
         if (error)
           return NextResponse.json({ error: error.message }, { status: 400 });
       }
-      // 見た目用
       await sb.from("mails").update({ status: "scheduled" }).eq("id", mailId);
     } else {
       for (const part of chunk(
@@ -220,16 +219,19 @@ export async function POST(req: Request) {
         EMAIL: r.email ?? "",
       });
 
+      const brandName = cfg.brandCompany ?? "弊社";
+      const headerLine = `このメールは ${brandName} から ${String(
+        r.email
+      )} 宛にお送りしています。`;
+      const separator = "------------------------------";
+
       const unsubUrl = r.unsubscribe_token
         ? `${appUrl}/api/unsubscribe?token=${encodeURIComponent(
             r.unsubscribe_token
           )}`
         : "";
 
-      const footer = [
-        `このメールは ${cfg.brandCompany ?? "弊社"} から ${String(
-          r.email
-        )} 宛にお送りしています。`,
+      const metaLines = [
         cfg.brandCompany ? `運営：${cfg.brandCompany}` : "",
         cfg.brandAddress ? `所在地：${cfg.brandAddress}` : "",
         cfg.brandSupport ? `連絡先：${cfg.brandSupport}` : "",
@@ -238,7 +240,12 @@ export async function POST(req: Request) {
         .filter(Boolean)
         .join("\n");
 
-      const text = main ? `${main}\n\n${footer}` : footer;
+      // ご指定：「このメールは〜」の後に空行と区切りを追加
+      const footerBlock = [headerLine, "", separator, metaLines]
+        .filter((s) => s !== "")
+        .join("\n");
+
+      const text = main ? `${main}\n\n${footerBlock}` : footerBlock;
 
       const jobId = `mail:${mailId}:rcpt:${r.id}:${Date.now()}`;
       await emailQueue.add(
@@ -248,7 +255,7 @@ export async function POST(req: Request) {
           to: String(r.email),
           subject,
           text, // ← プレーンのみ
-          html: undefined,
+          html: "", // ← 型要件に合わせて空文字を渡す
           tenantId: tenantId ?? undefined,
           unsubscribeToken: (r as any).unsubscribe_token ?? undefined,
           fromOverride: cfg.fromOverride,

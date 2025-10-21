@@ -6,19 +6,18 @@ import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 const admin = supabaseAdmin();
 
-/** jobId / job.name から meta を抽出 */
-function parseJobMeta(
-  source: string | number | undefined
-):
-  | { kind: "campaign"; campaignId: string; recipientId: string }
-  | { kind: "mail"; mailId: string; recipientId: string }
-  | null {
+/** jobId: camp:CID:rcpt:RID:timestamp → { campaignId, recipientId } */
+function parseCampaignAndRecipient(source: string | number | undefined) {
   const s = String(source ?? "");
-  let m = s.match(/^camp:([^:]+):rcpt:([^:]+):/);
-  if (m) return { kind: "campaign", campaignId: m[1], recipientId: m[2] };
-  m = s.match(/^mail:([^:]+):rcpt:([^:]+):/);
-  if (m) return { kind: "mail", mailId: m[1], recipientId: m[2] };
-  return null;
+  const m = s.match(/^camp:([^:]+):rcpt:([^:]+):/);
+  return m ? { campaignId: m[1], recipientId: m[2] } : null;
+}
+
+/** jobId: mail:MID:rcpt:RID:timestamp → { mailId, recipientId } */
+function parseMailAndRecipient(source: string | number | undefined) {
+  const s = String(source ?? "");
+  const m = s.match(/^mail:([^:]+):rcpt:([^:]+):/);
+  return m ? { mailId: m[1], recipientId: m[2] } : null;
 }
 
 const worker = new Worker<EmailJob>(
@@ -26,6 +25,7 @@ const worker = new Worker<EmailJob>(
   async (job) => {
     const data = job.data as any;
 
+    // ヘルスチェック
     if (data?.kind === "noop") {
       console.log("[email.noop]", { jobId: job.id });
       return { ok: true, kind: "noop" };
@@ -36,11 +36,11 @@ const worker = new Worker<EmailJob>(
       return { messageId: "skipped", kind: data?.kind ?? "unknown" };
     }
 
-    // 送信
+    // 送信（解除ヘッダーやフッターは mailer.ts に集約）
     const info = await sendMail({
       to: data.to,
       subject: data.subject,
-      html: data.html, // ← undefined 可
+      html: data.html,
       text: data.text,
       unsubscribeToken: data.unsubscribeToken,
       fromOverride: data.fromOverride,
@@ -49,56 +49,52 @@ const worker = new Worker<EmailJob>(
       brandSupport: data.brandSupport,
     });
 
-    // メタ取得（id または name）
-    let meta = parseJobMeta(job.id);
-    if (!meta) meta = parseJobMeta(job.name as any);
-
+    // ---- DB 更新 ----
     const nowIso = new Date().toISOString();
 
-    if (!meta) {
-      console.warn("[email.warn.meta-missing]", {
-        jobId: job.id,
-        name: job.name,
-      });
-    } else if (meta.kind === "campaign") {
-      // 既存：キャンペーン
+    const metaCamp =
+      parseCampaignAndRecipient(job.id) || parseCampaignAndRecipient(job.name);
+    const metaMail =
+      parseMailAndRecipient(job.id) || parseMailAndRecipient(job.name);
+
+    if (metaCamp) {
+      // キャンペーン（既存ロジックを維持）
       await admin
         .from("deliveries")
         .update({ status: "sent", sent_at: nowIso })
-        .eq("campaign_id", meta.campaignId)
-        .eq("recipient_id", meta.recipientId);
+        .eq("campaign_id", metaCamp.campaignId)
+        .eq("recipient_id", metaCamp.recipientId);
 
-      await admin
+      await admin // 一覧の見た目用
         .from("campaigns")
         .update({ status: "queued" })
-        .eq("id", meta.campaignId);
+        .eq("id", metaCamp.campaignId);
 
       await admin
         .from("email_schedules")
         .update({ status: "queued" })
-        .eq("campaign_id", meta.campaignId)
+        .eq("campaign_id", metaCamp.campaignId)
         .lte("scheduled_at", nowIso)
         .eq("status", "scheduled");
-    } else {
-      // 新規：プレーンメール
+    } else if (metaMail) {
+      // プレーンメール（今回追加）
       await admin
         .from("mail_deliveries")
         .update({ status: "sent", sent_at: nowIso })
-        .eq("mail_id", meta.mailId)
-        .eq("recipient_id", meta.recipientId);
+        .eq("mail_id", metaMail.mailId)
+        .eq("recipient_id", metaMail.recipientId);
 
-      await admin
-        .from("mails")
-        .update({ status: "queued" })
-        .eq("id", meta.mailId);
-
-      // ※ mail_schedules のカラムは schedule_at
       await admin
         .from("mail_schedules")
         .update({ status: "queued" })
-        .eq("mail_id", meta.mailId)
+        .eq("mail_id", metaMail.mailId)
         .lte("schedule_at", nowIso)
         .eq("status", "scheduled");
+    } else {
+      console.warn("[email.warn.meta-missing]", {
+        jobId: job.id,
+        name: job.name,
+      });
     }
 
     console.log("[email.sent]", {
