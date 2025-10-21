@@ -32,21 +32,31 @@ export default async function MailSchedulesPage() {
     .select("tenant_id")
     .eq("id", u.user.id)
     .maybeSingle();
-  const tenantId = prof?.tenant_id as string | undefined;
+  const tenantId = (prof?.tenant_id as string | undefined) ?? null;
 
   const nowISO = new Date().toISOString();
 
-  const { data: rows } = await supabase
+  // 列の別名は「別名:列名」。scheduled_at は schedule_at の別名で受ける
+  let q = supabase
     .from("mail_schedules")
     .select(
-      // DBの列は schedule_at。表示用に scheduled_at として受ける
-      "id, mail_id, schedule_at:scheduled_at, status, created_at, mails(id, name, subject)"
+      "id, mail_id, scheduled_at:schedule_at, status, created_at, mails(id, name, subject)"
     )
-    .eq("tenant_id", tenantId)
-    .eq("status", "scheduled") // 未来予約のみ
-    .gte("schedule_at", nowISO) // 現在以降だけ
-    .order("schedule_at", { ascending: true })
-    .returns<Row[]>();
+    .eq("status", "scheduled")
+    .gte("schedule_at", nowISO) // 未来のみ
+    .order("schedule_at", { ascending: true });
+
+  // tenant フィルタ：tenantId が null の行も拾えるように or で包括
+  if (tenantId) {
+    q = q.or(`tenant_id.eq.${tenantId},tenant_id.is.null`);
+  } else {
+    q = q.is("tenant_id", null);
+  }
+
+  const { data: rows, error } = await q.returns<Row[]>();
+  if (error) {
+    console.error("[mail_schedules:list]", error);
+  }
 
   return (
     <main className="mx-auto max-w-6xl p-6">

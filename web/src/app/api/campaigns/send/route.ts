@@ -185,8 +185,6 @@ function buildCardHtml(opts: {
   } = opts;
 
   const clean = stripLegacyFooter(innerHtml);
-
-  // フッターのサイズ階層（＝変更前と同じ）
   const explStyle = "font-size:12px;color:#374151 !important;";
   const idStyle = "font-size:10px;opacity:.75;color:#4b5563 !important;";
 
@@ -222,12 +220,10 @@ function buildCardHtml(opts: {
   const chipsRow = chips.length
     ? `<div style="margin-top:8px;">${chips.join("")}</div>`
     : "";
-
   const did = `<div style="margin-top:8px;${idStyle}">配信ID: ${escapeHtml(
     deliveryId
   )}</div>`;
 
-  // ※ color-scheme や 1pxタイル・lockLight 等の“暗転禁止”要素は一切入れない
   return `${CARD_MARK}
 <table role="presentation" width="100%" bgcolor="#f3f4f6" style="background:#f3f4f6 !important;padding:16px 0;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;">
   <tr>
@@ -235,10 +231,7 @@ function buildCardHtml(opts: {
       <table role="presentation" width="100%" bgcolor="#ffffff" style="max-width:640px;border-radius:14px;background:#ffffff !important;box-shadow:0 4px 16px rgba(0,0,0,.08);border:1px solid #e5e7eb !important;">
         <tr>
           <td bgcolor="#ffffff" style="padding:20px;font:16px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111827 !important;">
-            <!-- 本文（プレーン/軽量HTMLは1行目太字。リッチHTMLは無改変） -->
             <div style="color:#111827 !important;">${clean}</div>
-
-            <!-- メタ情報 -->
             <div style="margin-top:20px;padding-top:12px;border-top:1px dashed #e5e7eb;">
               ${who}
               ${chipsRow}
@@ -258,24 +251,6 @@ function injectOpenPixel(html: string, url: string) {
   return /<\/body\s*>/i.test(html)
     ? html.replace(/<\/body\s*>/i, `${pixel}\n</body>`)
     : `${html}\n${pixel}`;
-}
-
-/* ================= ハンドラ ================= */
-export async function OPTIONS() {
-  return new NextResponse(null, {
-    status: 204,
-    headers: {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    },
-  });
-}
-export async function GET() {
-  return NextResponse.json({ error: "method not allowed" }, { status: 405 });
-}
-export async function HEAD() {
-  return new NextResponse(null, { status: 405 });
 }
 
 async function loadSenderConfigForCurrentUser() {
@@ -343,6 +318,24 @@ async function loadSenderConfigForCurrentUser() {
       brandSupport: brand_support || undefined,
     },
   };
+}
+
+/* ================= ハンドラ ================= */
+export async function OPTIONS() {
+  return new NextResponse(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    },
+  });
+}
+export async function GET() {
+  return NextResponse.json({ error: "method not allowed" }, { status: 405 });
+}
+export async function HEAD() {
+  return new NextResponse(null, { status: 405 });
 }
 
 export async function POST(req: Request) {
@@ -413,13 +406,34 @@ export async function POST(req: Request) {
       .eq("campaign_id", campaignId)
       .in("status", ["scheduled", "queued", "sent"]);
     const exclude = new Set((already ?? []).map((d: any) => d.recipient_id));
-    const targets = recipients.filter((r) => !exclude.has(r.id));
+    const targets = recipients.filter((r: any) => !exclude.has(r.id));
     if (targets.length === 0)
       return NextResponse.json({
         ok: true,
         queued: 0,
         skipped: recipientIds.length,
       });
+
+    // キャンペーンの添付（全受信者共通）
+    const { data: catts } = await admin
+      .from("campaign_attachments")
+      .select("file_path, file_name, mime_type")
+      .eq("campaign_id", campaignId);
+
+    let campAttach: Array<{ path: string; name: string; mime?: string }> = [];
+    if (catts && catts.length) {
+      for (const a of catts) {
+        const path = String(a.file_path);
+        const filename = String(a.file_name || path.split("/").pop() || "file");
+        const mime = a.mime_type || undefined;
+        const { data: signed, error: se } = await admin.storage
+          .from("email_attachments")
+          .createSignedUrl(path, 60 * 60 * 24);
+        if (!se && signed?.signedUrl) {
+          campAttach.push({ path: signed.signedUrl, name: filename, mime });
+        }
+      }
+    }
 
     const now = Date.now();
     let delay = 0;
@@ -437,7 +451,7 @@ export async function POST(req: Request) {
 
     if (scheduleAt) {
       for (const part of chunk(
-        targets.map((r) => ({
+        targets.map((r: any) => ({
           tenant_id: tenantId,
           campaign_id: campaignId,
           recipient_id: r.id,
@@ -456,7 +470,7 @@ export async function POST(req: Request) {
         .eq("id", campaignId);
     } else {
       for (const part of chunk(
-        targets.map((r) => ({
+        targets.map((r: any) => ({
           tenant_id: tenantId,
           campaign_id: campaignId,
           recipient_id: r.id,
@@ -482,7 +496,7 @@ export async function POST(req: Request) {
       .eq("campaign_id", campaignId)
       .in(
         "recipient_id",
-        targets.map((t) => t.id)
+        targets.map((t: any) => t.id)
       );
     if (dErr)
       return NextResponse.json(
@@ -496,12 +510,10 @@ export async function POST(req: Request) {
     );
 
     const fromOverride =
-      (cfg.fromOverride as string | undefined) ||
-      ((camp as any).from_email as string | undefined) ||
-      undefined;
+      ((camp as any).from_email as string | undefined) || undefined; // （設定側の CC は mailer 側の company 名/Reply-To で反映）
 
     let queued = 0;
-    for (const r of targets) {
+    for (const r of targets as any[]) {
       const deliveryId = idMap.get(String(r.id)) ?? "";
       const pixelUrl = `${appUrl}/api/email/open?id=${encodeURIComponent(
         deliveryId
@@ -531,9 +543,9 @@ export async function POST(req: Request) {
       // カード化（暗転禁止は入れない）
       const cardHtml = buildCardHtml({
         innerHtml: htmlFilled,
-        company: cfg.brandCompany,
-        address: cfg.brandAddress,
-        support: cfg.brandSupport,
+        company: (await loadSenderConfigForCurrentUser()).cfg.brandCompany, // 会社名は設定を使う
+        address: (await loadSenderConfigForCurrentUser()).cfg.brandAddress,
+        support: (await loadSenderConfigForCurrentUser()).cfg.brandSupport,
         recipientEmail: String(r.email),
         unsubscribeUrl: unsubUrl,
         deliveryId,
@@ -550,12 +562,19 @@ export async function POST(req: Request) {
             identity
           ) || "";
       const textFooter = [
-        `このメールは ${cfg.brandCompany || "弊社"} から ${String(
-          r.email
-        )} 宛にお送りしています。`,
-        cfg.brandCompany ? `運営：${cfg.brandCompany}` : "",
-        cfg.brandAddress ? `所在地：${cfg.brandAddress}` : "",
-        cfg.brandSupport ? `連絡先：${cfg.brandSupport}` : "",
+        `運営：${
+          (await loadSenderConfigForCurrentUser()).cfg.brandCompany || ""
+        }`.trim(),
+        (await loadSenderConfigForCurrentUser()).cfg.brandAddress
+          ? `所在地：${
+              (await loadSenderConfigForCurrentUser()).cfg.brandAddress
+            }`
+          : "",
+        (await loadSenderConfigForCurrentUser()).cfg.brandSupport
+          ? `連絡先：${
+              (await loadSenderConfigForCurrentUser()).cfg.brandSupport
+            }`
+          : "",
         unsubUrl ? `配信停止：${unsubUrl}` : "",
         `配信ID：${deliveryId}`,
       ]
@@ -572,9 +591,10 @@ export async function POST(req: Request) {
         tenantId,
         unsubscribeToken: (r as any).unsubscribe_token ?? undefined,
         fromOverride,
-        brandCompany: cfg.brandCompany,
-        brandAddress: cfg.brandAddress,
-        brandSupport: cfg.brandSupport,
+        brandCompany: (await loadSenderConfigForCurrentUser()).cfg.brandCompany,
+        brandAddress: (await loadSenderConfigForCurrentUser()).cfg.brandAddress,
+        brandSupport: (await loadSenderConfigForCurrentUser()).cfg.brandSupport,
+        attachments: campAttach,
       };
 
       const jobId = `camp:${campaignId}:rcpt:${r.id}:${Date.now()}`;

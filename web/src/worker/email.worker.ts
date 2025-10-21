@@ -48,6 +48,13 @@ const worker = new Worker<EmailJob>(
       brandAddress: data.brandAddress,
       brandSupport: data.brandSupport,
       cc: data.cc || undefined, // ← 追加
+      attachments: (data as any).attachments
+        ? (data as any).attachments.map((a: any) => ({
+            filename: a.name,
+            path: a.path,
+            contentType: a.mime,
+          }))
+        : undefined,
     });
 
     // ---- DB 更新 ----

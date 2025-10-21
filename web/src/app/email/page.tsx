@@ -62,7 +62,7 @@ export default function EmailLanding() {
       <main className="mx-auto max-w-6xl p-6">
         {/* 画面タイトル（最も大きく） */}
         <div className="mb-4">
-          <h1 className="text-3xl font-extrabold tracking-tight text-neutral-900 md:text-4xl">
+          <h1 className="text-2.2xl font-extrabold tracking-tight text-zinc-900 md:text-4xl">
             メール配信
           </h1>
           <p className="mt-2 text-sm text-neutral-500">

@@ -1,8 +1,9 @@
 // web/src/app/mails/new/page.tsx
 "use client";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import Link from "next/link";
 import { toastSuccess, toastError } from "@/components/AppToast";
+import { supabase } from "@/lib/supabaseClient";
 
 type Settings = {
   from_email?: string | null;
@@ -11,6 +12,8 @@ type Settings = {
 export default function MailNewPage() {
   const [msg, setMsg] = useState("");
   const [fromEmail, setFromEmail] = useState("");
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -28,33 +31,79 @@ export default function MailNewPage() {
 
   const onSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    const fd = new FormData(e.currentTarget);
+    setBusy(true);
+    setMsg("保存中…");
+    try {
+      const fd = new FormData(e.currentTarget);
 
-    const body_text = (fd.get("body_text") as string) ?? "";
-    const body_html = body_text
-      .split("\n")
-      .map((l) => l.trim())
-      .join("<br />");
+      const body_text = (fd.get("body_text") as string) ?? "";
+      const body_html = body_text
+        .split("\n")
+        .map((l) => l.trim())
+        .join("<br />");
 
-    const payload = {
-      name: fd.get("name"),
-      subject: fd.get("subject"),
-      from_email: fd.get("from_email"),
-      body_text,
-      body_html, // 変換して同時保存（プレビューや将来の再利用に備える）
-    };
+      const payload = {
+        name: fd.get("name"),
+        subject: fd.get("subject"),
+        from_email: fd.get("from_email"),
+        body_text,
+        body_html,
+      };
 
-    const res = await fetch("/api/mails", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const t = await res.text();
-    setMsg(`${res.status}: ${t}`);
-    if (res.ok) {
+      const res = await fetch("/api/mails", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      let createdId: string | null = null;
+      const ct = res.headers.get("content-type") || "";
+      if (ct.includes("application/json")) {
+        const j = await res.json();
+        createdId = j?.id ?? null;
+        setMsg(`${res.status}: ${JSON.stringify(j)}`);
+      } else {
+        const t = await res.text();
+        setMsg(`${res.status}: ${t}`);
+      }
+
+      if (!res.ok) {
+        toastError(`保存に失敗しました（${res.status}）`);
+        setBusy(false);
+        return;
+      }
+
+      // 添付アップロード & メタ登録
+      const files = fileRef.current?.files;
+      if (createdId && files && files.length) {
+        for (const file of Array.from(files)) {
+          const path = `mail/${createdId}/${Date.now()}_${file.name}`;
+          const up = await supabase.storage
+            .from("email_attachments")
+            .upload(path, file, { upsert: false });
+          if (up.error) throw up.error;
+
+          // 型エラー回避のため any 配列で insert
+          await supabase.from("mail_attachments").insert([
+            {
+              mail_id: createdId,
+              file_path: path,
+              file_name: file.name,
+              mime_type: file.type,
+              size_bytes: file.size,
+            },
+          ] as any);
+        }
+      }
+
       toastSuccess("保存しました");
-    } else {
-      toastError(`保存に失敗しました（${res.status}）`);
+      if (files && files.length && !createdId) {
+        toastError("添付は保存できませんでした（作成IDが取得できません）");
+      }
+    } catch (e: any) {
+      toastError(e?.message || "保存でエラー");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -111,8 +160,7 @@ export default function MailNewPage() {
             />
             <p className="mt-1 text-xs text-neutral-500">
               差し込み可: <code className="font-mono">{"{{NAME}}"}</code>,{" "}
-              <code className="font-mono">{"{{EMAIL}}"}</code> （例:{" "}
-              <code className="font-mono">{"{{NAME}}"}</code> 様）
+              <code className="font-mono">{"{{EMAIL}}"}</code>
             </p>
           </div>
 
@@ -140,16 +188,33 @@ export default function MailNewPage() {
           <p className="mt-2 text-xs text-neutral-500">
             差し込み可: <code className="font-mono">{"{{NAME}}"}</code>,{" "}
             <code className="font-mono">{"{{EMAIL}}"}</code>
-            （例: <code className="font-mono">{"{{NAME}}"}</code> 様）
+          </p>
+        </div>
+
+        {/* 添付UI（PDF/画像） */}
+        <div className="rounded-xl border border-neutral-200 p-3">
+          <div className="text-sm font-medium text-neutral-700">
+            添付ファイル（PDF/画像）
+          </div>
+          <input
+            ref={fileRef}
+            type="file"
+            multiple
+            accept="application/pdf,image/*"
+            className="mt-2"
+          />
+          <p className="mt-1 text-xs text-neutral-500">
+            保存後、自動でアップロード＆紐付けします。
           </p>
         </div>
 
         <div className="flex justify-end sm:justify-end">
           <button
             type="submit"
+            disabled={busy}
             className="w-full rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 sm:w-auto"
           >
-            保存
+            {busy ? "処理中…" : "保存"}
           </button>
         </div>
       </form>

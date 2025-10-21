@@ -8,7 +8,7 @@ const port = Number(process.env.SMTP_PORT!);
 const user = process.env.SMTP_USER || "";
 const pass = process.env.SMTP_PASS || "";
 
-const defaultFrom = process.env.FROM_EMAIL!; // 例: no-reply@lotus-d-transformation.com
+const defaultFrom = process.env.FROM_EMAIL!;
 const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
   /\/+$/,
   ""
@@ -30,20 +30,18 @@ const fallbackAddress = process.env.COMPANY_ADDRESS ?? "";
 const fallbackSupport =
   process.env.SUPPORT_EMAIL ?? "no.no.mu.mu11223@gmail.com";
 
-const CARD_MARK = "<!--EMAIL_CARD_START-->";
-
 export type SendArgs = {
   to: string;
   subject: string;
-  html?: string; // ← 任意に変更（プレーンは text のみでOK）
+  html: string;
   text?: string;
   unsubscribeToken?: string;
-
   fromOverride?: string;
   brandCompany?: string;
   brandAddress?: string;
   brandSupport?: string;
-  cc?: string; // ← 追加
+  cc?: string;
+  attachments?: Array<{ filename: string; path: string; contentType?: string }>;
 };
 
 const transporter = nodemailer.createTransport({
@@ -104,12 +102,7 @@ export async function sendMail(args: SendArgs) {
     headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click";
   }
 
-  // ★ HTML はある時だけ付ける（空文字は外す）
-  const finalHtml =
-    typeof args.html === "string" && args.html.trim()
-      ? stripLegacyFooter(args.html)
-      : undefined;
-
+  const finalHtml = stripLegacyFooter(args.html);
   const finalText = args.text && args.text.trim() ? args.text : undefined;
 
   const info = await transporter.sendMail({
@@ -117,11 +110,16 @@ export async function sendMail(args: SendArgs) {
     sender: senderHeader,
     replyTo: replyToHeader,
     to: args.to,
-    cc: args.cc || undefined, // ← 追加
+    cc: args.cc || undefined,
     subject: args.subject,
-    html: finalHtml, // ← undefined なら HTML パートは付かない
-    text: finalText, // ← text のみで送れる（プレーンメール用）
+    html: finalHtml,
+    text: finalText,
     headers,
+    attachments: (args.attachments ?? []).map((a) => ({
+      filename: a.filename,
+      path: a.path,
+      contentType: a.contentType,
+    })),
     envelope: { from: senderHeader, to: args.to },
   });
 

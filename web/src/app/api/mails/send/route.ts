@@ -7,6 +7,7 @@ import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
 import { emailQueue } from "@/server/queue";
 import { loadSenderConfig } from "@/server/senderConfig";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 type Payload = {
   mailId: string;
@@ -142,6 +143,28 @@ export async function POST(req: Request) {
       });
     }
 
+    // 添付の署名URLを生成（全受信者共通）
+    const admin = supabaseAdmin();
+    const { data: atts } = await admin
+      .from("mail_attachments")
+      .select("file_path, file_name, mime_type")
+      .eq("mail_id", mailId);
+
+    let attachList: Array<{ path: string; name: string; mime?: string }> = [];
+    if (atts && atts.length) {
+      for (const a of atts) {
+        const path = String(a.file_path);
+        const filename = String(a.file_name || path.split("/").pop() || "file");
+        const mime = a.mime_type || undefined;
+        const { data: signed, error: se } = await admin.storage
+          .from("email_attachments")
+          .createSignedUrl(path, 60 * 60 * 24);
+        if (!se && signed?.signedUrl) {
+          attachList.push({ path: signed.signedUrl, name: filename, mime });
+        }
+      }
+    }
+
     // 予約 or 即時
     let delay = 0;
     let scheduleAt: string | null = null;
@@ -173,14 +196,15 @@ export async function POST(req: Request) {
         if (error)
           return NextResponse.json({ error: error.message }, { status: 400 });
       }
-      // 予約テーブル
+      // 予約テーブル（uuid[] に「配列」をそのまま渡す）
       {
+        const recpIds = targets.map((t: any) => t.id);
         const { error } = await sb.from("mail_schedules").insert({
           tenant_id: tenantId ?? null,
           mail_id: mailId,
           schedule_at: scheduleAt, // ← DBは schedule_at
           status: "scheduled",
-          recipient_ids: targets.map((t: any) => t.id), // ← uuid[] に素の配列を渡す
+          recipient_ids: recpIds, // ← ここで JSON 文字列化しないこと！
         });
         if (error)
           return NextResponse.json({ error: error.message }, { status: 400 });
@@ -237,10 +261,8 @@ export async function POST(req: Request) {
         .filter(Boolean)
         .join("\n");
 
-      // ご指定：最上段の「このメールは〜」は削除。区切り線＋メタのみ。
       const separator = "------------------------------";
       const footerBlock = [separator, metaLines].filter(Boolean).join("\n");
-
       const text = main ? `${main}\n\n${footerBlock}` : footerBlock;
 
       const jobId = `mail:${mailId}:rcpt:${r.id}:${Date.now()}`;
@@ -251,14 +273,15 @@ export async function POST(req: Request) {
           to: String(r.email),
           subject,
           text, // ← プレーンのみ
-          html: "", // ← 型要件のため空
-          cc: ccEmail, // ← 追加
+          html: "", // ← 型満たし（空でOK）
+          cc: ccEmail,
           tenantId: tenantId ?? undefined,
           unsubscribeToken: (r as any).unsubscribe_token ?? undefined,
           fromOverride: cfg.fromOverride,
           brandCompany: cfg.brandCompany,
           brandAddress: cfg.brandAddress,
           brandSupport: cfg.brandSupport,
+          attachments: attachList, // 署名URLの配列
         },
         {
           jobId,
@@ -271,7 +294,6 @@ export async function POST(req: Request) {
       queued++;
     }
 
-    // フロント側の遷移に使えるヒントも返す（貼り替え不要なら無視してOK）
     return NextResponse.json({
       ok: true,
       queued,
