@@ -43,6 +43,7 @@ export type SendArgs = {
   brandCompany?: string;
   brandAddress?: string;
   brandSupport?: string;
+  cc?: string; // ← 追加
 };
 
 const transporter = nodemailer.createTransport({
@@ -116,6 +117,7 @@ export async function sendMail(args: SendArgs) {
     sender: senderHeader,
     replyTo: replyToHeader,
     to: args.to,
+    cc: args.cc || undefined, // ← 追加
     subject: args.subject,
     html: finalHtml, // ← undefined なら HTML パートは付かない
     text: finalText, // ← text のみで送れる（プレーンメール用）

@@ -9,7 +9,7 @@ import { formatJpDateTime } from "@/lib/formatDate";
 type Row = {
   id: string;
   mail_id: string;
-  scheduled_at: string | null; // ← 画面側は scheduled_at のまま
+  scheduled_at: string | null;
   status: string | null;
   created_at: string | null;
   mails: { id: string; name: string | null; subject: string | null } | null;
@@ -34,14 +34,18 @@ export default async function MailSchedulesPage() {
     .maybeSingle();
   const tenantId = prof?.tenant_id as string | undefined;
 
+  const nowISO = new Date().toISOString();
+
   const { data: rows } = await supabase
     .from("mail_schedules")
     .select(
-      // schedule_at を scheduled_at の名前で取得
-      "id, mail_id, scheduled_at:schedule_at, status, created_at, mails(id, name, subject)"
+      // DBの列は schedule_at。表示用に scheduled_at として受ける
+      "id, mail_id, schedule_at:scheduled_at, status, created_at, mails(id, name, subject)"
     )
     .eq("tenant_id", tenantId)
-    .order("schedule_at", { ascending: true }) // ← 並び替えも schedule_at
+    .eq("status", "scheduled") // 未来予約のみ
+    .gte("schedule_at", nowISO) // 現在以降だけ
+    .order("schedule_at", { ascending: true })
     .returns<Row[]>();
 
   return (

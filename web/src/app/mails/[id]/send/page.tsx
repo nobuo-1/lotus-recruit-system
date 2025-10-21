@@ -279,7 +279,7 @@ export default function MailSendPage() {
       );
       // ★ 予約は予約リストへ、即時は一覧へ
       if (mode === "reserve") {
-        router.push("/email/schedules");
+        router.push("/mails/schedules");
       } else {
         router.push("/mails");
       }

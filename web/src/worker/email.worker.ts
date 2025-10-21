@@ -47,6 +47,7 @@ const worker = new Worker<EmailJob>(
       brandCompany: data.brandCompany,
       brandAddress: data.brandAddress,
       brandSupport: data.brandSupport,
+      cc: data.cc || undefined, // ← 追加
     });
 
     // ---- DB 更新 ----

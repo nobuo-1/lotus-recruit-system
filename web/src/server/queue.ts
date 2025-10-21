@@ -29,6 +29,7 @@ export type DirectEmailJob = {
   brandAddress?: string;
   brandSupport?: string;
   deliveryId?: string;
+  cc?: string; // ← 追加
 };
 
 /** 追加：キャンペーンの一括送信用ジョブ */
