@@ -18,7 +18,7 @@ export type DirectEmailJob = {
   kind: "direct_email"; // ← 判別キー
   to: string;
   subject: string;
-  html: string;
+  html?: string; // ← 任意に変更（プレーンは text のみ）
   text?: string;
   tenantId?: string;
   unsubscribeToken?: string;

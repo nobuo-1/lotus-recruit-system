@@ -2,7 +2,6 @@
 "use client";
 import React, { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import KpiCard from "@/components/KpiCard";
 import AppHeader from "@/components/AppHeader";
 import {
@@ -27,40 +26,10 @@ type Summary = {
 
 type RangeKey = "7d" | "14d" | "1m" | "3m" | "6m" | "1y";
 
-/* --- 共通UI: セクション & リンクカード --- */
-const Section: React.FC<{
-  title: string;
-  icon: React.ReactNode;
-  children: React.ReactNode;
-}> = ({ title, icon, children }) => (
-  <section className="rounded-2xl border border-neutral-200 p-4">
-    <h2 className="mb-3 flex items-center gap-2 text-lg md:text-xl font-semibold text-neutral-900">
-      <span className="inline-flex h-5 w-5 items-center justify-center text-neutral-700">
-        {icon}
-      </span>
-      {title}
-    </h2>
-    <div className="grid grid-cols-1 gap-2 md:grid-cols-2">{children}</div>
-  </section>
-);
-
-const ItemLink: React.FC<{ href: string; children: React.ReactNode }> = ({
-  href,
-  children,
-}) => (
-  <Link
-    href={href}
-    className="block rounded-xl border border-neutral-200 px-4 py-3 text-[15px] md:text-base text-neutral-800 hover:bg-neutral-50"
-  >
-    {children}
-  </Link>
-);
-
 export default function EmailLanding() {
   const [data, setData] = useState<Summary | null>(null);
   const [range, setRange] = useState<RangeKey>("14d");
   const [msg, setMsg] = useState("");
-  const router = useRouter();
 
   useEffect(() => {
     (async () => {
@@ -90,14 +59,13 @@ export default function EmailLanding() {
   return (
     <>
       <AppHeader />
-
       <main className="mx-auto max-w-6xl p-6">
-        {/* タイトル */}
-        <div className="mb-3">
-          <h1 className="whitespace-nowrap text-2xl font-semibold text-neutral-900">
+        {/* 画面タイトル（最も大きく） */}
+        <div className="mb-4">
+          <h1 className="text-3xl font-extrabold tracking-tight text-neutral-900 md:text-4xl">
             メール配信
           </h1>
-          <p className="mt-1 text-sm text-neutral-500">
+          <p className="mt-2 text-sm text-neutral-500">
             メール/キャンペーンの作成・配信とKPIの確認
           </p>
         </div>
@@ -107,52 +75,121 @@ export default function EmailLanding() {
           <h2 className="text-2xl md:text-[28px] font-semibold text-neutral-900">
             機能メニュー
           </h2>
-          <p className="mt-1 text-sm text-neutral-500">
-            メール配信・キャンペーン・各種設定へアクセスできます。
-          </p>
         </header>
 
-        <div className="mb-5 grid grid-cols-1 gap-5 md:grid-cols-3">
-          {/* メール */}
-          <Section
-            title="メール"
-            icon={
-              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-                <path d="M20 4H4c-1.1 0-2 .9-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6c0-1.1-.9-2-2-2Zm0 4-8 5L4 8V6l8 5 8-5v2Z" />
-              </svg>
-            }
-          >
-            <ItemLink href="/mails/new">新規メール</ItemLink>
-            <ItemLink href="/mails">メール一覧</ItemLink>
-            <ItemLink href="/mails/schedules">メール予約リスト</ItemLink>
-          </Section>
+        <div className="mb-6 rounded-2xl border border-neutral-200 p-5">
+          <div className="grid grid-cols-1 gap-7 md:grid-cols-3">
+            {/* メール（旧アイコン / リスト表示） */}
+            <section>
+              <div className="mb-2 flex items-center gap-2">
+                <Mail className="h-5 w-5 text-neutral-700" />
+                <h3 className="text-lg font-semibold tracking-tight text-neutral-900 sm:text-xl">
+                  メール
+                </h3>
+              </div>
+              <ul className="mt-1 space-y-1.5">
+                <li>
+                  <Link
+                    href="/mails/new"
+                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
+                  >
+                    新規メール
+                  </Link>
+                </li>
+                <li>
+                  <Link
+                    href="/mails"
+                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
+                  >
+                    メール一覧
+                  </Link>
+                </li>
+                <li>
+                  <Link
+                    href="/mails/schedules"
+                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
+                  >
+                    メール予約リスト
+                  </Link>
+                </li>
+              </ul>
+            </section>
 
-          {/* キャンペーン */}
-          <Section
-            title="キャンペーン"
-            icon={
-              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-                <path d="M3 10v4h4l5 5V5L7 10H3zm13.5 2a2.5 2.5 0 1 0 .001-5.001A2.5 2.5 0 0 0 16.5 12Z" />
-              </svg>
-            }
-          >
-            <ItemLink href="/campaigns/new">新規キャンペーン</ItemLink>
-            <ItemLink href="/campaigns">キャンペーン一覧</ItemLink>
-            <ItemLink href="/email/schedules">キャンペーン予約リスト</ItemLink>
-          </Section>
+            {/* キャンペーン（旧アイコン / リスト表示） */}
+            <section>
+              <div className="mb-2 flex items-center gap-2">
+                <Megaphone className="h-5 w-5 text-neutral-700" />
+                <h3 className="text-lg font-semibold tracking-tight text-neutral-900 sm:text-xl">
+                  キャンペーン
+                </h3>
+              </div>
+              <ul className="mt-1 space-y-1.5">
+                <li>
+                  <Link
+                    href="/campaigns/new"
+                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
+                  >
+                    新規キャンペーン
+                  </Link>
+                </li>
+                <li>
+                  <Link
+                    href="/campaigns"
+                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
+                  >
+                    キャンペーン一覧
+                  </Link>
+                </li>
+                <li>
+                  <Link
+                    href="/email/schedules"
+                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
+                  >
+                    キャンペーン予約リスト
+                  </Link>
+                </li>
+              </ul>
+            </section>
 
-          {/* その他（受信者リスト + メール用設定） */}
-          <Section
-            title="その他"
-            icon={<Settings className="h-5 w-5 text-neutral-700" />}
-          >
-            <ItemLink href="/recipients">受信者リスト</ItemLink>
-            <ItemLink href="/email/settings">メール用設定</ItemLink>
-          </Section>
+            {/* その他（受信者 / 設定） */}
+            <section>
+              <div className="mb-2 flex items-center gap-2">
+                <Settings className="h-5 w-5 text-neutral-700" />
+                <h3 className="text-lg font-semibold tracking-tight text-neutral-900 sm:text-xl">
+                  その他
+                </h3>
+              </div>
+              <ul className="mt-1 space-y-1.5">
+                <li>
+                  <Link
+                    href="/recipients"
+                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
+                  >
+                    受信者リスト
+                  </Link>
+                </li>
+                <li>
+                  <Link
+                    href="/email/settings"
+                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
+                  >
+                    メール用設定
+                  </Link>
+                </li>
+              </ul>
+            </section>
+          </div>
         </div>
 
+        {/* 各KPI 見出し */}
+        <header className="mb-2">
+          <h2 className="text-2xl md:text-[28px] font-semibold text-neutral-900">
+            各KPI
+          </h2>
+        </header>
+
         {/* KPI */}
-        <div className="mt-2 grid grid-cols-2 gap-4 md:grid-cols-5">
+        <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
           <KpiCard
             label="キャンペーン総数"
             value={data?.campaignCount ?? "-"}

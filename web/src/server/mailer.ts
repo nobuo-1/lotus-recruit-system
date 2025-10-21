@@ -5,7 +5,7 @@ import type SMTPTransport from "nodemailer/lib/smtp-transport";
 /* ========= Env & defaults ========= */
 const host = process.env.SMTP_HOST!;
 const port = Number(process.env.SMTP_PORT!);
-const user = process.env.SMTP_USER || ""; // ← タイポ修正
+const user = process.env.SMTP_USER || "";
 const pass = process.env.SMTP_PASS || "";
 
 const defaultFrom = process.env.FROM_EMAIL!; // 例: no-reply@lotus-d-transformation.com
@@ -35,7 +35,7 @@ const CARD_MARK = "<!--EMAIL_CARD_START-->";
 export type SendArgs = {
   to: string;
   subject: string;
-  html: string;
+  html?: string; // ← 任意に変更（プレーンは text のみでOK）
   text?: string;
   unsubscribeToken?: string;
 
@@ -103,7 +103,12 @@ export async function sendMail(args: SendArgs) {
     headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click";
   }
 
-  const finalHtml = stripLegacyFooter(args.html);
+  // ★ HTML はある時だけ付ける（空文字は外す）
+  const finalHtml =
+    typeof args.html === "string" && args.html.trim()
+      ? stripLegacyFooter(args.html)
+      : undefined;
+
   const finalText = args.text && args.text.trim() ? args.text : undefined;
 
   const info = await transporter.sendMail({
@@ -112,8 +117,8 @@ export async function sendMail(args: SendArgs) {
     replyTo: replyToHeader,
     to: args.to,
     subject: args.subject,
-    html: finalHtml,
-    text: finalText,
+    html: finalHtml, // ← undefined なら HTML パートは付かない
+    text: finalText, // ← text のみで送れる（プレーンメール用）
     headers,
     envelope: { from: senderHeader, to: args.to },
   });

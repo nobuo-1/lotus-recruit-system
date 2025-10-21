@@ -6,22 +6,16 @@ import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 const admin = supabaseAdmin();
 
-/** jobId から meta を抽出
- *  - キャンペーン: camp:<CID>:rcpt:<RID>:<ts>
- *  - プレーン   : mail:<MID>:rcpt:<RID>:<ts>
- */
-function parseMeta(
-  source: string | number | undefined
-):
-  | { type: "campaign"; campaignId: string; recipientId: string }
-  | { type: "mail"; mailId: string; recipientId: string }
-  | null {
+/** jobId からキャンペーン/プレーンメールの meta を抽出 */
+function parseCampaignAndRecipient(source: string | number | undefined) {
   const s = String(source ?? "");
-  let m = s.match(/^camp:([^:]+):rcpt:([^:]+):/);
-  if (m) return { type: "campaign", campaignId: m[1], recipientId: m[2] };
-  m = s.match(/^mail:([^:]+):rcpt:([^:]+):/);
-  if (m) return { type: "mail", mailId: m[1], recipientId: m[2] };
-  return null;
+  const m = s.match(/^camp:([^:]+):rcpt:([^:]+):/);
+  return m ? { campaignId: m[1], recipientId: m[2] } : null;
+}
+function parseMailAndRecipient(source: string | number | undefined) {
+  const s = String(source ?? "");
+  const m = s.match(/^mail:([^:]+):rcpt:([^:]+):/);
+  return m ? { mailId: m[1], recipientId: m[2] } : null;
 }
 
 const worker = new Worker<EmailJob>(
@@ -33,17 +27,16 @@ const worker = new Worker<EmailJob>(
       console.log("[email.noop]", { jobId: job.id });
       return { ok: true, kind: "noop" };
     }
-
     if (!isDirectEmailJob(data)) {
       console.warn("[email.skip]", { jobId: job.id, kind: data?.kind });
       return { messageId: "skipped", kind: data?.kind ?? "unknown" };
     }
 
-    // 送信
+    // 送信（ヘッダーやフッターは mailer.ts / API 側で整備済み）
     const info = await sendMail({
       to: data.to,
       subject: data.subject,
-      html: data.html,
+      html: data.html, // プレーンは undefined
       text: data.text,
       unsubscribeToken: data.unsubscribeToken,
       fromOverride: data.fromOverride,
@@ -52,33 +45,19 @@ const worker = new Worker<EmailJob>(
       brandSupport: data.brandSupport,
     });
 
-    // DB 更新
-    let meta = parseMeta(job.id) || parseMeta(job.name as any);
+    // ---- DB 更新（キャンペーン or プレーン）----
     const nowIso = new Date().toISOString();
-    const tenantId = (data?.tenantId as string | undefined) ?? undefined;
 
-    if (!meta) {
-      console.warn("[email.warn.meta-missing]", {
-        jobId: job.id,
-        name: job.name,
-      });
-    } else if (meta.type === "campaign") {
-      // update → 0件なら補完 insert
-      const { data: upd, error: ue } = await admin
+    // キャンペーン（互換）
+    let meta =
+      parseCampaignAndRecipient(job.id) ||
+      parseCampaignAndRecipient(job.name as any);
+    if (meta) {
+      await admin
         .from("deliveries")
         .update({ status: "sent", sent_at: nowIso })
         .eq("campaign_id", meta.campaignId)
-        .eq("recipient_id", meta.recipientId)
-        .select("id");
-      if (!ue && (!upd || upd.length === 0) && tenantId) {
-        await admin.from("deliveries").insert({
-          tenant_id: tenantId,
-          campaign_id: meta.campaignId,
-          recipient_id: meta.recipientId,
-          status: "sent",
-          sent_at: nowIso,
-        });
-      }
+        .eq("recipient_id", meta.recipientId);
 
       await admin
         .from("campaigns")
@@ -91,32 +70,27 @@ const worker = new Worker<EmailJob>(
         .eq("campaign_id", meta.campaignId)
         .lte("scheduled_at", nowIso)
         .eq("status", "scheduled");
-    } else if (meta.type === "mail") {
-      const { data: upd, error: ue } = await admin
+    }
+
+    // プレーンメール
+    let pmeta =
+      parseMailAndRecipient(job.id) || parseMailAndRecipient(job.name as any);
+    if (pmeta) {
+      await admin
         .from("mail_deliveries")
         .update({ status: "sent", sent_at: nowIso })
-        .eq("mail_id", meta.mailId)
-        .eq("recipient_id", meta.recipientId)
-        .select("id");
-      if (!ue && (!upd || upd.length === 0) && tenantId) {
-        await admin.from("mail_deliveries").insert({
-          tenant_id: tenantId,
-          mail_id: meta.mailId,
-          recipient_id: meta.recipientId,
-          status: "sent",
-          sent_at: nowIso,
-        });
-      }
+        .eq("mail_id", pmeta.mailId)
+        .eq("recipient_id", pmeta.recipientId);
 
       await admin
         .from("mails")
         .update({ status: "queued" })
-        .eq("id", meta.mailId);
+        .eq("id", pmeta.mailId);
 
       await admin
         .from("mail_schedules")
         .update({ status: "queued" })
-        .eq("mail_id", meta.mailId)
+        .eq("mail_id", pmeta.mailId)
         .lte("scheduled_at", nowIso)
         .eq("status", "scheduled");
     }
@@ -126,7 +100,7 @@ const worker = new Worker<EmailJob>(
       messageId: info?.messageId,
       jobId: job.id,
       jobName: job.name,
-      tenantId,
+      tenantId: (data as any).tenantId,
     });
 
     return { messageId: info?.messageId, kind: data.kind };
