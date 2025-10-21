@@ -5,6 +5,7 @@ export const revalidate = 0;
 
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { emailQueue, type DirectEmailJob } from "@/server/queue";
 import { loadSenderConfig } from "@/server/senderConfig";
 
@@ -23,28 +24,15 @@ type RecipientRow = {
   unsubscribe_token: string | null;
 };
 
-function escapeHtml(s: string) {
-  return String(s)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-/** プレーン本文 → 軽量HTML（行末 <br>、最初の1行だけ太字）*/
-function toLightHtmlFromPlain(text: string) {
-  const t = (text ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  if (!t.length) return "";
-  const idx = t.indexOf("\n");
-  if (idx === -1) {
-    return `<strong style="font-weight:700;color:#0b1220;">${escapeHtml(
-      t
-    )}</strong>`;
-  }
-  const first = escapeHtml(t.slice(0, idx));
-  const rest = escapeHtml(t.slice(idx + 1)).replace(/\n/g, "<br />");
-  return `<strong style="font-weight:700;color:#0b1220;">${first}</strong><br />${rest}`;
+function personalize(
+  raw: string,
+  vars: { name?: string | null; email?: string | null }
+) {
+  const name = (vars.name ?? "").trim() || "ご担当者";
+  const email = (vars.email ?? "").trim();
+  return String(raw ?? "")
+    .replace(/\{\{\s*NAME\s*\}\}/g, name)
+    .replace(/\{\{\s*EMAIL\s*\}\}/g, email);
 }
 
 export async function POST(req: Request) {
@@ -84,7 +72,7 @@ export async function POST(req: Request) {
     // メール本体（プレーン）
     const { data: mail, error: me } = await sb
       .from("mails")
-      .select("id, tenant_id, subject, body_text, status")
+      .select("id, tenant_id, subject, body_text, from_email, status")
       .eq("id", mailId)
       .maybeSingle();
     if (me) return NextResponse.json({ error: me.message }, { status: 400 });
@@ -92,9 +80,8 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "not found" }, { status: 404 });
     }
 
-    const subject = String((mail as any).subject ?? "");
-    const plain = String((mail as any).body_text ?? "");
-    const html = toLightHtmlFromPlain(plain);
+    const subjectRaw = String((mail as any).subject ?? "");
+    const bodyTextRaw = String((mail as any).body_text ?? "");
 
     // 送信者/ブランド設定（/email/settings）
     const cfg = await loadSenderConfig();
@@ -114,7 +101,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "no recipients" }, { status: 400 });
     }
 
-    // 既送信/予約済を除外（Unique制約が無くても重複しないように）
+    // 既送信/予約済を除外（scheduled/queued/sent は重複させない）
     const { data: already } = await sb
       .from("mail_deliveries")
       .select("recipient_id")
@@ -132,7 +119,7 @@ export async function POST(req: Request) {
       });
     }
 
-    // 予約時間 → delay算出
+    // delay / 予約ISO
     let delay = 0;
     let scheduledISO: string | null = null;
     if (scheduleAtISO) {
@@ -147,8 +134,11 @@ export async function POST(req: Request) {
       scheduledISO = new Date(ts).toISOString();
     }
 
-    // mail_deliveries へ登録
+    // ---------- DB 書き込みは ServiceRole で確実に ----------
+    const admin = supabaseAdmin();
+
     if (scheduledISO) {
+      // mail_deliveries（予約）
       const rows = targets.map((t) => ({
         tenant_id: tenantId,
         mail_id: mailId,
@@ -156,19 +146,17 @@ export async function POST(req: Request) {
         status: "scheduled" as const,
         scheduled_at: scheduledISO,
       }));
-      // Unique制約が無い想定なので insert のみ
-      await sb.from("mail_deliveries").insert(rows);
+      await admin.from("mail_deliveries").insert(rows);
 
-      // mail_schedules に1行（一覧表示用）
-      // 二重登録を避ける簡易策：同じ mailId x scheduled_at が無い場合のみ作成
-      const { data: exists } = await sb
+      // mail_schedules（一覧用）
+      const { data: exists } = await admin
         .from("mail_schedules")
         .select("id")
         .eq("mail_id", mailId)
         .eq("scheduled_at", scheduledISO)
         .maybeSingle();
       if (!exists) {
-        await sb.from("mail_schedules").insert({
+        await admin.from("mail_schedules").insert({
           tenant_id: tenantId,
           mail_id: mailId,
           scheduled_at: scheduledISO,
@@ -176,28 +164,68 @@ export async function POST(req: Request) {
         });
       }
 
-      await sb.from("mails").update({ status: "scheduled" }).eq("id", mailId);
+      await admin
+        .from("mails")
+        .update({ status: "scheduled" })
+        .eq("id", mailId);
     } else {
+      // mail_deliveries（即時）
+      const nowIso = new Date().toISOString();
       const rows = targets.map((t) => ({
         tenant_id: tenantId,
         mail_id: mailId,
         recipient_id: t.id,
         status: "queued" as const,
+        queued_at: nowIso,
         scheduled_at: null as any,
       }));
-      await sb.from("mail_deliveries").insert(rows);
-      await sb.from("mails").update({ status: "queued" }).eq("id", mailId);
+      await admin.from("mail_deliveries").insert(rows);
+      await admin.from("mails").update({ status: "queued" }).eq("id", mailId);
     }
 
-    // 実際の送信ジョブを投入
+    // 送信用のベース Footer（テキスト）
+    // cfg.brandCompany 等が未登録でも空行を詰めるため filter(Boolean)
+    const footerLines = [
+      "――――――――――――――――――――",
+      cfg.brandCompany || undefined,
+      cfg.brandAddress || undefined,
+      cfg.brandSupport ? `お問い合わせ: ${cfg.brandSupport}` : undefined,
+      // 配信停止URLは受信者ごとに異なるので各ジョブで差し込む
+    ].filter(Boolean) as string[];
+
+    // 実送ジョブを投入（宛先ごとに件名/本文を個別化）
     let queued = 0;
     for (const r of targets) {
+      const subject = personalize(subjectRaw, { name: r.name, email: r.email });
+      const unsubUrl = r.unsubscribe_token
+        ? `${(process.env.APP_URL || "http://localhost:3000").replace(
+            /\/+$/,
+            ""
+          )}/api/unsubscribe?token=${encodeURIComponent(r.unsubscribe_token)}`
+        : null;
+
+      const bodyMain = personalize(bodyTextRaw, {
+        name: r.name,
+        email: r.email,
+      });
+      const footer = [
+        "",
+        "",
+        ...footerLines,
+        unsubUrl ? `配信停止: ${unsubUrl}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      const text = `${bodyMain}${footer ? `\n${footer}` : ""}`;
+
       const job: DirectEmailJob = {
         kind: "direct_email",
         to: r.email as string,
         subject,
-        html, // プレーン→軽量HTML化したもの
-        text: plain || undefined,
+        // ★プレーンメールは完全プレーン：HTMLを付けない
+        html: undefined as any,
+        text,
         tenantId,
         unsubscribeToken: r.unsubscribe_token ?? undefined,
 
