@@ -84,7 +84,7 @@ export async function POST(req: Request) {
     // メール本体（プレーン）
     const { data: mail, error: me } = await sb
       .from("mails")
-      .select("id, tenant_id, subject, body_text, from_email, status")
+      .select("id, tenant_id, subject, body_text, status")
       .eq("id", mailId)
       .maybeSingle();
     if (me) return NextResponse.json({ error: me.message }, { status: 400 });
