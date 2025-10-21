@@ -1,3 +1,4 @@
+// web/src/app/mails/schedules/page.tsx
 import React from "react";
 export const dynamic = "force-dynamic";
 
@@ -8,7 +9,7 @@ import { formatJpDateTime } from "@/lib/formatDate";
 type Row = {
   id: string;
   mail_id: string;
-  scheduled_at: string | null;
+  scheduled_at: string | null; // ← 画面側は scheduled_at のまま
   status: string | null;
   created_at: string | null;
   mails: { id: string; name: string | null; subject: string | null } | null;
@@ -36,10 +37,11 @@ export default async function MailSchedulesPage() {
   const { data: rows } = await supabase
     .from("mail_schedules")
     .select(
-      "id, mail_id, scheduled_at, status, created_at, mails(id, name, subject)"
+      // schedule_at を scheduled_at の名前で取得
+      "id, mail_id, scheduled_at:schedule_at, status, created_at, mails(id, name, subject)"
     )
     .eq("tenant_id", tenantId)
-    .order("scheduled_at", { ascending: true })
+    .order("schedule_at", { ascending: true }) // ← 並び替えも schedule_at
     .returns<Row[]>();
 
   return (

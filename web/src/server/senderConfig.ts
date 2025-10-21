@@ -8,48 +8,74 @@ export type SenderConfig = {
   brandSupport?: string;
 };
 
-/**
- * ログインユーザーの /email/settings に保存された設定を読み出す。
- * テーブル名/カラム名は以下を想定：
- *   table: email_settings
- *   columns: user_id, tenant_id, from_address, brand_company, brand_address, brand_support
- * 片方しか無い場合は存在するキーで検索します。
- */
 export async function loadSenderConfig(): Promise<SenderConfig> {
   const sb = await supabaseServer();
   const { data: u } = await sb.auth.getUser();
   const user = u?.user;
   if (!user) return {};
 
-  // user_id で探し、無ければ tenant_id で探す（両対応）
-  let q = sb
-    .from("email_settings")
-    .select("from_address,brand_company,brand_address,brand_support")
-    .eq("user_id", user.id)
+  // tenantId 取得
+  const { data: prof } = await sb
+    .from("profiles")
+    .select("tenant_id")
+    .eq("id", user.id)
     .maybeSingle();
+  const tenantId = (prof?.tenant_id as string | undefined) ?? undefined;
 
-  let { data, error } = await q;
-  if (!data) {
-    // tenant_id が profile 等にあれば使う（無ければスキップ）
-    const { data: prof } = await sb
-      .from("profiles")
-      .select("tenant_id")
-      .eq("id", user.id)
+  let from_address: string | undefined,
+    brand_company: string | undefined,
+    brand_address: string | undefined,
+    brand_support: string | undefined;
+
+  // 1) email_settings by user_id
+  {
+    const { data } = await sb
+      .from("email_settings")
+      .select("from_address,brand_company,brand_address,brand_support")
+      .eq("user_id", user.id)
       .maybeSingle();
-    if (prof?.tenant_id) {
-      const r2 = await sb
-        .from("email_settings")
-        .select("from_address,brand_company,brand_address,brand_support")
-        .eq("tenant_id", prof.tenant_id)
-        .maybeSingle();
-      data = r2.data ?? null;
+    if (data) {
+      from_address = data.from_address || from_address;
+      brand_company = data.brand_company || brand_company;
+      brand_address = data.brand_address || brand_address;
+      brand_support = data.brand_support || brand_support;
+    }
+  }
+
+  // 2) email_settings by tenant_id
+  if (tenantId) {
+    const { data } = await sb
+      .from("email_settings")
+      .select("from_address,brand_company,brand_address,brand_support")
+      .eq("tenant_id", tenantId)
+      .maybeSingle();
+    if (data) {
+      from_address ||= data.from_address || undefined;
+      brand_company ||= data.brand_company || undefined;
+      brand_address ||= data.brand_address || undefined;
+      brand_support ||= data.brand_support || undefined;
+    }
+  }
+
+  // 3) tenants 補完
+  if (tenantId) {
+    const { data: t } = await sb
+      .from("tenants")
+      .select("company_name, company_address, support_email, from_email")
+      .eq("id", tenantId)
+      .maybeSingle();
+    if (t) {
+      from_address ||= (t as any).from_email || undefined;
+      brand_company ||= (t as any).company_name || undefined;
+      brand_address ||= (t as any).company_address || undefined;
+      brand_support ||= (t as any).support_email || undefined;
     }
   }
 
   return {
-    fromOverride: data?.from_address || undefined,
-    brandCompany: data?.brand_company || undefined,
-    brandAddress: data?.brand_address || undefined,
-    brandSupport: data?.brand_support || undefined,
+    fromOverride: from_address || undefined,
+    brandCompany: brand_company || undefined,
+    brandAddress: brand_address || undefined,
+    brandSupport: brand_support || undefined,
   };
 }

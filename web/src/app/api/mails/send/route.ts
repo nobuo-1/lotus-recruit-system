@@ -14,6 +14,11 @@ type Payload = {
   scheduleAt?: string | null; // 予約ISO（mail_schedules は schedule_at カラム）
 };
 
+const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
+  /\/+$/,
+  ""
+);
+
 function chunk<T>(arr: T[], size: number): T[][] {
   const a = [...arr];
   const out: T[][] = [];
@@ -76,7 +81,7 @@ export async function POST(req: Request) {
     if (!u?.user)
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
-    // テナント取得（mails が当該テナントのものか確認する用途のみ）
+    // テナント取得
     const { data: prof } = await sb
       .from("profiles")
       .select("tenant_id")
@@ -84,7 +89,7 @@ export async function POST(req: Request) {
       .maybeSingle();
     const tenantId = (prof?.tenant_id as string | undefined) ?? undefined;
 
-    // plain メール本体（from_email は使わない）
+    // メール本体（プレーン：from_email は使わない）
     const { data: mail, error: me } = await sb
       .from("mails")
       .select("id, tenant_id, subject, body_text, status")
@@ -102,7 +107,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
 
-    // 送信元/ブランド設定（メール用設定ページの内容）
+    // 送信元/ブランド設定（user/tenant の email_settings → tenants → env フォールバック）
     const cfg = await loadSenderConfig();
 
     // 宛先
@@ -119,14 +124,14 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "no recipients" }, { status: 400 });
     }
 
-    // すでに配信済み/予約済みの recipient を除外（mail_deliveries に tenant_id は無い）
+    // 既存 delivery を除外（mail_deliveries に tenant_id は無い）
     const { data: existing } = await sb
       .from("mail_deliveries")
       .select("recipient_id")
       .eq("mail_id", mailId);
 
     const existed = new Set<string>(
-      (existing ?? []).map((r: any) => r.recipient_id)
+      (existing ?? []).map((r: any) => String(r.recipient_id))
     );
     const targets = recipients.filter((r: any) => !existed.has(String(r.id)));
     if (targets.length === 0) {
@@ -152,7 +157,7 @@ export async function POST(req: Request) {
       scheduleAt = new Date(ts).toISOString();
     }
 
-    // deliveries へ事前登録（onConflict は使わない：ユニーク制約が無い前提）
+    // deliveries へ事前登録（ユニーク制約を使わない）
     if (scheduleAt) {
       for (const part of chunk(
         targets.map((r: any) => ({
@@ -164,16 +169,22 @@ export async function POST(req: Request) {
         })),
         500
       )) {
-        await sb.from("mail_deliveries").insert(part);
+        const { error } = await sb.from("mail_deliveries").insert(part);
+        if (error)
+          return NextResponse.json({ error: error.message }, { status: 400 });
       }
-      // 予約テーブル（schedule_at カラム名に注意）
-      await sb.from("mail_schedules").insert({
-        tenant_id: tenantId ?? null,
-        mail_id: mailId,
-        schedule_at: scheduleAt,
-        status: "scheduled",
-        recipient_ids: JSON.stringify(targets.map((t: any) => t.id)),
-      });
+      // 予約テーブル（列名は schedule_at）
+      {
+        const { error } = await sb.from("mail_schedules").insert({
+          tenant_id: tenantId ?? null,
+          mail_id: mailId,
+          schedule_at: scheduleAt,
+          status: "scheduled",
+          recipient_ids: JSON.stringify(targets.map((t: any) => t.id)),
+        });
+        if (error)
+          return NextResponse.json({ error: error.message }, { status: 400 });
+      }
       // 見た目用
       await sb.from("mails").update({ status: "scheduled" }).eq("id", mailId);
     } else {
@@ -187,16 +198,17 @@ export async function POST(req: Request) {
         })),
         500
       )) {
-        await sb.from("mail_deliveries").insert(part);
+        const { error } = await sb.from("mail_deliveries").insert(part);
+        if (error)
+          return NextResponse.json({ error: error.message }, { status: 400 });
       }
       await sb.from("mails").update({ status: "queued" }).eq("id", mailId);
     }
 
-    // 件名/本文（プレーンテキストのみ、{{NAME}} / {{EMAIL}} 差し込み + フッター）
+    // 件名/本文（プレーンテキスト、{{NAME}}/{{EMAIL}} 差し込み + 目に見えるフッター）
     const subjectRaw = toS((mail as any).subject);
     const bodyTextRaw = toS((mail as any).body_text);
 
-    // キュー投入
     let queued = 0;
     for (const r of targets as any[]) {
       const subject = replaceVars(subjectRaw, {
@@ -208,6 +220,12 @@ export async function POST(req: Request) {
         EMAIL: r.email ?? "",
       });
 
+      const unsubUrl = r.unsubscribe_token
+        ? `${appUrl}/api/unsubscribe?token=${encodeURIComponent(
+            r.unsubscribe_token
+          )}`
+        : "";
+
       const footer = [
         `このメールは ${cfg.brandCompany ?? "弊社"} から ${String(
           r.email
@@ -215,13 +233,13 @@ export async function POST(req: Request) {
         cfg.brandCompany ? `運営：${cfg.brandCompany}` : "",
         cfg.brandAddress ? `所在地：${cfg.brandAddress}` : "",
         cfg.brandSupport ? `連絡先：${cfg.brandSupport}` : "",
+        unsubUrl ? `配信停止：${unsubUrl}` : "",
       ]
         .filter(Boolean)
         .join("\n");
 
       const text = main ? `${main}\n\n${footer}` : footer;
 
-      // ジョブID: mail:<mailId>:rcpt:<recipientId>:<ts>
       const jobId = `mail:${mailId}:rcpt:${r.id}:${Date.now()}`;
       await emailQueue.add(
         "direct_email",
@@ -230,7 +248,7 @@ export async function POST(req: Request) {
           to: String(r.email),
           subject,
           text, // ← プレーンのみ
-          html: undefined, // ← 明示的に無し
+          html: undefined,
           tenantId: tenantId ?? undefined,
           unsubscribeToken: (r as any).unsubscribe_token ?? undefined,
           fromOverride: cfg.fromOverride,
