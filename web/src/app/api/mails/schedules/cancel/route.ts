@@ -1,93 +1,83 @@
 // web/src/app/api/mails/schedules/cancel/route.ts
-export const runtime = "nodejs";
+import { NextResponse } from "next/server";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
+
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-import { NextResponse } from "next/server";
-import { supabaseServer } from "@/lib/supabaseServer";
-
-async function readId(req: Request) {
-  const ct = req.headers.get("content-type") || "";
-  if (
-    ct.includes("application/x-www-form-urlencoded") ||
-    ct.includes("multipart/form-data")
-  ) {
-    const fd = await req.formData();
-    return String(fd.get("id") || fd.get("scheduleId") || "");
-  }
-  const j = await req.json().catch(() => ({} as any));
-  return String(j.id || j.scheduleId || "");
-}
-
 export async function POST(req: Request) {
-  const sb = await supabaseServer();
-  const { data: u } = await sb.auth.getUser();
-  if (!u?.user)
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  try {
+    const admin = supabaseAdmin();
 
-  const scheduleId = await readId(req);
-  if (!scheduleId)
-    return NextResponse.json({ error: "scheduleId required" }, { status: 400 });
+    // form でも JSON でも受ける
+    let id = "";
+    const ct = req.headers.get("content-type") || "";
+    if (ct.includes("application/json")) {
+      const j = await req.json().catch(() => ({} as any));
+      id = String(j?.id ?? "");
+    } else {
+      const fd = await req.formData();
+      id = String(fd.get("id") ?? "");
+    }
+    if (!id) {
+      return NextResponse.json({ error: "id required" }, { status: 400 });
+    }
 
-  const { data: prof } = await sb
-    .from("profiles")
-    .select("tenant_id")
-    .eq("id", u.user.id)
-    .maybeSingle();
-  const tenantId = (prof?.tenant_id as string | undefined) ?? undefined;
+    // 対象スケジュール取得（mail_id と recipient_ids が必要）
+    const schRes = await admin
+      .from("mail_schedules")
+      .select("id, mail_id, recipient_ids, schedule_at")
+      .eq("id", id)
+      .maybeSingle();
 
-  // 対象スケジュール取得
-  const { data: sch, error: e1 } = await sb
-    .from("mail_schedules")
-    .select("id, mail_id, status, schedule_at, tenant_id")
-    .eq("id", scheduleId)
-    .maybeSingle();
-  if (e1 || !sch)
-    return NextResponse.json({ error: "not found" }, { status: 404 });
-  if (tenantId && sch.tenant_id && sch.tenant_id !== tenantId) {
-    return NextResponse.json({ error: "forbidden" }, { status: 403 });
-  }
-  const mailId = String(sch.mail_id);
+    if (schRes.error || !schRes.data) {
+      return NextResponse.json({ ok: false, removed: 0 });
+    }
 
-  // 1) mail_schedules 削除
-  await sb.from("mail_schedules").delete().eq("id", scheduleId);
+    const { mail_id, recipient_ids } = schRes.data as any;
+    const ids: string[] = Array.isArray(recipient_ids) ? recipient_ids : [];
 
-  // 2) mail_deliveries の未送信系も削除
-  await sb
-    .from("mail_deliveries")
-    .delete()
-    .eq("mail_id", mailId)
-    .in("status", ["scheduled", "queued", "processing"]);
+    // mail_deliveries の“未送信分（scheduled）”のみ削除
+    if (ids.length > 0) {
+      await admin
+        .from("mail_deliveries")
+        .delete()
+        .eq("mail_id", mail_id)
+        .eq("status", "scheduled")
+        .in("recipient_id", ids);
+    }
 
-  // 3) mails.status 更新
-  let newStatus = "draft";
-  {
-    const { count: futureCount } = await sb
+    // スケジュール自体を削除
+    await admin.from("mail_schedules").delete().eq("id", id);
+
+    // 状況に応じて mails.status 更新（残ってる scheduled があれば scheduled、送信実績あれば queued、どちらも無ければ draft）
+    const scheduledLeft = await admin
       .from("mail_schedules")
       .select("id", { count: "exact", head: true })
-      .eq("mail_id", mailId)
-      .eq("status", "scheduled");
-    if ((futureCount ?? 0) > 0) newStatus = "scheduled";
-
-    const { count: queuedCount } = await sb
+      .eq("mail_id", mail_id);
+    const sentExists = await admin
       .from("mail_deliveries")
       .select("id", { count: "exact", head: true })
-      .eq("mail_id", mailId)
-      .in("status", ["queued", "processing"]);
-    if ((queuedCount ?? 0) > 0) newStatus = "queued";
-
-    const { count: sentCount } = await sb
-      .from("mail_deliveries")
-      .select("id", { count: "exact", head: true })
-      .eq("mail_id", mailId)
+      .eq("mail_id", mail_id)
       .eq("status", "sent");
-    if ((sentCount ?? 0) > 0 && newStatus === "draft") newStatus = "sent";
-  }
-  await sb.from("mails").update({ status: newStatus }).eq("id", mailId);
 
-  return NextResponse.redirect(new URL("/mails/schedules?ok=1", req.url), 303);
+    let newStatus = "draft";
+    if ((scheduledLeft.count ?? 0) > 0) newStatus = "scheduled";
+    else if ((sentExists.count ?? 0) > 0) newStatus = "queued";
+
+    await admin.from("mails").update({ status: newStatus }).eq("id", mail_id);
+
+    // リダイレクト（GET遷移でもPOST結果でもOK）
+    return NextResponse.redirect(new URL("/mails/schedules", req.url), 303);
+  } catch (e: any) {
+    return NextResponse.json(
+      { error: e?.message || "server error" },
+      { status: 500 }
+    );
+  }
 }
 
-export async function GET(req: Request) {
-  return NextResponse.redirect(new URL("/mails/schedules", req.url), 303);
+export async function GET() {
+  // 直接開かれた時はエラー文言を返す
+  return NextResponse.json({ error: "POST only" }, { status: 405 });
 }

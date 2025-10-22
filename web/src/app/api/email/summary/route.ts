@@ -1,13 +1,13 @@
 // web/src/app/api/email/summary/route.ts
-export const runtime = "nodejs";
+import { NextResponse } from "next/server";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
+
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-import { NextResponse } from "next/server";
-import { supabaseServer } from "@/lib/supabaseServer";
+type RangeKey = "7d" | "14d" | "1m" | "3m" | "6m" | "1y";
 
-// range パラメタ → 期間日数
-function daysOf(range: string | null) {
+function daysOf(range: RangeKey) {
   switch (range) {
     case "7d":
       return 7;
@@ -26,222 +26,186 @@ function daysOf(range: string | null) {
   }
 }
 
-function startOfRange(range: string | null) {
-  const d = new Date();
-  d.setUTCHours(0, 0, 0, 0);
-  d.setUTCDate(d.getUTCDate() - daysOf(range));
-  return d.toISOString();
+function isoDate(d: Date) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${dd}`;
 }
-
-function dateKey(iso: string | null | undefined) {
-  if (!iso) return "";
-  const d = new Date(iso);
-  return isNaN(d.getTime())
-    ? ""
-    : `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(
-        2,
-        "0"
-      )}-${String(d.getUTCDate()).padStart(2, "0")}`;
+function stripTime(d: Date) {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+function lastNDays(n: number) {
+  const today = stripTime(new Date());
+  const arr: string[] = [];
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(today);
+    d.setDate(today.getDate() - i);
+    arr.push(isoDate(d));
+  }
+  return arr;
+}
+function addDays(d: Date, n: number) {
+  const x = new Date(d);
+  x.setDate(x.getDate() + n);
+  return x;
 }
 
 export async function GET(req: Request) {
-  const url = new URL(req.url);
-  const range = url.searchParams.get("range");
+  try {
+    const admin = supabaseAdmin();
+    const url = new URL(req.url);
+    const range = (url.searchParams.get("range") as RangeKey) || "14d";
+    const days = daysOf(range);
 
-  const sb = await supabaseServer();
-  const { data: u } = await sb.auth.getUser();
-  if (!u?.user)
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    // 期間（[from, to)）
+    const to = addDays(stripTime(new Date()), 1); // 翌日の0:00
+    const from = addDays(to, -days);
 
-  const { data: prof } = await sb
-    .from("profiles")
-    .select("tenant_id")
-    .eq("id", u.user.id)
-    .maybeSingle();
-  const tenantId = (prof?.tenant_id as string | undefined) ?? undefined;
+    // ========= KPI: 総数 =========
+    const mTotal = await admin
+      .from("mails")
+      .select("id", { count: "exact", head: true });
+    const cTotal = await admin
+      .from("campaigns")
+      .select("id", { count: "exact", head: true });
 
-  const startISO = startOfRange(range);
+    const mailTotal = mTotal.count ?? 0;
+    const campaignTotal = cTotal.count ?? 0;
 
-  // ========== 基礎データ ==========
-  // mails / campaigns の ID（テナント限定）
-  const { data: mails } = await sb
-    .from("mails")
-    .select("id")
-    .match(tenantId ? { tenant_id: tenantId } : {});
-  const mailIds = (mails ?? []).map((m: any) => String(m.id));
-
-  const { data: camps } = await sb
-    .from("campaigns")
-    .select("id")
-    .match(tenantId ? { tenant_id: tenantId } : {});
-  const campIds = (camps ?? []).map((c: any) => String(c.id));
-
-  // 総数（全期間）
-  const mailTotal = mailIds.length;
-  const campaignTotal = campIds.length;
-
-  // ========== オールタイム配信済み ==========
-  let mailSentAll = 0;
-  if (mailIds.length) {
-    const { count } = await sb
+    // ========= KPI: 累計配信（全期間 sent）=========
+    const mailSentAll = await admin
       .from("mail_deliveries")
       .select("id", { count: "exact", head: true })
-      .in("mail_id", mailIds)
       .eq("status", "sent");
-    mailSentAll = count ?? 0;
-  }
-  const { count: campSentAll } = await sb
-    .from("deliveries")
-    .select("id", { count: "exact", head: true })
-    .match(tenantId ? { tenant_id: tenantId } : {})
-    .eq("status", "sent");
-  const allTimeSends = mailSentAll + (campSentAll ?? 0);
+    const campSentAll = await admin
+      .from("deliveries")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "sent");
+    const allTimeSends = (mailSentAll.count ?? 0) + (campSentAll.count ?? 0);
 
-  // ========== 期間内の送信済み（シリーズ用） ==========
-  const seriesTotal: Record<string, number> = {};
-  const seriesMail: Record<string, number> = {};
-  const seriesCamp: Record<string, number> = {};
+    // ========= Series（ゼロ補完あり）=========
+    const daysList = lastNDays(days);
+    const zeroMap = Object.fromEntries(daysList.map((d) => [d, 0]));
 
-  if (mailIds.length) {
-    const { data: md } = await sb
+    // mail_deliveries（期間内 sent の日毎カウント）
+    const mailRows = await admin
       .from("mail_deliveries")
       .select("sent_at")
-      .in("mail_id", mailIds)
       .eq("status", "sent")
-      .gte("sent_at", startISO);
-    (md ?? []).forEach((r: any) => {
-      const k = dateKey(r.sent_at);
-      if (!k) return;
-      seriesMail[k] = (seriesMail[k] || 0) + 1;
-      seriesTotal[k] = (seriesTotal[k] || 0) + 1;
+      .gte("sent_at", from.toISOString())
+      .lt("sent_at", to.toISOString());
+
+    const mailMap = { ...zeroMap };
+    (mailRows.data ?? []).forEach((r: any) => {
+      const dt = r?.sent_at ? isoDate(new Date(r.sent_at)) : null;
+      if (dt && dt in mailMap) mailMap[dt] += 1;
     });
-  }
 
-  const { data: cd } = await sb
-    .from("deliveries")
-    .select("sent_at")
-    .match(tenantId ? { tenant_id: tenantId } : {})
-    .eq("status", "sent")
-    .gte("sent_at", startISO);
-  (cd ?? []).forEach((r: any) => {
-    const k = dateKey(r.sent_at);
-    if (!k) return;
-    seriesCamp[k] = (seriesCamp[k] || 0) + 1;
-    seriesTotal[k] = (seriesTotal[k] || 0) + 1;
-  });
-
-  // series を昇順配列へ
-  function toSeries(obj: Record<string, number>) {
-    return Object.entries(obj)
-      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-      .map(([date, count]) => ({ date, count }));
-  }
-
-  // ========== 直近30日の KPI（到達率・開封率） ==========
-  const last30ISO = startOfRange("1m");
-
-  // 到達率：分母 = sent + bounced、分子 = sent
-  let mailSent30 = 0;
-  let mailAttempt30 = 0;
-  if (mailIds.length) {
-    const { count: s1 } = await sb
-      .from("mail_deliveries")
-      .select("id", { count: "exact", head: true })
-      .in("mail_id", mailIds)
-      .eq("status", "sent")
-      .gte("sent_at", last30ISO);
-    const { count: b1 } = await sb
-      .from("mail_deliveries")
-      .select("id", { count: "exact", head: true })
-      .in("mail_id", mailIds)
-      .eq("status", "bounced")
-      .gte("sent_at", last30ISO); // bounced に sent_at が無い場合は created_at に変更
-    mailSent30 = s1 ?? 0;
-    mailAttempt30 = (s1 ?? 0) + (b1 ?? 0);
-  }
-
-  const { count: campSent30 } = await sb
-    .from("deliveries")
-    .select("id", { count: "exact", head: true })
-    .match(tenantId ? { tenant_id: tenantId } : {})
-    .eq("status", "sent")
-    .gte("sent_at", last30ISO);
-
-  const { count: campBounced30 } = await sb
-    .from("deliveries")
-    .select("id", { count: "exact", head: true })
-    .match(tenantId ? { tenant_id: tenantId } : {})
-    .eq("status", "bounced")
-    .gte("sent_at", last30ISO);
-
-  const sent30 = (mailSent30 ?? 0) + (campSent30 ?? 0);
-  const attempt30 =
-    (mailAttempt30 ?? 0) + ((campSent30 ?? 0) + (campBounced30 ?? 0));
-
-  const reachRate =
-    attempt30 > 0 ? Number(((sent30 / attempt30) * 100).toFixed(2)) : 0;
-
-  // 開封率：分母 = sent30、分子 = opens(ユニーク delivery_id)
-  // ※ email_opens テーブル名は環境に合わせてください
-  let open30 = 0;
-  if (sent30 > 0) {
-    // 直近30日の "sent" delivery_id を収集
-    const sentMailIds: string[] = [];
-    if (mailIds.length) {
-      const { data: mrows } = await sb
-        .from("mail_deliveries")
-        .select("id")
-        .in("mail_id", mailIds)
-        .eq("status", "sent")
-        .gte("sent_at", last30ISO);
-      (mrows ?? []).forEach((r: any) => sentMailIds.push(String(r.id)));
-    }
-    const { data: crows } = await sb
+    // deliveries（期間内 sent の日毎カウント）
+    const campRows = await admin
       .from("deliveries")
-      .select("id")
-      .match(tenantId ? { tenant_id: tenantId } : {})
+      .select("sent_at")
       .eq("status", "sent")
-      .gte("sent_at", last30ISO);
-    const sentCampIds = (crows ?? []).map((r: any) => String(r.id));
-    const targetIds = [...sentMailIds, ...sentCampIds];
+      .gte("sent_at", from.toISOString())
+      .lt("sent_at", to.toISOString());
 
-    if (targetIds.length) {
-      const chunk = <T>(arr: T[], size: number) => {
-        const a = [...arr];
-        const out: T[][] = [];
-        while (a.length) out.push(a.splice(0, size));
-        return out;
-      };
-      let sum = 0;
-      for (const part of chunk(targetIds, 1000)) {
-        const { count } = await sb
-          .from("email_opens")
-          .select("delivery_id", { count: "exact", head: true })
-          .in("delivery_id", part)
-          .gte("created_at", last30ISO);
-        sum += count ?? 0;
-      }
-      open30 = sum;
-    }
-  }
+    const campMap = { ...zeroMap };
+    (campRows.data ?? []).forEach((r: any) => {
+      const dt = r?.sent_at ? isoDate(new Date(r.sent_at)) : null;
+      if (dt && dt in campMap) campMap[dt] += 1;
+    });
 
-  const openRate =
-    sent30 > 0 ? Number(((open30 / sent30) * 100).toFixed(2)) : 0;
+    const mailSeries = daysList.map((d) => ({ date: d, count: mailMap[d] }));
+    const campSeries = daysList.map((d) => ({ date: d, count: campMap[d] }));
+    const totalSeries = daysList.map((d) => ({
+      date: d,
+      count: mailMap[d] + campMap[d],
+    }));
 
-  const payload = {
-    metrics: {
-      mailTotal,
-      campaignTotal,
-      allTimeSends,
-      reachRate,
-      openRate,
-      series: {
-        total: toSeries(seriesTotal),
-        mail: toSeries(seriesMail),
-        campaign: toSeries(seriesCamp),
+    // ========= KPI: 30日到達率/開封率 =========
+    const now = new Date();
+    const from30 = addDays(stripTime(now), -30).toISOString();
+    const to30 = addDays(stripTime(now), 1).toISOString();
+
+    // 送信済み（分母）
+    const mailSent30 = await admin
+      .from("mail_deliveries")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "sent")
+      .gte("sent_at", from30)
+      .lt("sent_at", to30);
+    const campSent30 = await admin
+      .from("deliveries")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "sent")
+      .gte("sent_at", from30)
+      .lt("sent_at", to30);
+    const sent30 = (mailSent30.count ?? 0) + (campSent30.count ?? 0);
+
+    // 開封済み（分子：開封率）
+    const mailOpen30 = await admin
+      .from("mail_deliveries")
+      .select("id", { count: "exact", head: true })
+      .not("opened_at", "is", null)
+      .gte("sent_at", from30)
+      .lt("sent_at", to30);
+    const campOpen30 = await admin
+      .from("deliveries")
+      .select("id", { count: "exact", head: true })
+      .not("opened_at", "is", null)
+      .gte("sent_at", from30)
+      .lt("sent_at", to30);
+    const opened30 = (mailOpen30.count ?? 0) + (campOpen30.count ?? 0);
+
+    // 試行総数（分母：到達率）= 送信済 + 予約済（まだ未送信）
+    const mailSchedRows = await admin
+      .from("mail_schedules")
+      .select("recipient_ids, schedule_at")
+      .gte("schedule_at", from30)
+      .lt("schedule_at", to30);
+
+    const mailScheduledCount = (mailSchedRows.data ?? []).reduce(
+      (sum, r: any) =>
+        sum + ((r?.recipient_ids as string[] | null)?.length ?? 0),
+      0
+    );
+
+    const campSchedCount = await admin
+      .from("deliveries")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "scheduled")
+      .gte("scheduled_at", from30)
+      .lt("scheduled_at", to30);
+
+    const attempted30 =
+      sent30 + (mailScheduledCount ?? 0) + (campSchedCount.count ?? 0);
+
+    const reachRate =
+      attempted30 > 0 ? Number(((sent30 / attempted30) * 100).toFixed(2)) : 0;
+    const openRate =
+      sent30 > 0 ? Number(((opened30 / sent30) * 100).toFixed(2)) : 0;
+
+    return NextResponse.json({
+      metrics: {
+        mailTotal,
+        campaignTotal,
+        allTimeSends,
+        reachRate,
+        openRate,
+        series: {
+          total: totalSeries,
+          mail: mailSeries,
+          campaign: campSeries,
+        },
       },
-    },
-  };
-
-  return NextResponse.json(payload);
+    });
+  } catch (e: any) {
+    return NextResponse.json(
+      { error: e?.message || "server error" },
+      { status: 500 }
+    );
+  }
 }

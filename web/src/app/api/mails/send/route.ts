@@ -20,7 +20,7 @@ const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
   ""
 );
 
-// helpers
+// ===== helpers =====
 function chunk<T>(arr: T[], size: number): T[][] {
   const a = [...arr];
   const out: T[][] = [];
@@ -30,18 +30,15 @@ function chunk<T>(arr: T[], size: number): T[][] {
 function toS(v: unknown) {
   return typeof v === "string" ? v : v == null ? "" : String(v);
 }
-function replaceVars(
-  input: string,
-  vars: { NAME?: string; EMAIL?: string }
-): string {
+function replaceVars(input: string, vars: { NAME?: string; EMAIL?: string }) {
   const name = (vars.NAME ?? "").trim() || "ご担当者";
   const email = (vars.EMAIL ?? "").trim();
   return input
     .replaceAll(/\{\{\s*NAME\s*\}\}/g, name)
     .replaceAll(/\{\{\s*EMAIL\s*\}\}/g, email);
 }
-function escapeHtml(s: string) {
-  return String(s)
+function esc(s: string) {
+  return s
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
@@ -87,7 +84,6 @@ export async function POST(req: Request) {
     if (!u?.user)
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
-    // tenant
     const { data: prof } = await sb
       .from("profiles")
       .select("tenant_id")
@@ -95,12 +91,12 @@ export async function POST(req: Request) {
       .maybeSingle();
     const tenantId = (prof?.tenant_id as string | undefined) ?? undefined;
 
-    // mail
     const { data: mail, error: me } = await sb
       .from("mails")
       .select("id, tenant_id, subject, body_text, status")
       .eq("id", mailId)
       .maybeSingle();
+
     if (me) return NextResponse.json({ error: me.message }, { status: 400 });
     if (!mail)
       return NextResponse.json({ error: "not found" }, { status: 404 });
@@ -114,12 +110,12 @@ export async function POST(req: Request) {
 
     const cfg = await loadSenderConfig();
 
-    // recipients
     const { data: recs, error: re } = await sb
       .from("recipients")
       .select("id, name, email, unsubscribe_token, unsubscribed_at, is_active")
       .in("id", recipientIds);
     if (re) return NextResponse.json({ error: re.message }, { status: 400 });
+
     const recipients = (recs ?? []).filter(
       (r: any) => r?.email && !r?.unsubscribed_at && (r?.is_active ?? true)
     );
@@ -127,7 +123,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "no recipients" }, { status: 400 });
     }
 
-    // exclude already exists
+    // 既送信 delivery を除外
     const { data: existing } = await sb
       .from("mail_deliveries")
       .select("recipient_id")
@@ -144,7 +140,7 @@ export async function POST(req: Request) {
       });
     }
 
-    // attachments (signed url)
+    // 添付（全受信者共通）
     const admin = supabaseAdmin();
     const { data: atts } = await admin
       .from("mail_attachments")
@@ -160,73 +156,58 @@ export async function POST(req: Request) {
         const { data: signed } = await admin.storage
           .from("email_attachments")
           .createSignedUrl(path, 60 * 60 * 24);
-        if (signed?.signedUrl) {
+        if (signed?.signedUrl)
           attachList.push({ path: signed.signedUrl, name: filename, mime });
-        }
       }
     }
 
-    // schedule / immediate
+    // 予約 or 即時
     let delay = 0;
     let scheduleAt: string | null = null;
     if (scheduleAtISO) {
       const ts = Date.parse(scheduleAtISO);
-      if (Number.isNaN(ts)) {
+      if (Number.isNaN(ts))
         return NextResponse.json(
           { error: "scheduleAt が不正です" },
           { status: 400 }
         );
-      }
       delay = Math.max(0, ts - Date.now());
       scheduleAt = new Date(ts).toISOString();
     }
 
-    // insert deliveries
+    // deliveries 事前登録
+    const baseRows = targets.map((r: any) => ({
+      mail_id: mailId,
+      recipient_id: r.id,
+      status: scheduleAt ? ("scheduled" as const) : ("queued" as const),
+      sent_at: null as any,
+      error: null as any,
+    }));
+
+    for (const part of chunk(baseRows, 500)) {
+      const ins = await sb.from("mail_deliveries").insert(part);
+      if (ins.error)
+        return NextResponse.json({ error: ins.error.message }, { status: 400 });
+    }
+
+    // 予約テーブル
     if (scheduleAt) {
-      for (const part of chunk(
-        targets.map((r: any) => ({
-          mail_id: mailId,
-          recipient_id: r.id,
-          status: "scheduled" as const,
-          sent_at: null,
-          error: null,
-        })),
-        500
-      )) {
-        const { error } = await sb.from("mail_deliveries").insert(part);
-        if (error)
-          return NextResponse.json({ error: error.message }, { status: 400 });
-      }
-      // mail_schedules も作成
-      const { error: se } = await sb.from("mail_schedules").insert({
+      const { error } = await sb.from("mail_schedules").insert({
         tenant_id: tenantId ?? null,
         mail_id: mailId,
         schedule_at: scheduleAt,
         status: "scheduled",
         recipient_ids: targets.map((t: any) => t.id),
       });
-      if (se) return NextResponse.json({ error: se.message }, { status: 400 });
+      if (error)
+        return NextResponse.json({ error: error.message }, { status: 400 });
       await sb.from("mails").update({ status: "scheduled" }).eq("id", mailId);
     } else {
-      for (const part of chunk(
-        targets.map((r: any) => ({
-          mail_id: mailId,
-          recipient_id: r.id,
-          status: "queued" as const,
-          sent_at: null,
-          error: null,
-        })),
-        500
-      )) {
-        const { error } = await sb.from("mail_deliveries").insert(part);
-        if (error)
-          return NextResponse.json({ error: error.message }, { status: 400 });
-      }
       await sb.from("mails").update({ status: "queued" }).eq("id", mailId);
     }
 
-    // delivery id を取得（プレーンでも開封ピクセル用に必要）
-    const { data: dels } = await sb
+    // deliveryId を取得（開封ピクセルで使用）
+    const { data: dels, error: dErr } = await sb
       .from("mail_deliveries")
       .select("id, recipient_id")
       .eq("mail_id", mailId)
@@ -234,20 +215,23 @@ export async function POST(req: Request) {
         "recipient_id",
         targets.map((t: any) => t.id)
       );
+    if (dErr)
+      return NextResponse.json({ error: dErr.message }, { status: 400 });
+
     const idMap = new Map<string, string>();
     (dels ?? []).forEach((d: any) =>
       idMap.set(String(d.recipient_id), String(d.id))
     );
 
-    // subject/body
+    // 件名/本文
     const subjectRaw = toS((mail as any).subject);
     const bodyTextRaw = toS((mail as any).body_text);
 
-    // cc
     const ccEmail = cfg.fromOverride || undefined;
 
     let queued = 0;
     for (const r of targets as any[]) {
+      const deliveryId = idMap.get(String(r.id)) || "";
       const subject = replaceVars(subjectRaw, {
         NAME: r.name ?? "",
         EMAIL: r.email ?? "",
@@ -263,7 +247,6 @@ export async function POST(req: Request) {
           )}`
         : "";
 
-      // footer（テキストのみ）
       const textMeta = [
         cfg.brandCompany ? `送信者：${cfg.brandCompany}` : "",
         cfg.brandAddress ? `所在地：${cfg.brandAddress}` : "",
@@ -272,21 +255,17 @@ export async function POST(req: Request) {
       ]
         .filter(Boolean)
         .join("\n");
+
       const separator = "------------------------------";
       const textFooter = [separator, textMeta].filter(Boolean).join("\n");
       const text = main ? `${main}\n\n${textFooter}` : textFooter;
 
-      // HTML（見た目は装飾無し、本文そのまま + 1px 開封ピクセル）
-      const deliveryId = idMap.get(String(r.id)) ?? "";
-      const pixelUrl = deliveryId
-        ? `${appUrl}/api/email/open?id=${encodeURIComponent(deliveryId)}`
-        : "";
-      const html =
-        `<div style="white-space:pre-wrap;font:16px/1.6 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111827">` +
-        `${escapeHtml(text)}</div>` +
-        (pixelUrl
-          ? `<img src="${pixelUrl}" alt="" width="1" height="1" style="display:block;max-width:1px;max-height:1px;border:0;outline:none" />`
-          : "");
+      // HTML版（装飾なし・開封ピクセルのみ）
+      const htmlMain = esc(main).replace(/\n/g, "<br />");
+      const pixelUrl = `${appUrl}/api/email/open?t=mail&id=${encodeURIComponent(
+        deliveryId
+      )}`;
+      const html = `${htmlMain}<img src="${pixelUrl}" alt="" width="1" height="1" style="display:block;max-width:1px;max-height:1px;border:0;outline:none;" />`;
 
       const jobId = `mail:${mailId}:rcpt:${r.id}:${Date.now()}`;
       await emailQueue.add(
@@ -295,8 +274,8 @@ export async function POST(req: Request) {
           kind: "direct_email",
           to: String(r.email),
           subject,
-          text, // プレーン本文
-          html, // ただし装飾なし + ピクセル
+          text, // プレーン
+          html, // 装飾なし + ピクセル
           cc: ccEmail,
           tenantId: tenantId ?? undefined,
           unsubscribeToken: (r as any).unsubscribe_token ?? undefined,
@@ -306,12 +285,7 @@ export async function POST(req: Request) {
           brandSupport: cfg.brandSupport,
           attachments: attachList,
         },
-        {
-          jobId,
-          delay,
-          removeOnComplete: 1000,
-          removeOnFail: 1000,
-        }
+        { jobId, delay, removeOnComplete: 1000, removeOnFail: 1000 }
       );
       queued++;
     }
