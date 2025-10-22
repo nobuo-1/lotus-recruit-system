@@ -37,31 +37,33 @@ export default async function MailSchedulesPage() {
 
   const nowISO = new Date().toISOString();
 
-  // 列の別名は「別名:列名」。scheduled_at は schedule_at の別名で受ける
-  let q = supabase
-    .from("mail_schedules")
-    .select(
-      "id, mail_id, scheduled_at:schedule_at, status, created_at, mails(id, name, subject)"
-    )
-    .eq("status", "scheduled")
-    .gte("schedule_at", nowISO) // 未来のみ
-    .order("schedule_at", { ascending: true });
-
-  // tenant フィルタ：tenantId が null の行も拾えるように or で包括
-  if (tenantId) {
-    q = q.or(`tenant_id.eq.${tenantId},tenant_id.is.null`);
-  } else {
-    q = q.is("tenant_id", null);
-  }
-
-  const { data: rows, error } = await q.returns<Row[]>();
-  if (error) {
-    console.error("[mail_schedules:list]", error);
+  // クエリの失敗で SSR が落ちないように try/catch しておく
+  let rows: Row[] = [];
+  try {
+    const { data, error } = await supabase
+      .from("mail_schedules")
+      .select(
+        "id, mail_id, scheduled_at:schedule_at, status, created_at, mails(id, name, subject)"
+      )
+      .eq("status", "scheduled")
+      .gt("schedule_at", nowISO) // 未来のみ
+      .eq("tenant_id", tenantId) // tenant 固定（不確定な OR を避けて安定化）
+      .order("schedule_at", { ascending: true })
+      .returns<Row[]>();
+    if (error) {
+      console.error("[mail_schedules:list]", error);
+    } else {
+      rows = data ?? [];
+    }
+  } catch (e) {
+    console.error("[mail_schedules:list] fatal", e);
+    rows = [];
   }
 
   const isCancelable = (r: Row) =>
     (r.status ?? "").toLowerCase() === "scheduled" &&
     !!r.scheduled_at &&
+    !Number.isNaN(Date.parse(r.scheduled_at)) &&
     Date.parse(r.scheduled_at) > Date.now();
 
   return (
@@ -102,27 +104,26 @@ export default async function MailSchedulesPage() {
             </tr>
           </thead>
           <tbody>
-            {(rows ?? []).map((r) => (
+            {rows.map((r) => (
               <tr key={r.id} className="border-t border-neutral-200">
                 <td className="px-3 py-3">{r.mails?.name ?? ""}</td>
                 <td className="px-3 py-3 text-neutral-600">
                   {r.mails?.subject ?? ""}
                 </td>
                 <td className="px-3 py-3">
-                  {formatJpDateTime(r.scheduled_at)}
+                  {r.scheduled_at ? formatJpDateTime(r.scheduled_at) : "-"}
                 </td>
-                <td className="px-3 py-3">{formatJpDateTime(r.created_at)}</td>
+                <td className="px-3 py-3">
+                  {r.created_at ? formatJpDateTime(r.created_at) : "-"}
+                </td>
                 <td className="px-3 py-3">
                   <div className="flex flex-wrap gap-2">
-                    {/* 詳細リンクは維持 */}
                     <Link
                       href={`/mails/${r.mail_id}`}
                       className="rounded-xl border border-neutral-200 px-3 py-1 hover:bg-neutral-50 whitespace-nowrap"
                     >
                       詳細
                     </Link>
-
-                    {/* キャンセルは fetch POST（ページ遷移なし） */}
                     {isCancelable(r) && (
                       <ScheduleCancelButton
                         kind="mail"
@@ -135,7 +136,7 @@ export default async function MailSchedulesPage() {
                 </td>
               </tr>
             ))}
-            {(rows ?? []).length === 0 && (
+            {rows.length === 0 && (
               <tr>
                 <td
                   colSpan={5}

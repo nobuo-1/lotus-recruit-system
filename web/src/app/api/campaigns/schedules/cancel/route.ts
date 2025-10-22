@@ -5,47 +5,41 @@ export const revalidate = 0;
 
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
-import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { emailQueue } from "@/server/queue";
 
-type Payload = { campaignId: string };
+type Payload =
+  | { scheduleId: string; campaignId?: string }
+  | { id: string; campaignId?: string } // HTML form の name="id"
+  | { campaignId: string };
 
-function nowIso() {
-  return new Date().toISOString();
-}
-
-export async function OPTIONS() {
-  return new NextResponse(null, {
-    status: 204,
-    headers: {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    },
-  });
-}
-export async function GET() {
-  return NextResponse.json({ error: "method not allowed" }, { status: 405 });
-}
-export async function HEAD() {
-  return new NextResponse(null, { status: 405 });
+async function readBody(req: Request): Promise<Record<string, any>> {
+  const ct = req.headers.get("content-type") || "";
+  if (ct.includes("application/json")) {
+    return (await req.json().catch(() => ({}))) as any;
+  }
+  if (
+    ct.includes("application/x-www-form-urlencoded") ||
+    ct.includes("multipart/form-data")
+  ) {
+    const fd = await req.formData();
+    return Object.fromEntries(
+      Array.from(fd.entries()).map(([k, v]) => [
+        k,
+        typeof v === "string" ? v : "",
+      ])
+    );
+  }
+  return {};
 }
 
 export async function POST(req: Request) {
   try {
-    const body = (await req.json().catch(() => ({}))) as Partial<Payload>;
-    const campaignId = String(body.campaignId ?? "");
-    if (!campaignId) {
-      return NextResponse.json(
-        { error: "campaignId is required" },
-        { status: 400 }
-      );
-    }
+    const body = (await readBody(req)) as Payload;
 
     const sb = await supabaseServer();
     const { data: u } = await sb.auth.getUser();
-    if (!u?.user) {
+    if (!u?.user)
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-    }
 
     // tenant
     const { data: prof } = await sb
@@ -55,64 +49,99 @@ export async function POST(req: Request) {
       .maybeSingle();
     const tenantId = (prof?.tenant_id as string | undefined) ?? undefined;
 
-    const admin = supabaseAdmin();
+    const scheduleId = (body as any).scheduleId || (body as any).id || "";
+    let campaignId = (body as any).campaignId || "";
 
-    // 自テナントのキャンペーンか確認
-    const { data: camp, error: ce } = await admin
-      .from("campaigns")
-      .select("id, tenant_id")
-      .eq("id", campaignId)
-      .maybeSingle();
-    if (ce) return NextResponse.json({ error: ce.message }, { status: 400 });
-    if (!camp)
+    // スケジュールID→ campaign_id 解決（email_schedules）
+    if (scheduleId) {
+      const { data: sched, error: se } = await sb
+        .from("email_schedules")
+        .select("id, campaign_id, tenant_id, scheduled_at, status")
+        .eq("id", scheduleId)
+        .maybeSingle();
+      if (se) return NextResponse.json({ error: se.message }, { status: 400 });
+      if (!sched)
+        return NextResponse.json(
+          { error: "schedule not found" },
+          { status: 404 }
+        );
+      if (
+        tenantId &&
+        (sched as any).tenant_id &&
+        (sched as any).tenant_id !== tenantId
+      ) {
+        return NextResponse.json({ error: "forbidden" }, { status: 403 });
+      }
+      campaignId = String(sched.campaign_id);
+    }
+
+    if (!campaignId) {
       return NextResponse.json(
-        { error: "campaign not found" },
-        { status: 404 }
+        { error: "campaignId or scheduleId required" },
+        { status: 400 }
       );
-    if (
-      tenantId &&
-      (camp as any).tenant_id &&
-      (camp as any).tenant_id !== tenantId
-    )
-      return NextResponse.json({ error: "forbidden" }, { status: 403 });
+    }
 
-    const now = nowIso();
+    const nowISO = new Date().toISOString();
 
-    // 1) 未来の scheduled deliveries を削除（予約キャンセル）
-    await admin
+    // ---- email_schedules の該当行を削除 ----
+    if (scheduleId) {
+      await sb.from("email_schedules").delete().eq("id", scheduleId);
+    } else {
+      // campaignId 指定のみ：未来分を全キャンセル
+      await sb
+        .from("email_schedules")
+        .delete()
+        .eq("campaign_id", campaignId)
+        .eq("status", "scheduled")
+        .gt("scheduled_at", nowISO);
+    }
+
+    // ---- deliveries の「予約分」（status=scheduled & 未送信）を削除 ----
+    await sb
       .from("deliveries")
       .delete()
       .eq("campaign_id", campaignId)
       .eq("status", "scheduled")
-      .gte("scheduled_at", now);
+      .is("sent_at", null);
 
-    // 2) campaigns.status を現在の状況に合わせて更新
-    const { count: futureCnt } = await admin
-      .from("deliveries")
-      .select("id", { count: "exact", head: true })
-      .eq("campaign_id", campaignId)
+    // ---- BullMQ 遅延ジョブ除去（jobIdが camp:${campaignId}: …）----
+    try {
+      const delayed = await emailQueue.getJobs(["delayed"]);
+      const targets = delayed.filter((j) =>
+        (j.id || "").startsWith(`camp:${campaignId}:`)
+      );
+      await Promise.all(targets.map((j) => j.remove().catch(() => {})));
+    } catch (e) {
+      console.warn("[campaigns/cancel] queue cleanup skipped:", e);
+    }
+
+    // ---- campaigns.status を整える ----
+    const { data: future } = await sb
+      .from("email_schedules")
+      .select("id")
       .eq("status", "scheduled")
-      .gte("scheduled_at", now);
-
-    const { count: activeCnt } = await admin
-      .from("deliveries")
-      .select("id", { count: "exact", head: true })
       .eq("campaign_id", campaignId)
-      .in("status", ["queued", "processing", "sent"]);
+      .gt("scheduled_at", nowISO);
+    const { data: sentAny } = await sb
+      .from("deliveries")
+      .select("id")
+      .eq("campaign_id", campaignId)
+      .eq("status", "sent")
+      .limit(1);
 
-    const newStatus =
-      (futureCnt ?? 0) > 0
+    const nextStatus =
+      (future?.length ?? 0) > 0
         ? "scheduled"
-        : (activeCnt ?? 0) > 0
+        : (sentAny?.length ?? 0) > 0
         ? "queued"
         : "draft";
-
-    await admin
+    await sb
       .from("campaigns")
-      .update({ status: newStatus })
+      .update({ status: nextStatus })
       .eq("id", campaignId);
 
-    return NextResponse.json({ ok: true, campaignId, newStatus });
+    return NextResponse.json({ ok: true, campaignId, status: nextStatus });
   } catch (e: any) {
     console.error("POST /api/campaigns/schedules/cancel error", e);
     return NextResponse.json(
@@ -120,4 +149,8 @@ export async function POST(req: Request) {
       { status: 500 }
     );
   }
+}
+
+export async function GET() {
+  return NextResponse.json({ error: "method not allowed" }, { status: 405 });
 }
