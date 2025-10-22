@@ -1,8 +1,11 @@
 // web/src/app/mails/schedules/page.tsx
-"use client";
-import React, { useEffect, useMemo, useState } from "react";
+import React from "react";
+export const dynamic = "force-dynamic";
+
 import Link from "next/link";
+import { supabaseServer } from "@/lib/supabaseServer";
 import { formatJpDateTime } from "@/lib/formatDate";
+import ConfirmCancelButton from "@/components/ConfirmCancelButton";
 
 type Row = {
   id: string;
@@ -13,64 +16,51 @@ type Row = {
   mails: { id: string; name: string | null; subject: string | null } | null;
 };
 
-const isFuture = (iso?: string | null) =>
-  !!iso && !Number.isNaN(Date.parse(iso)) && Date.parse(iso) > Date.now();
+export default async function MailSchedulesPage() {
+  const supabase = await supabaseServer();
 
-export default function MailSchedulesPage() {
-  const [rows, setRows] = useState<Row[]>([]);
-  const [msg, setMsg] = useState("");
-
-  async function load() {
-    try {
-      const res = await fetch("/api/mails/schedules/list", {
-        cache: "no-store",
-      });
-      if (!res.ok) {
-        setMsg(`${res.status}: ${await res.text()}`);
-        setRows([]);
-        return;
-      }
-      const j = await res.json();
-      setRows(j?.rows ?? []);
-    } catch (e: any) {
-      setMsg(String(e?.message || e));
-      setRows([]);
-    }
+  const { data: u } = await supabase.auth.getUser();
+  if (!u?.user) {
+    return (
+      <main className="mx-auto max-w-6xl p-6">
+        <p>ログインが必要です</p>
+      </main>
+    );
   }
 
-  useEffect(() => {
-    load();
-  }, []);
+  const { data: prof } = await supabase
+    .from("profiles")
+    .select("tenant_id")
+    .eq("id", u.user.id)
+    .maybeSingle();
+  const tenantId = (prof?.tenant_id as string | undefined) ?? null;
 
-  const filtered = useMemo(
-    () =>
-      (rows ?? []).filter(
-        (r) =>
-          (r.status ?? "").toLowerCase() === "scheduled" &&
-          isFuture(r.scheduled_at)
-      ),
-    [rows]
-  );
+  const nowISO = new Date().toISOString();
 
-  const handleCancel = async (id: string) => {
-    try {
-      const res = await fetch("/api/mails/schedules/cancel", {
-        method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ id }),
-      });
-      if (!res.ok) {
-        setMsg(`キャンセル失敗: ${res.status} ${await res.text()}`);
-      } else {
-        await load();
-      }
-    } catch (e: any) {
-      setMsg(String(e?.message || e));
-    }
-  };
+  let q = supabase
+    .from("mail_schedules")
+    .select(
+      "id, mail_id, scheduled_at:schedule_at, status, created_at, mails(id, name, subject)"
+    )
+    .eq("status", "scheduled")
+    .gte("schedule_at", nowISO)
+    .order("schedule_at", { ascending: true });
+
+  if (tenantId) {
+    q = q.or(`tenant_id.eq.${tenantId},tenant_id.is.null`);
+  } else {
+    q = q.is("tenant_id", null);
+  }
+
+  const { data: rows, error } = await q.returns<Row[]>();
+  if (error) {
+    console.error("[mail_schedules:list]", error);
+  }
 
   const isCancelable = (r: Row) =>
-    (r.status ?? "").toLowerCase() === "scheduled" && isFuture(r.scheduled_at);
+    (r.status ?? "").toLowerCase() === "scheduled" &&
+    !!r.scheduled_at &&
+    Date.parse(r.scheduled_at) > Date.now();
 
   return (
     <main className="mx-auto max-w-6xl p-6">
@@ -110,7 +100,7 @@ export default function MailSchedulesPage() {
             </tr>
           </thead>
           <tbody>
-            {filtered.map((r) => (
+            {(rows ?? []).map((r) => (
               <tr key={r.id} className="border-t border-neutral-200">
                 <td className="px-3 py-3">{r.mails?.name ?? ""}</td>
                 <td className="px-3 py-3 text-neutral-600">
@@ -129,19 +119,19 @@ export default function MailSchedulesPage() {
                       詳細
                     </Link>
                     {isCancelable(r) && (
-                      <button
-                        onClick={() => handleCancel(r.id)}
-                        className="rounded-xl border border-red-300 px-3 py-1 text-red-700 hover:bg-red-50 whitespace-nowrap"
-                        title="この予約をキャンセル"
-                      >
-                        予約をキャンセル
-                      </button>
+                      <ConfirmCancelButton
+                        action="/api/mails/schedules/cancel"
+                        idValue={r.id}
+                        label="予約をキャンセル"
+                        className="rounded-xl border px-3 py-1 whitespace-nowrap border-red-300 text-red-700 hover:bg-red-50"
+                        confirmText="このメール予約をキャンセルします。よろしいですか？"
+                      />
                     )}
                   </div>
                 </td>
               </tr>
             ))}
-            {filtered.length === 0 && (
+            {(rows ?? []).length === 0 && (
               <tr>
                 <td
                   colSpan={5}
@@ -154,12 +144,6 @@ export default function MailSchedulesPage() {
           </tbody>
         </table>
       </div>
-
-      {msg && (
-        <pre className="mt-3 whitespace-pre-wrap text-xs text-neutral-500">
-          {msg}
-        </pre>
-      )}
     </main>
   );
 }

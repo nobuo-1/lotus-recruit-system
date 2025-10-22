@@ -1,86 +1,73 @@
 // web/src/app/email/schedules/page.tsx
-"use client";
-import React, { useEffect, useMemo, useState } from "react";
+import React from "react";
 import Link from "next/link";
 import AppHeader from "@/components/AppHeader";
+import ConfirmCancelButton from "@/components/ConfirmCancelButton";
+import { supabaseServer } from "@/lib/supabaseServer";
 import { formatJpDateTime } from "@/lib/formatDate";
+
+export const dynamic = "force-dynamic";
 
 type Row = {
   id: string;
-  campaign_id?: string | null;
-  campaign_title?: string | null; // 既存API互換
-  name?: string | null; // 新API互換
-  subject?: string | null; // 新API互換
-  scheduled_at: string | null; // ISO
-  status: string | null; // scheduled/queued/sent/cancelled など
-  created_at?: string | null; // 新API互換
+  campaign_id: string;
+  status: string | null;
+  scheduled_at: string | null;
+  created_at: string | null;
+  campaigns: { id: string; name: string | null; subject: string | null } | null;
 };
 
-function label(v: unknown, fb = ""): string {
-  return typeof v === "string" ? v : fb;
-}
-const isFuture = (iso?: string | null) =>
-  !!iso && !Number.isNaN(Date.parse(iso)) && Date.parse(iso) > Date.now();
-
-export default function SchedulesPage() {
-  const [rows, setRows] = useState<Row[]>([]);
-  const [msg, setMsg] = useState("");
-
-  async function load() {
-    try {
-      const res = await fetch("/api/email/schedules", { cache: "no-store" });
-      if (!res.ok) {
-        setMsg(`${res.status}: ${await res.text()}`);
-        setRows([]);
-        return;
-      }
-      const j = await res.json();
-      setRows(j?.rows ?? []);
-    } catch (e: any) {
-      setMsg(String(e?.message || e));
-      setRows([]);
-    }
+export default async function CampaignSchedulesPage() {
+  const sb = await supabaseServer();
+  const { data: u } = await sb.auth.getUser();
+  if (!u?.user) {
+    return (
+      <>
+        <AppHeader showBack />
+        <main className="mx-auto max-w-6xl p-6">ログインが必要です。</main>
+      </>
+    );
   }
 
-  useEffect(() => {
-    load();
-  }, []);
+  const { data: prof } = await sb
+    .from("profiles")
+    .select("tenant_id")
+    .eq("id", u.user.id)
+    .maybeSingle();
+  const tenantId = (prof?.tenant_id as string | undefined) ?? null;
 
-  const filtered = useMemo(
-    () =>
-      (rows ?? []).filter(
-        (r) =>
-          (r.status ?? "").toLowerCase() === "scheduled" &&
-          isFuture(r.scheduled_at)
-      ),
-    [rows]
-  );
+  const nowISO = new Date().toISOString();
 
-  const canCancel = (r: Row) =>
-    (r.status ?? "").toLowerCase() === "scheduled" && isFuture(r.scheduled_at);
+  // campaigns を結合して件名/名前を取得、未来の scheduled のみ
+  let q = sb
+    .from("email_schedules")
+    .select(
+      "id, campaign_id, status, scheduled_at, created_at, campaigns(id, name, subject)"
+    )
+    .eq("status", "scheduled")
+    .gte("scheduled_at", nowISO)
+    .order("scheduled_at", { ascending: true });
 
-  const handleCancel = async (id: string) => {
-    try {
-      const res = await fetch("/api/campaigns/schedules/cancel", {
-        method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ id }),
-      });
-      if (!res.ok) {
-        setMsg(`キャンセル失敗: ${res.status} ${await res.text()}`);
-      } else {
-        await load();
-      }
-    } catch (e: any) {
-      setMsg(String(e?.message || e));
-    }
-  };
+  // tenant フィルタ（email_schedules に tenant カラムがある場合は条件追加、無い場合は campaigns 経由で担保）
+  if (tenantId) {
+    q = q.eq("tenant_id", tenantId);
+  }
+
+  const { data: rows, error } = await q.returns<Row[]>();
+  if (error) {
+    console.error("[email_schedules:list]", error);
+  }
+
+  const isCancelable = (r: Row) =>
+    (r.status ?? "").toLowerCase() === "scheduled" &&
+    !!r.scheduled_at &&
+    Date.parse(r.scheduled_at) > Date.now();
 
   return (
     <>
       <AppHeader showBack />
       <main className="mx-auto max-w-6xl p-6">
-        {/* ヘッダー行：スマホは縦積み */}
+        {/* ヘッダー */}
         <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
           <div>
             <h1 className="whitespace-nowrap text-2xl font-semibold text-neutral-900">
@@ -110,44 +97,46 @@ export default function SchedulesPage() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((r) => {
-                const title = label(r.name ?? r.campaign_title, "");
-                const subject = label((r as any).subject, "");
-                const created = (r as any).created_at as string | null;
-
-                return (
-                  <tr key={r.id} className="border-t border-neutral-200">
-                    <td className="px-3 py-3">{title}</td>
-                    <td className="px-3 py-3 text-neutral-600">{subject}</td>
-                    <td className="px-3 py-3">
-                      {formatJpDateTime(r.scheduled_at)}
-                    </td>
-                    <td className="px-3 py-3">{formatJpDateTime(created)}</td>
-                    <td className="px-3 py-3">
-                      <div className="flex flex-wrap gap-2">
-                        <Link
-                          href={
-                            r.campaign_id ? `/campaigns/${r.campaign_id}` : "#"
-                          }
-                          className="rounded-xl border border-neutral-200 px-3 py-1 hover:bg-neutral-50 whitespace-nowrap"
-                        >
-                          詳細
-                        </Link>
-                        {canCancel(r) && (
-                          <button
-                            onClick={() => handleCancel(r.id)}
-                            className="rounded-xl border border-red-300 px-3 py-1 text-red-700 hover:bg-red-50 whitespace-nowrap"
-                            title="この予約をキャンセル"
-                          >
-                            予約をキャンセル
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-              {filtered.length === 0 && (
+              {(rows ?? []).map((r) => (
+                <tr key={r.id} className="border-t border-neutral-200">
+                  <td className="px-3 py-3">
+                    {r.campaigns?.name ?? "(無題キャンペーン)"}
+                  </td>
+                  <td className="px-3 py-3 text-neutral-600">
+                    {r.campaigns?.subject ?? "-"}
+                  </td>
+                  <td className="px-3 py-3">
+                    {formatJpDateTime(r.scheduled_at)}
+                  </td>
+                  <td className="px-3 py-3">
+                    {formatJpDateTime(r.created_at)}
+                  </td>
+                  <td className="px-3 py-3">
+                    <div className="flex flex-wrap gap-2">
+                      <Link
+                        href={
+                          r.campaign_id
+                            ? `/campaigns/${r.campaign_id}`
+                            : "/campaigns"
+                        }
+                        className="rounded-xl border border-neutral-200 px-3 py-1 hover:bg-neutral-50 whitespace-nowrap"
+                      >
+                        詳細
+                      </Link>
+                      {isCancelable(r) && (
+                        <ConfirmCancelButton
+                          action="/api/campaigns/schedules/cancel"
+                          idValue={r.id}
+                          label="予約をキャンセル"
+                          className="rounded-xl border px-3 py-1 whitespace-nowrap border-red-300 text-red-700 hover:bg-red-50"
+                          confirmText="このキャンペーン予約をキャンセルします。よろしいですか？"
+                        />
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {(rows ?? []).length === 0 && (
                 <tr>
                   <td
                     colSpan={5}
@@ -160,8 +149,6 @@ export default function SchedulesPage() {
             </tbody>
           </table>
         </div>
-
-        {msg && <pre className="mt-3 text-xs text-neutral-500">{msg}</pre>}
       </main>
     </>
   );

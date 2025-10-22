@@ -6,129 +6,88 @@ export const revalidate = 0;
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
 
-function wantsHtml(req: Request) {
-  const accept = req.headers.get("accept") || "";
-  return accept.includes("text/html");
+async function readId(req: Request) {
+  const ct = req.headers.get("content-type") || "";
+  if (
+    ct.includes("application/x-www-form-urlencoded") ||
+    ct.includes("multipart/form-data")
+  ) {
+    const fd = await req.formData();
+    return String(fd.get("id") || fd.get("scheduleId") || "");
+  }
+  const j = await req.json().catch(() => ({} as any));
+  return String(j.id || j.scheduleId || "");
 }
 
 export async function POST(req: Request) {
-  try {
-    const sb = await supabaseServer();
-    const { data: u } = await sb.auth.getUser();
-    if (!u?.user) {
-      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-    }
+  const sb = await supabaseServer();
+  const { data: u } = await sb.auth.getUser();
+  if (!u?.user)
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
-    // id / scheduleId / mailId どれでも受け付け
-    let scheduleId: string | null = null;
-    let mailId: string | null = null;
+  const scheduleId = await readId(req);
+  if (!scheduleId)
+    return NextResponse.json({ error: "scheduleId required" }, { status: 400 });
 
-    const ct = req.headers.get("content-type") || "";
-    if (ct.includes("application/json")) {
-      const j = await req.json().catch(() => ({}));
-      scheduleId = j?.id || j?.scheduleId || null;
-      mailId = j?.mailId || null;
-    } else {
-      const fd = await req.formData();
-      scheduleId =
-        (fd.get("id") as string) || (fd.get("scheduleId") as string) || null;
-      mailId = (fd.get("mailId") as string) || null;
-    }
+  const { data: prof } = await sb
+    .from("profiles")
+    .select("tenant_id")
+    .eq("id", u.user.id)
+    .maybeSingle();
+  const tenantId = (prof?.tenant_id as string | undefined) ?? undefined;
 
-    if (!scheduleId && !mailId) {
-      return NextResponse.json(
-        { error: "mailId or scheduleId required" },
-        { status: 400 }
-      );
-    }
+  // 対象スケジュール取得
+  const { data: sch, error: e1 } = await sb
+    .from("mail_schedules")
+    .select("id, mail_id, status, schedule_at, tenant_id")
+    .eq("id", scheduleId)
+    .maybeSingle();
+  if (e1 || !sch)
+    return NextResponse.json({ error: "not found" }, { status: 404 });
+  if (tenantId && sch.tenant_id && sch.tenant_id !== tenantId) {
+    return NextResponse.json({ error: "forbidden" }, { status: 403 });
+  }
+  const mailId = String(sch.mail_id);
 
-    // スケジュール特定
-    let schedule: any = null;
-    if (scheduleId) {
-      const { data: s, error: se } = await sb
-        .from("mail_schedules")
-        .select("id, mail_id, schedule_at, status, tenant_id")
-        .eq("id", scheduleId)
-        .maybeSingle();
-      if (se) return NextResponse.json({ error: se.message }, { status: 500 });
-      schedule = s;
-    } else if (mailId) {
-      const { data: s, error: se } = await sb
-        .from("mail_schedules")
-        .select("id, mail_id, schedule_at, status, tenant_id")
-        .eq("mail_id", mailId)
-        .eq("status", "scheduled")
-        .order("schedule_at", { ascending: true })
-        .limit(1)
-        .maybeSingle();
-      if (se) return NextResponse.json({ error: se.message }, { status: 500 });
-      schedule = s;
-    }
+  // 1) mail_schedules 削除
+  await sb.from("mail_schedules").delete().eq("id", scheduleId);
 
-    if (!schedule) {
-      if (wantsHtml(req)) {
-        return NextResponse.redirect(new URL("/mails/schedules", req.url));
-      }
-      return NextResponse.json({ ok: true, skipped: true });
-    }
+  // 2) mail_deliveries の未送信系も削除
+  await sb
+    .from("mail_deliveries")
+    .delete()
+    .eq("mail_id", mailId)
+    .in("status", ["scheduled", "queued", "processing"]);
 
-    // 未来・scheduled のみ対象
-    const isFuture =
-      schedule.schedule_at &&
-      !Number.isNaN(Date.parse(schedule.schedule_at)) &&
-      Date.parse(schedule.schedule_at) > Date.now();
-    if (String(schedule.status).toLowerCase() !== "scheduled" || !isFuture) {
-      if (wantsHtml(req)) {
-        return NextResponse.redirect(new URL("/mails/schedules", req.url));
-      }
-      return NextResponse.json({ ok: true, skipped: true });
-    }
-
-    const targetMailId = String(schedule.mail_id);
-
-    // deliveries（未送信）削除
-    await sb
-      .from("mail_deliveries")
-      .delete()
-      .eq("mail_id", targetMailId)
-      .in("status", ["scheduled", "queued"]);
-
-    // スケジュール行削除
-    await sb.from("mail_schedules").delete().eq("id", schedule.id);
-
-    // mails の status を整合
-    const nowISO = new Date().toISOString();
+  // 3) mails.status 更新
+  let newStatus = "draft";
+  {
     const { count: futureCount } = await sb
       .from("mail_schedules")
-      .select("*", { count: "exact", head: true })
-      .eq("mail_id", targetMailId)
-      .eq("status", "scheduled")
-      .gte("schedule_at", nowISO);
+      .select("id", { count: "exact", head: true })
+      .eq("mail_id", mailId)
+      .eq("status", "scheduled");
+    if ((futureCount ?? 0) > 0) newStatus = "scheduled";
 
-    const hasFuture = (futureCount ?? 0) > 0;
+    const { count: queuedCount } = await sb
+      .from("mail_deliveries")
+      .select("id", { count: "exact", head: true })
+      .eq("mail_id", mailId)
+      .in("status", ["queued", "processing"]);
+    if ((queuedCount ?? 0) > 0) newStatus = "queued";
 
     const { count: sentCount } = await sb
       .from("mail_deliveries")
-      .select("*", { count: "exact", head: true })
-      .eq("mail_id", targetMailId)
+      .select("id", { count: "exact", head: true })
+      .eq("mail_id", mailId)
       .eq("status", "sent");
-
-    const newStatus = hasFuture
-      ? "scheduled"
-      : (sentCount ?? 0) > 0
-      ? "queued"
-      : "draft";
-
-    await sb.from("mails").update({ status: newStatus }).eq("id", targetMailId);
-
-    if (wantsHtml(req)) {
-      return NextResponse.redirect(new URL("/mails/schedules", req.url));
-    }
-    return NextResponse.json({ ok: true });
-  } catch (e: any) {
-    return NextResponse.json(
-      { error: e?.message || "server error" },
-      { status: 500 }
-    );
+    if ((sentCount ?? 0) > 0 && newStatus === "draft") newStatus = "sent";
   }
+  await sb.from("mails").update({ status: newStatus }).eq("id", mailId);
+
+  return NextResponse.redirect(new URL("/mails/schedules?ok=1", req.url), 303);
+}
+
+export async function GET(req: Request) {
+  return NextResponse.redirect(new URL("/mails/schedules", req.url), 303);
 }
