@@ -5,152 +5,133 @@ export const revalidate = 0;
 
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
-import { emailQueue } from "@/server/queue";
 
-type Payload =
-  | { scheduleId: string; campaignId?: string }
-  | { id: string; campaignId?: string } // HTML form の name="id"
-  | { campaignId: string };
-
-async function readBody(req: Request): Promise<Record<string, any>> {
-  const ct = req.headers.get("content-type") || "";
-  if (ct.includes("application/json")) {
-    return (await req.json().catch(() => ({}))) as any;
-  }
-  if (
-    ct.includes("application/x-www-form-urlencoded") ||
-    ct.includes("multipart/form-data")
-  ) {
-    const fd = await req.formData();
-    return Object.fromEntries(
-      Array.from(fd.entries()).map(([k, v]) => [
-        k,
-        typeof v === "string" ? v : "",
-      ])
-    );
-  }
-  return {};
+function wantsHtml(req: Request) {
+  const accept = req.headers.get("accept") || "";
+  return accept.includes("text/html");
 }
 
 export async function POST(req: Request) {
   try {
-    const body = (await readBody(req)) as Payload;
-
     const sb = await supabaseServer();
     const { data: u } = await sb.auth.getUser();
-    if (!u?.user)
+    if (!u?.user) {
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-
-    // tenant
-    const { data: prof } = await sb
-      .from("profiles")
-      .select("tenant_id")
-      .eq("id", u.user.id)
-      .maybeSingle();
-    const tenantId = (prof?.tenant_id as string | undefined) ?? undefined;
-
-    const scheduleId = (body as any).scheduleId || (body as any).id || "";
-    let campaignId = (body as any).campaignId || "";
-
-    // スケジュールID→ campaign_id 解決（email_schedules）
-    if (scheduleId) {
-      const { data: sched, error: se } = await sb
-        .from("email_schedules")
-        .select("id, campaign_id, tenant_id, scheduled_at, status")
-        .eq("id", scheduleId)
-        .maybeSingle();
-      if (se) return NextResponse.json({ error: se.message }, { status: 400 });
-      if (!sched)
-        return NextResponse.json(
-          { error: "schedule not found" },
-          { status: 404 }
-        );
-      if (
-        tenantId &&
-        (sched as any).tenant_id &&
-        (sched as any).tenant_id !== tenantId
-      ) {
-        return NextResponse.json({ error: "forbidden" }, { status: 403 });
-      }
-      campaignId = String(sched.campaign_id);
     }
 
-    if (!campaignId) {
+    // id / scheduleId / campaignId を受ける
+    let scheduleId: string | null = null;
+    let campaignId: string | null = null;
+
+    const ct = req.headers.get("content-type") || "";
+    if (ct.includes("application/json")) {
+      const j = await req.json().catch(() => ({}));
+      scheduleId = j?.id || j?.scheduleId || null;
+      campaignId = j?.campaignId || null;
+    } else {
+      const fd = await req.formData();
+      scheduleId =
+        (fd.get("id") as string) || (fd.get("scheduleId") as string) || null;
+      campaignId = (fd.get("campaignId") as string) || null;
+    }
+
+    if (!scheduleId && !campaignId) {
       return NextResponse.json(
         { error: "campaignId or scheduleId required" },
         { status: 400 }
       );
     }
 
-    const nowISO = new Date().toISOString();
-
-    // ---- email_schedules の該当行を削除 ----
+    // email_schedules から対象特定（campaign 側）
+    let schedule: any = null;
     if (scheduleId) {
-      await sb.from("email_schedules").delete().eq("id", scheduleId);
-    } else {
-      // campaignId 指定のみ：未来分を全キャンセル
-      await sb
+      const { data: s, error: se } = await sb
         .from("email_schedules")
-        .delete()
+        .select("id, campaign_id, scheduled_at, status")
+        .eq("id", scheduleId)
+        .maybeSingle();
+      if (se) return NextResponse.json({ error: se.message }, { status: 500 });
+      schedule = s;
+    } else if (campaignId) {
+      const { data: s, error: se } = await sb
+        .from("email_schedules")
+        .select("id, campaign_id, scheduled_at, status")
         .eq("campaign_id", campaignId)
         .eq("status", "scheduled")
-        .gt("scheduled_at", nowISO);
+        .order("scheduled_at", { ascending: true })
+        .limit(1)
+        .maybeSingle();
+      if (se) return NextResponse.json({ error: se.message }, { status: 500 });
+      schedule = s;
     }
 
-    // ---- deliveries の「予約分」（status=scheduled & 未送信）を削除 ----
+    if (!schedule) {
+      if (wantsHtml(req)) {
+        return NextResponse.redirect(new URL("/email/schedules", req.url));
+      }
+      return NextResponse.json({ ok: true, skipped: true });
+    }
+
+    const isFuture =
+      schedule.scheduled_at &&
+      !Number.isNaN(Date.parse(schedule.scheduled_at)) &&
+      Date.parse(schedule.scheduled_at) > Date.now();
+
+    if (String(schedule.status).toLowerCase() !== "scheduled" || !isFuture) {
+      if (wantsHtml(req)) {
+        return NextResponse.redirect(new URL("/email/schedules", req.url));
+      }
+      return NextResponse.json({ ok: true, skipped: true });
+    }
+
+    const targetCampaignId = String(schedule.campaign_id);
+
+    // deliveries（未送信）削除
     await sb
       .from("deliveries")
       .delete()
-      .eq("campaign_id", campaignId)
-      .eq("status", "scheduled")
-      .is("sent_at", null);
+      .eq("campaign_id", targetCampaignId)
+      .in("status", ["scheduled", "queued"]);
 
-    // ---- BullMQ 遅延ジョブ除去（jobIdが camp:${campaignId}: …）----
-    try {
-      const delayed = await emailQueue.getJobs(["delayed"]);
-      const targets = delayed.filter((j) =>
-        (j.id || "").startsWith(`camp:${campaignId}:`)
-      );
-      await Promise.all(targets.map((j) => j.remove().catch(() => {})));
-    } catch (e) {
-      console.warn("[campaigns/cancel] queue cleanup skipped:", e);
-    }
+    // email_schedules 行削除
+    await sb.from("email_schedules").delete().eq("id", schedule.id);
 
-    // ---- campaigns.status を整える ----
-    const { data: future } = await sb
+    // campaigns の status 調整
+    const nowISO = new Date().toISOString();
+    const { count: futureCount } = await sb
       .from("email_schedules")
-      .select("id")
+      .select("*", { count: "exact", head: true })
+      .eq("campaign_id", targetCampaignId)
       .eq("status", "scheduled")
-      .eq("campaign_id", campaignId)
-      .gt("scheduled_at", nowISO);
-    const { data: sentAny } = await sb
-      .from("deliveries")
-      .select("id")
-      .eq("campaign_id", campaignId)
-      .eq("status", "sent")
-      .limit(1);
+      .gte("scheduled_at", nowISO);
 
-    const nextStatus =
-      (future?.length ?? 0) > 0
-        ? "scheduled"
-        : (sentAny?.length ?? 0) > 0
-        ? "queued"
-        : "draft";
+    const hasFuture = (futureCount ?? 0) > 0;
+
+    const { count: sentCount } = await sb
+      .from("deliveries")
+      .select("*", { count: "exact", head: true })
+      .eq("campaign_id", targetCampaignId)
+      .eq("status", "sent");
+
+    const newStatus = hasFuture
+      ? "scheduled"
+      : (sentCount ?? 0) > 0
+      ? "queued"
+      : "draft";
+
     await sb
       .from("campaigns")
-      .update({ status: nextStatus })
-      .eq("id", campaignId);
+      .update({ status: newStatus })
+      .eq("id", targetCampaignId);
 
-    return NextResponse.json({ ok: true, campaignId, status: nextStatus });
+    if (wantsHtml(req)) {
+      return NextResponse.redirect(new URL("/email/schedules", req.url));
+    }
+    return NextResponse.json({ ok: true });
   } catch (e: any) {
-    console.error("POST /api/campaigns/schedules/cancel error", e);
     return NextResponse.json(
       { error: e?.message || "server error" },
       { status: 500 }
     );
   }
-}
-
-export async function GET() {
-  return NextResponse.json({ error: "method not allowed" }, { status: 405 });
 }

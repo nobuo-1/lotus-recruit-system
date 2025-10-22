@@ -5,151 +5,130 @@ export const revalidate = 0;
 
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
-import { emailQueue } from "@/server/queue";
 
-type Payload =
-  | { scheduleId: string; mailId?: string }
-  | { id: string; mailId?: string } // HTML form の name="id"
-  | { mailId: string };
-
-async function readBody(req: Request): Promise<Record<string, any>> {
-  const ct = req.headers.get("content-type") || "";
-  if (ct.includes("application/json")) {
-    return (await req.json().catch(() => ({}))) as any;
-  }
-  if (
-    ct.includes("application/x-www-form-urlencoded") ||
-    ct.includes("multipart/form-data")
-  ) {
-    const fd = await req.formData();
-    return Object.fromEntries(
-      Array.from(fd.entries()).map(([k, v]) => [
-        k,
-        typeof v === "string" ? v : "",
-      ])
-    );
-  }
-  return {};
+function wantsHtml(req: Request) {
+  const accept = req.headers.get("accept") || "";
+  return accept.includes("text/html");
 }
 
 export async function POST(req: Request) {
   try {
-    const body = (await readBody(req)) as Payload;
-
     const sb = await supabaseServer();
     const { data: u } = await sb.auth.getUser();
-    if (!u?.user)
+    if (!u?.user) {
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-
-    // tenant
-    const { data: prof } = await sb
-      .from("profiles")
-      .select("tenant_id")
-      .eq("id", u.user.id)
-      .maybeSingle();
-    const tenantId = (prof?.tenant_id as string | undefined) ?? undefined;
-
-    const scheduleId = (body as any).scheduleId || (body as any).id || "";
-    let mailId = (body as any).mailId || "";
-
-    // スケジュールIDから mail_id を引く
-    if (scheduleId) {
-      const { data: sched, error: se } = await sb
-        .from("mail_schedules")
-        .select("id, mail_id, tenant_id, schedule_at, status")
-        .eq("id", scheduleId)
-        .maybeSingle();
-      if (se) return NextResponse.json({ error: se.message }, { status: 400 });
-      if (!sched)
-        return NextResponse.json(
-          { error: "schedule not found" },
-          { status: 404 }
-        );
-      if (
-        tenantId &&
-        (sched as any).tenant_id &&
-        (sched as any).tenant_id !== tenantId
-      ) {
-        return NextResponse.json({ error: "forbidden" }, { status: 403 });
-      }
-      mailId = String(sched.mail_id);
     }
 
-    if (!mailId) {
+    // id / scheduleId / mailId どれでも受け付け
+    let scheduleId: string | null = null;
+    let mailId: string | null = null;
+
+    const ct = req.headers.get("content-type") || "";
+    if (ct.includes("application/json")) {
+      const j = await req.json().catch(() => ({}));
+      scheduleId = j?.id || j?.scheduleId || null;
+      mailId = j?.mailId || null;
+    } else {
+      const fd = await req.formData();
+      scheduleId =
+        (fd.get("id") as string) || (fd.get("scheduleId") as string) || null;
+      mailId = (fd.get("mailId") as string) || null;
+    }
+
+    if (!scheduleId && !mailId) {
       return NextResponse.json(
         { error: "mailId or scheduleId required" },
         { status: 400 }
       );
     }
 
-    // ---- DB 削除（future 予約）----
-    const nowISO = new Date().toISOString();
-    // mail_schedules 削除
+    // スケジュール特定
+    let schedule: any = null;
     if (scheduleId) {
-      await sb.from("mail_schedules").delete().eq("id", scheduleId);
-    } else {
-      // mailId 指定のみの場合は将来分を全キャンセル
-      await sb
+      const { data: s, error: se } = await sb
         .from("mail_schedules")
-        .delete()
+        .select("id, mail_id, schedule_at, status, tenant_id")
+        .eq("id", scheduleId)
+        .maybeSingle();
+      if (se) return NextResponse.json({ error: se.message }, { status: 500 });
+      schedule = s;
+    } else if (mailId) {
+      const { data: s, error: se } = await sb
+        .from("mail_schedules")
+        .select("id, mail_id, schedule_at, status, tenant_id")
         .eq("mail_id", mailId)
         .eq("status", "scheduled")
-        .gt("schedule_at", nowISO);
+        .order("schedule_at", { ascending: true })
+        .limit(1)
+        .maybeSingle();
+      if (se) return NextResponse.json({ error: se.message }, { status: 500 });
+      schedule = s;
     }
 
-    // deliveries の「予約分」を削除（status=scheduled & 未送信）
+    if (!schedule) {
+      if (wantsHtml(req)) {
+        return NextResponse.redirect(new URL("/mails/schedules", req.url));
+      }
+      return NextResponse.json({ ok: true, skipped: true });
+    }
+
+    // 未来・scheduled のみ対象
+    const isFuture =
+      schedule.schedule_at &&
+      !Number.isNaN(Date.parse(schedule.schedule_at)) &&
+      Date.parse(schedule.schedule_at) > Date.now();
+    if (String(schedule.status).toLowerCase() !== "scheduled" || !isFuture) {
+      if (wantsHtml(req)) {
+        return NextResponse.redirect(new URL("/mails/schedules", req.url));
+      }
+      return NextResponse.json({ ok: true, skipped: true });
+    }
+
+    const targetMailId = String(schedule.mail_id);
+
+    // deliveries（未送信）削除
     await sb
       .from("mail_deliveries")
       .delete()
-      .eq("mail_id", mailId)
-      .eq("status", "scheduled")
-      .is("sent_at", null);
+      .eq("mail_id", targetMailId)
+      .in("status", ["scheduled", "queued"]);
 
-    // ---- BullMQ の遅延ジョブを除去（jobIdが mail:${mailId}: で始まる）----
-    try {
-      const delayed = await emailQueue.getJobs(["delayed"]);
-      const targets = delayed.filter((j) =>
-        (j.id || "").startsWith(`mail:${mailId}:`)
-      );
-      await Promise.all(targets.map((j) => j.remove().catch(() => {})));
-    } catch (e) {
-      // キュー未設定でも落ちないように握りつぶす
-      console.warn("[mails/cancel] queue cleanup skipped:", e);
-    }
+    // スケジュール行削除
+    await sb.from("mail_schedules").delete().eq("id", schedule.id);
 
-    // ---- mails.status を整える ----
-    const { data: future } = await sb
+    // mails の status を整合
+    const nowISO = new Date().toISOString();
+    const { count: futureCount } = await sb
       .from("mail_schedules")
-      .select("id")
+      .select("*", { count: "exact", head: true })
+      .eq("mail_id", targetMailId)
       .eq("status", "scheduled")
-      .eq("mail_id", mailId)
-      .gt("schedule_at", nowISO);
-    const { data: sentAny } = await sb
+      .gte("schedule_at", nowISO);
+
+    const hasFuture = (futureCount ?? 0) > 0;
+
+    const { count: sentCount } = await sb
       .from("mail_deliveries")
-      .select("id")
-      .eq("mail_id", mailId)
-      .eq("status", "sent")
-      .limit(1);
+      .select("*", { count: "exact", head: true })
+      .eq("mail_id", targetMailId)
+      .eq("status", "sent");
 
-    const nextStatus =
-      (future?.length ?? 0) > 0
-        ? "scheduled"
-        : (sentAny?.length ?? 0) > 0
-        ? "queued"
-        : "draft";
-    await sb.from("mails").update({ status: nextStatus }).eq("id", mailId);
+    const newStatus = hasFuture
+      ? "scheduled"
+      : (sentCount ?? 0) > 0
+      ? "queued"
+      : "draft";
 
-    return NextResponse.json({ ok: true, mailId, status: nextStatus });
+    await sb.from("mails").update({ status: newStatus }).eq("id", targetMailId);
+
+    if (wantsHtml(req)) {
+      return NextResponse.redirect(new URL("/mails/schedules", req.url));
+    }
+    return NextResponse.json({ ok: true });
   } catch (e: any) {
-    console.error("POST /api/mails/schedules/cancel error", e);
     return NextResponse.json(
       { error: e?.message || "server error" },
       { status: 500 }
     );
   }
-}
-
-export async function GET() {
-  // 直接アクセス時のエラーを防ぐ（UI遷移で飛ばないよう実装済みだが保険）
-  return NextResponse.json({ error: "method not allowed" }, { status: 405 });
 }

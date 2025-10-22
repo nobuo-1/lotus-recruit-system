@@ -1,11 +1,8 @@
 // web/src/app/mails/schedules/page.tsx
-import React from "react";
-export const dynamic = "force-dynamic";
-
+"use client";
+import React, { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { supabaseServer } from "@/lib/supabaseServer";
 import { formatJpDateTime } from "@/lib/formatDate";
-import ScheduleCancelButton from "@/components/ScheduleCancelButton";
 
 type Row = {
   id: string;
@@ -16,55 +13,64 @@ type Row = {
   mails: { id: string; name: string | null; subject: string | null } | null;
 };
 
-export default async function MailSchedulesPage() {
-  const supabase = await supabaseServer();
+const isFuture = (iso?: string | null) =>
+  !!iso && !Number.isNaN(Date.parse(iso)) && Date.parse(iso) > Date.now();
 
-  const { data: u } = await supabase.auth.getUser();
-  if (!u?.user) {
-    return (
-      <main className="mx-auto max-w-6xl p-6">
-        <p>ログインが必要です</p>
-      </main>
-    );
-  }
+export default function MailSchedulesPage() {
+  const [rows, setRows] = useState<Row[]>([]);
+  const [msg, setMsg] = useState("");
 
-  const { data: prof } = await supabase
-    .from("profiles")
-    .select("tenant_id")
-    .eq("id", u.user.id)
-    .maybeSingle();
-  const tenantId = (prof?.tenant_id as string | undefined) ?? null;
-
-  const nowISO = new Date().toISOString();
-
-  // クエリの失敗で SSR が落ちないように try/catch しておく
-  let rows: Row[] = [];
-  try {
-    const { data, error } = await supabase
-      .from("mail_schedules")
-      .select(
-        "id, mail_id, scheduled_at:schedule_at, status, created_at, mails(id, name, subject)"
-      )
-      .eq("status", "scheduled")
-      .gt("schedule_at", nowISO) // 未来のみ
-      .eq("tenant_id", tenantId) // tenant 固定（不確定な OR を避けて安定化）
-      .order("schedule_at", { ascending: true })
-      .returns<Row[]>();
-    if (error) {
-      console.error("[mail_schedules:list]", error);
-    } else {
-      rows = data ?? [];
+  async function load() {
+    try {
+      const res = await fetch("/api/mails/schedules/list", {
+        cache: "no-store",
+      });
+      if (!res.ok) {
+        setMsg(`${res.status}: ${await res.text()}`);
+        setRows([]);
+        return;
+      }
+      const j = await res.json();
+      setRows(j?.rows ?? []);
+    } catch (e: any) {
+      setMsg(String(e?.message || e));
+      setRows([]);
     }
-  } catch (e) {
-    console.error("[mail_schedules:list] fatal", e);
-    rows = [];
   }
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  const filtered = useMemo(
+    () =>
+      (rows ?? []).filter(
+        (r) =>
+          (r.status ?? "").toLowerCase() === "scheduled" &&
+          isFuture(r.scheduled_at)
+      ),
+    [rows]
+  );
+
+  const handleCancel = async (id: string) => {
+    try {
+      const res = await fetch("/api/mails/schedules/cancel", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ id }),
+      });
+      if (!res.ok) {
+        setMsg(`キャンセル失敗: ${res.status} ${await res.text()}`);
+      } else {
+        await load();
+      }
+    } catch (e: any) {
+      setMsg(String(e?.message || e));
+    }
+  };
 
   const isCancelable = (r: Row) =>
-    (r.status ?? "").toLowerCase() === "scheduled" &&
-    !!r.scheduled_at &&
-    !Number.isNaN(Date.parse(r.scheduled_at)) &&
-    Date.parse(r.scheduled_at) > Date.now();
+    (r.status ?? "").toLowerCase() === "scheduled" && isFuture(r.scheduled_at);
 
   return (
     <main className="mx-auto max-w-6xl p-6">
@@ -104,18 +110,16 @@ export default async function MailSchedulesPage() {
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => (
+            {filtered.map((r) => (
               <tr key={r.id} className="border-t border-neutral-200">
                 <td className="px-3 py-3">{r.mails?.name ?? ""}</td>
                 <td className="px-3 py-3 text-neutral-600">
                   {r.mails?.subject ?? ""}
                 </td>
                 <td className="px-3 py-3">
-                  {r.scheduled_at ? formatJpDateTime(r.scheduled_at) : "-"}
+                  {formatJpDateTime(r.scheduled_at)}
                 </td>
-                <td className="px-3 py-3">
-                  {r.created_at ? formatJpDateTime(r.created_at) : "-"}
-                </td>
+                <td className="px-3 py-3">{formatJpDateTime(r.created_at)}</td>
                 <td className="px-3 py-3">
                   <div className="flex flex-wrap gap-2">
                     <Link
@@ -125,18 +129,19 @@ export default async function MailSchedulesPage() {
                       詳細
                     </Link>
                     {isCancelable(r) && (
-                      <ScheduleCancelButton
-                        kind="mail"
-                        scheduleId={r.id}
-                        mailId={r.mail_id}
-                        onDone={() => window.location.reload()}
-                      />
+                      <button
+                        onClick={() => handleCancel(r.id)}
+                        className="rounded-xl border border-red-300 px-3 py-1 text-red-700 hover:bg-red-50 whitespace-nowrap"
+                        title="この予約をキャンセル"
+                      >
+                        予約をキャンセル
+                      </button>
                     )}
                   </div>
                 </td>
               </tr>
             ))}
-            {rows.length === 0 && (
+            {filtered.length === 0 && (
               <tr>
                 <td
                   colSpan={5}
@@ -149,6 +154,12 @@ export default async function MailSchedulesPage() {
           </tbody>
         </table>
       </div>
+
+      {msg && (
+        <pre className="mt-3 whitespace-pre-wrap text-xs text-neutral-500">
+          {msg}
+        </pre>
+      )}
     </main>
   );
 }

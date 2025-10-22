@@ -4,7 +4,6 @@ import React, { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import AppHeader from "@/components/AppHeader";
 import { formatJpDateTime } from "@/lib/formatDate";
-import ScheduleCancelButton from "@/components/ScheduleCancelButton";
 
 type Row = {
   id: string;
@@ -27,23 +26,24 @@ export default function SchedulesPage() {
   const [rows, setRows] = useState<Row[]>([]);
   const [msg, setMsg] = useState("");
 
-  useEffect(() => {
-    (async () => {
-      try {
-        // 既存エンドポイントを踏襲（返却に subject/created_at が無い場合は空表示）
-        const res = await fetch("/api/email/schedules", { cache: "no-store" });
-        if (!res.ok) {
-          setMsg(`${res.status}: ${await res.text()}`);
-          setRows([]);
-          return;
-        }
-        const j = await res.json();
-        setRows(j?.rows ?? []);
-      } catch (e: any) {
-        setMsg(String(e?.message || e));
+  async function load() {
+    try {
+      const res = await fetch("/api/email/schedules", { cache: "no-store" });
+      if (!res.ok) {
+        setMsg(`${res.status}: ${await res.text()}`);
         setRows([]);
+        return;
       }
-    })();
+      const j = await res.json();
+      setRows(j?.rows ?? []);
+    } catch (e: any) {
+      setMsg(String(e?.message || e));
+      setRows([]);
+    }
+  }
+
+  useEffect(() => {
+    load();
   }, []);
 
   const filtered = useMemo(
@@ -58,6 +58,23 @@ export default function SchedulesPage() {
 
   const canCancel = (r: Row) =>
     (r.status ?? "").toLowerCase() === "scheduled" && isFuture(r.scheduled_at);
+
+  const handleCancel = async (id: string) => {
+    try {
+      const res = await fetch("/api/campaigns/schedules/cancel", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ id }),
+      });
+      if (!res.ok) {
+        setMsg(`キャンセル失敗: ${res.status} ${await res.text()}`);
+      } else {
+        await load();
+      }
+    } catch (e: any) {
+      setMsg(String(e?.message || e));
+    }
+  };
 
   return (
     <>
@@ -116,14 +133,14 @@ export default function SchedulesPage() {
                         >
                           詳細
                         </Link>
-
                         {canCancel(r) && (
-                          <ScheduleCancelButton
-                            kind="campaign"
-                            scheduleId={r.id}
-                            campaignId={r.campaign_id || undefined}
-                            onDone={() => window.location.reload()}
-                          />
+                          <button
+                            onClick={() => handleCancel(r.id)}
+                            className="rounded-xl border border-red-300 px-3 py-1 text-red-700 hover:bg-red-50 whitespace-nowrap"
+                            title="この予約をキャンセル"
+                          >
+                            予約をキャンセル
+                          </button>
                         )}
                       </div>
                     </td>

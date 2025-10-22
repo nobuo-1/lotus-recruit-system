@@ -51,7 +51,7 @@ export default function EmailLanding() {
         setData(null);
       }
     })();
-  }, [range]); // KPI は API 側で独立しているため、期間変更時も正しい（モードには依存しない）
+  }, [range]);
 
   const series = useMemo(() => {
     if (!data) return [];
@@ -64,6 +64,14 @@ export default function EmailLanding() {
     () => series.reduce((s, p) => s + (p.count || 0), 0),
     [series]
   );
+
+  // ▼ 小数点第2位までのパーセント表示
+  const fmtPct = (n: unknown) => {
+    const x = Number(n);
+    return Number.isFinite(x) ? x.toFixed(2) : "0.00";
+  };
+  const reachText = `${fmtPct(data?.reachRate)}%`;
+  const openText = `${fmtPct(data?.openRate)}%`;
 
   return (
     <>
@@ -215,15 +223,9 @@ export default function EmailLanding() {
             className="md:col-span-1 col-span-2 ring-1 ring-emerald-100 shadow-sm"
           />
 
-          {/* レート類 */}
-          <KpiCard
-            label="メール到達率（30日）"
-            value={`${data?.reachRate ?? 0}%`}
-          />
-          <KpiCard
-            label="メール開封率（30日）"
-            value={`${data?.openRate ?? 0}%`}
-          />
+          {/* レート類（小数第2位まで） */}
+          <KpiCard label="メール到達率（30日）" value={reachText} />
+          <KpiCard label="メール開封率（30日）" value={openText} />
         </div>
 
         {/* 折れ線グラフ（期間切替 + 対象切替を分離、合計表示をグラフ内に） */}
@@ -324,7 +326,6 @@ function ChartBlock({
             <XAxis dataKey="date" tick={{ fontSize: 13 }} />
             <YAxis allowDecimals={false} tick={{ fontSize: 13 }} />
             <Tooltip />
-            {/* 線を少し太く */}
             <Line type="monotone" dataKey="count" dot={false} strokeWidth={2} />
           </LineChart>
         </ResponsiveContainer>
