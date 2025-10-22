@@ -40,14 +40,6 @@ function replaceVars(
     .replaceAll(/\{\{\s*NAME\s*\}\}/g, name)
     .replaceAll(/\{\{\s*EMAIL\s*\}\}/g, email);
 }
-function esc(s: string) {
-  return s
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -150,7 +142,7 @@ export async function POST(req: Request) {
       });
     }
 
-    // 添付の署名URLを生成（全受信者共通）
+    // 添付（署名URLを全受信者共通で作成）
     const admin = supabaseAdmin();
     const { data: atts } = await admin
       .from("mail_attachments")
@@ -208,9 +200,9 @@ export async function POST(req: Request) {
         const { error } = await sb.from("mail_schedules").insert({
           tenant_id: tenantId ?? null,
           mail_id: mailId,
-          schedule_at: scheduleAt, // ← DBは schedule_at
+          schedule_at: scheduleAt,
           status: "scheduled",
-          recipient_ids: targets.map((t: any) => t.id), // ← uuid[] に素の配列を渡す
+          recipient_ids: targets.map((t: any) => t.id),
         });
         if (error)
           return NextResponse.json({ error: error.message }, { status: 400 });
@@ -258,7 +250,7 @@ export async function POST(req: Request) {
           )}`
         : "";
 
-      // ===== footer（テキスト/HTML）：「運営」→「送信者」、配信停止は“こちら”リンク =====
+      // ===== footer（テキストのみ）：「運営」→「送信者」／配信停止はURLを直記
       const textMeta = [
         cfg.brandCompany ? `送信者：${cfg.brandCompany}` : "",
         cfg.brandAddress ? `所在地：${cfg.brandAddress}` : "",
@@ -272,27 +264,6 @@ export async function POST(req: Request) {
       const textFooter = [separator, textMeta].filter(Boolean).join("\n");
       const text = main ? `${main}\n\n${textFooter}` : textFooter;
 
-      // HTML版（Gmail等ではこちらが表示され「こちら」がクリック可能）
-      const htmlMain = esc(main).replace(/\n/g, "<br />");
-      const chips: string[] = [];
-      if (cfg.brandCompany) chips.push(`送信者：${esc(cfg.brandCompany)}`);
-      if (cfg.brandAddress) chips.push(`所在地：${esc(cfg.brandAddress)}`);
-      if (cfg.brandSupport)
-        chips.push(
-          `連絡先：<a href="mailto:${esc(cfg.brandSupport)}">${esc(
-            cfg.brandSupport
-          )}</a>`
-        );
-      if (unsubUrl)
-        chips.push(
-          `配信停止は <a href="${unsubUrl}" target="_blank">こちら</a>`
-        );
-      const htmlFooter = `
-<div style="margin-top:16px;padding-top:12px;border-top:1px dashed #e5e7eb;font:14px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111827;">
-  ${chips.map((c) => `<div style="margin-top:6px;">${c}</div>`).join("")}
-</div>`.trim();
-      const html = `<div style="font:16px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111827;">${htmlMain}${htmlFooter}</div>`;
-
       const jobId = `mail:${mailId}:rcpt:${r.id}:${Date.now()}`;
       await emailQueue.add(
         "direct_email",
@@ -300,8 +271,8 @@ export async function POST(req: Request) {
           kind: "direct_email",
           to: String(r.email),
           subject,
-          text, // プレーン
-          html, // ← 追加：HTMLも併送（「こちら」リンク用）
+          text, // ← プレーンテキストのみで送る
+          // html は渡さない（完全にプレーンを保証）
           cc: ccEmail,
           tenantId: tenantId ?? undefined,
           unsubscribeToken: (r as any).unsubscribe_token ?? undefined,

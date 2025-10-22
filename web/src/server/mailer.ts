@@ -33,7 +33,8 @@ const fallbackSupport =
 export type SendArgs = {
   to: string;
   subject: string;
-  html: string;
+  /** HTML は任意（プレーンメールは text のみで送る） */
+  html?: string;
   text?: string;
   unsubscribeToken?: string;
   fromOverride?: string;
@@ -83,9 +84,9 @@ function stripLegacyFooter(html: string) {
 
 export async function sendMail(args: SendArgs) {
   const company = args.brandCompany || fallbackCompany;
-  const address = args.brandAddress || fallbackAddress;
   const support = args.brandSupport || fallbackSupport;
 
+  // 表示名は会社名。実送信は defaultFrom。返信先は fromOverride。
   const fromHeader = { name: company, address: defaultFrom };
   const senderHeader = defaultFrom;
   const replyToHeader = args.fromOverride || undefined;
@@ -102,18 +103,19 @@ export async function sendMail(args: SendArgs) {
     headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click";
   }
 
-  const finalHtml = stripLegacyFooter(args.html);
+  const finalHtml =
+    typeof args.html === "string" && args.html.trim().length > 0
+      ? stripLegacyFooter(args.html)
+      : undefined;
   const finalText = args.text && args.text.trim() ? args.text : undefined;
 
-  const info = await transporter.sendMail({
+  const mailOptions: any = {
     from: fromHeader,
     sender: senderHeader,
     replyTo: replyToHeader,
     to: args.to,
     cc: args.cc || undefined,
     subject: args.subject,
-    html: finalHtml,
-    text: finalText,
     headers,
     attachments: (args.attachments ?? []).map((a) => ({
       filename: a.filename,
@@ -121,7 +123,9 @@ export async function sendMail(args: SendArgs) {
       contentType: a.contentType,
     })),
     envelope: { from: senderHeader, to: args.to },
-  });
+  };
+  if (finalText) mailOptions.text = finalText; // ← textだけでも送れる
+  if (finalHtml) mailOptions.html = finalHtml; // ← HTMLがあれば同梱
 
-  return info;
+  return transporter.sendMail(mailOptions);
 }

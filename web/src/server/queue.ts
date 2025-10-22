@@ -15,7 +15,7 @@ export type DirectEmailJob = {
   kind: "direct_email";
   to: string;
   subject: string;
-  html: string;
+  html?: string; // ← optional（プレーンメールは text のみ）
   text?: string;
   tenantId?: string;
   unsubscribeToken?: string;
