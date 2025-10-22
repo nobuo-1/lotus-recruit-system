@@ -62,7 +62,7 @@ export default function EmailLanding() {
       <main className="mx-auto max-w-6xl p-6">
         {/* 画面タイトル（最も大きく） */}
         <div className="mb-4">
-          <h1 className="text-2.2xl font-extrabold tracking-tight text-zinc-900 md:text-2.2xl">
+          <h1 className="text-2.6xl font-extrabold tracking-tight text-zinc-900 md:text-2.6xl">
             メール配信
           </h1>
           <p className="mt-2 text-sm text-neutral-500">
@@ -72,7 +72,7 @@ export default function EmailLanding() {
 
         {/* 機能メニュー（常時表示） */}
         <header className="mb-3">
-          <h2 className="text-2xl md:text-[28px] font-semibold text-neutral-900">
+          <h2 className="text-2xl md:text-[24px] font-semibold text-neutral-900">
             機能メニュー
           </h2>
         </header>
@@ -183,7 +183,7 @@ export default function EmailLanding() {
 
         {/* 各KPI 見出し */}
         <header className="mb-2">
-          <h2 className="text-2xl md:text-[28px] font-semibold text-neutral-900">
+          <h2 className="text-2xl md:text-[24px] font-semibold text-neutral-900">
             各KPI
           </h2>
         </header>

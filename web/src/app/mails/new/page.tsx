@@ -1,18 +1,18 @@
 // web/src/app/mails/new/page.tsx
 "use client";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useState, useRef, DragEvent } from "react";
 import Link from "next/link";
-import { toastError, toastSuccess } from "@/components/AppToast";
+import { toastSuccess, toastError } from "@/components/AppToast";
 
-type Settings = {
-  from_email?: string | null;
-};
+type Settings = { from_email?: string | null };
 
 export default function MailNewPage() {
   const [msg, setMsg] = useState("");
   const [fromEmail, setFromEmail] = useState("");
-  const [busy, setBusy] = useState(false);
-  const fileRef = useRef<HTMLInputElement | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const dropRef = useRef<HTMLDivElement | null>(null);
+  const [isOver, setIsOver] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -23,81 +23,102 @@ export default function MailNewPage() {
           setFromEmail(String(j?.from_email ?? ""));
         }
       } catch {
-        /* noop */
+        /* no-op */
       }
     })();
   }, []);
 
-  async function uploadAttachments(mailId: string) {
-    const files = fileRef.current?.files;
-    if (!files || files.length === 0) return;
+  const addFiles = (list: FileList | File[]) => {
+    const arr = Array.from(list || []);
+    if (!arr.length) return;
+    // 同名・同サイズの重複を除外
+    const key = (f: File) => `${f.name}::${f.size}`;
+    const existed = new Set(files.map(key));
+    const next = [...files];
+    for (const f of arr) if (!existed.has(key(f))) next.push(f);
+    setFiles(next);
+  };
 
-    const fd = new FormData();
-    for (const f of Array.from(files)) fd.append("files", f);
-    const up = await fetch(
-      `/api/attachments/upload?type=mail&id=${encodeURIComponent(mailId)}`,
-      {
-        method: "POST",
-        body: fd,
-      }
-    );
-    if (!up.ok) {
-      const t = await up.text();
-      throw new Error(`添付アップロード失敗: ${up.status} ${t}`);
-    }
-  }
+  const removeFile = (idx: number) => {
+    setFiles((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const onInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.currentTarget.files) addFiles(e.currentTarget.files);
+    // 同じファイルを再選択できるようにリセット
+    e.currentTarget.value = "";
+  };
+
+  const onDrop = (e: DragEvent) => {
+    e.preventDefault();
+    setIsOver(false);
+    if (e.dataTransfer?.files) addFiles(e.dataTransfer.files);
+  };
+
+  const onDragOver = (e: DragEvent) => {
+    e.preventDefault();
+    setIsOver(true);
+  };
+  const onDragLeave = () => setIsOver(false);
 
   const onSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    setBusy(true);
-    setMsg("保存中…");
+    const fd = new FormData(e.currentTarget);
+
+    const body_text = (fd.get("body_text") as string) ?? "";
+    const body_html = body_text
+      .split("\n")
+      .map((l) => l.trim())
+      .join("<br />");
+
+    const payload = {
+      name: fd.get("name"),
+      subject: fd.get("subject"),
+      from_email: fd.get("from_email"),
+      body_text,
+      body_html,
+    };
+
+    const res = await fetch("/api/mails", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    let createdId: string | null = null;
     try {
-      const fd = new FormData(e.currentTarget);
+      const j = await res.json();
+      createdId = j?.id || j?.mail?.id || j?.data?.id || null;
+      setMsg(`${res.status}: ${JSON.stringify(j)}`);
+    } catch {
+      const t = await res.text();
+      setMsg(`${res.status}: ${t}`);
+    }
 
-      const body_text = (fd.get("body_text") as string) ?? "";
-      const body_html = body_text
-        .split("\n")
-        .map((l) => l.trim())
-        .join("<br />");
+    if (!res.ok) {
+      toastError(`保存に失敗しました（${res.status}）`);
+      return;
+    }
+    toastSuccess("保存しました");
 
-      const payload = {
-        name: fd.get("name"),
-        subject: fd.get("subject"),
-        from_email: fd.get("from_email"),
-        body_text,
-        body_html,
-      };
-
-      const res = await fetch("/api/mails", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-
-      let mailId: string | null = null;
-      if (
-        (res.headers.get("content-type") || "").includes("application/json")
-      ) {
-        const j = await res.json();
-        mailId = j?.id ?? null;
-        setMsg(`${res.status}: ${JSON.stringify(j)}`);
+    // 添付があればアップロード
+    if (createdId && files.length) {
+      const ufd = new FormData();
+      files.forEach((f) => ufd.append("files", f));
+      const up = await fetch(
+        `/api/attachments/upload?type=mail&id=${createdId}`,
+        {
+          method: "POST",
+          body: ufd,
+        }
+      );
+      if (!up.ok) {
+        const t = await up.text();
+        toastError(`添付アップロード失敗: ${up.status} ${t}`);
       } else {
-        setMsg(`${res.status}: ${await res.text()}`);
+        toastSuccess("添付をアップロードしました");
+        setFiles([]); // 成功時は選択をクリア
       }
-      if (!res.ok) {
-        toastError(`保存に失敗しました（${res.status}）`);
-        setBusy(false);
-        return;
-      }
-
-      // 添付（任意）
-      if (mailId) await uploadAttachments(mailId);
-
-      toastSuccess("保存しました");
-    } catch (e: any) {
-      toastError(e?.message || "保存でエラー");
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -154,7 +175,8 @@ export default function MailNewPage() {
             />
             <p className="mt-1 text-xs text-neutral-500">
               差し込み可: <code className="font-mono">{"{{NAME}}"}</code>,{" "}
-              <code className="font-mono">{"{{EMAIL}}"}</code>
+              <code className="font-mono">{"{{EMAIL}}"}</code> （例:{" "}
+              <code className="font-mono">{"{{NAME}}"}</code> 様）
             </p>
           </div>
 
@@ -182,33 +204,83 @@ export default function MailNewPage() {
           <p className="mt-2 text-xs text-neutral-500">
             差し込み可: <code className="font-mono">{"{{NAME}}"}</code>,{" "}
             <code className="font-mono">{"{{EMAIL}}"}</code>
+            （例: <code className="font-mono">{"{{NAME}}"}</code> 様）
           </p>
         </div>
 
-        {/* 添付UI（複数・多拡張子対応） */}
-        <div className="rounded-xl border border-neutral-200 p-3">
-          <div className="text-sm font-medium text-neutral-700">
-            添付ファイル（複数可）
+        {/* 添付：ドロップゾーン + 複数選択 + 追加・削除 */}
+        <div>
+          <div className="text-sm text-neutral-500">添付ファイル</div>
+          <div
+            ref={dropRef}
+            onDrop={onDrop}
+            onDragOver={onDragOver}
+            onDragLeave={onDragLeave}
+            className={`mt-1 flex flex-col items-center justify-center rounded-lg border-2 border-dashed px-4 py-8 text-center ${
+              isOver ? "border-blue-400 bg-blue-50" : "border-neutral-300"
+            }`}
+          >
+            <input
+              ref={inputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={onInputChange}
+            />
+            <button
+              type="button"
+              onClick={() => inputRef.current?.click()}
+              className="rounded-lg border border-neutral-300 px-3 py-1.5 hover:bg-neutral-50"
+            >
+              ここをクリックしてファイルを選択
+            </button>
+            <div className="mt-2 text-xs text-neutral-500">
+              またはドラッグ＆ドロップ
+            </div>
+            <div className="mt-2">
+              <button
+                type="button"
+                onClick={() => inputRef.current?.click()}
+                className="text-xs text-blue-600 underline underline-offset-2"
+              >
+                さらに追加する
+              </button>
+            </div>
           </div>
-          <input
-            ref={fileRef}
-            type="file"
-            multiple
-            accept="*/*"
-            className="mt-2"
-          />
-          <p className="mt-1 text-xs text-neutral-500">
-            PDF / 画像 / CSV / Excel / PowerPoint などに対応
-          </p>
+
+          {/* 選択中一覧 */}
+          <div className="mt-3 rounded-lg border border-neutral-200 p-3">
+            <div className="mb-1 text-sm text-neutral-600">選択中</div>
+            {files.length ? (
+              <ul className="list-disc pl-5 text-sm">
+                {files.map((f, i) => (
+                  <li
+                    key={`${f.name}-${f.size}-${i}`}
+                    className="flex items-center justify-between gap-3 py-1"
+                  >
+                    <span className="truncate">{f.name}</span>
+                    <button
+                      type="button"
+                      onClick={() => removeFile(i)}
+                      className="text-xs text-red-600 hover:underline"
+                    >
+                      解除
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <div className="text-xs text-neutral-400">選択されていません</div>
+            )}
+          </div>
         </div>
 
         <div className="flex justify-end sm:justify-end">
           <button
             type="submit"
-            disabled={busy}
             className="w-full rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 sm:w-auto"
           >
-            {busy ? "処理中…" : "保存"}
+            保存
           </button>
         </div>
       </form>
