@@ -237,15 +237,6 @@ export default function MailNewPage() {
             <div className="mt-2 text-xs text-neutral-500">
               またはドラッグ＆ドロップ
             </div>
-            <div className="mt-2">
-              <button
-                type="button"
-                onClick={() => inputRef.current?.click()}
-                className="text-xs text-blue-600 underline underline-offset-2"
-              >
-                さらに追加する
-              </button>
-            </div>
           </div>
 
           {/* 選択中一覧 */}

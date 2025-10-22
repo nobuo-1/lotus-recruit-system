@@ -9,16 +9,35 @@ import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 const BUCKET = "email_attachments";
 
+/** Supabase Storage の “Invalid key” を回避するための安全なファイル名生成 */
+function sanitizeFileName(name: string) {
+  const base = (name || "file").normalize("NFKC");
+  const dot = base.lastIndexOf(".");
+  const rawStem = dot > 0 ? base.slice(0, dot) : base;
+  const rawExt = dot > 0 ? base.slice(dot + 1) : "";
+
+  // ステムは [A-Za-z0-9._-] 以外を _
+  const stem = rawStem
+    .replace(/[^A-Za-z0-9._-]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  // 拡張子は英数のみ（念のため）
+  const ext = rawExt.replace(/[^A-Za-z0-9]/g, "").toLowerCase();
+
+  // 長すぎるとS3側で嫌がられる場合があるので短縮
+  const safeStem = (stem || "file").slice(0, 80);
+  const safe = ext ? `${safeStem}.${ext}` : safeStem;
+  return safe;
+}
+
 async function ensureBucket() {
   const admin = supabaseAdmin();
-  const { data, error } = await admin.storage.getBucket(BUCKET);
+  const { data } = await admin.storage.getBucket(BUCKET);
   if (data) return;
-  // 存在しない場合は作成（複数同時実行でも片方が成功すればOK）
   await admin.storage
     .createBucket(BUCKET, {
       public: false,
-      fileSizeLimit: null, // 制限なし（必要ならバイト数で設定）
-      allowedMimeTypes: null, // 全許可（必要なら絞る）
+      fileSizeLimit: null,
+      allowedMimeTypes: null,
     })
     .catch(() => void 0);
 }
@@ -42,9 +61,7 @@ export async function HEAD() {
 
 /**
  * POST /api/attachments/upload?type=mail|campaign&id=<uuid>
- * Body: FormData(files: File[])  ← 複数添付OK
- * - Storage: email_attachments/{type}/{id}/{ts}_{encodedName}
- * - DB: mail_attachments / campaign_attachments に1行ずつINSERT
+ * body: FormData で files を複数
  */
 export async function POST(req: Request) {
   try {
@@ -61,21 +78,18 @@ export async function POST(req: Request) {
 
     const sb = await supabaseServer();
     const { data: u } = await sb.auth.getUser();
-    if (!u?.user) {
+    if (!u?.user)
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-    }
 
-    // 所有権（tenant）の検証：対象がログインユーザーのテナントのものか
+    // 所有確認
     const { data: prof } = await sb
       .from("profiles")
       .select("tenant_id")
       .eq("id", u.user.id)
       .maybeSingle();
     const tenantId = (prof?.tenant_id as string | undefined) ?? undefined;
-
-    if (!tenantId) {
+    if (!tenantId)
       return NextResponse.json({ error: "no tenant" }, { status: 400 });
-    }
 
     if (type === "mail") {
       const { data: m, error } = await sb
@@ -87,9 +101,8 @@ export async function POST(req: Request) {
         return NextResponse.json({ error: error.message }, { status: 400 });
       if (!m)
         return NextResponse.json({ error: "mail not found" }, { status: 404 });
-      if ((m as any).tenant_id && (m as any).tenant_id !== tenantId) {
+      if ((m as any).tenant_id && (m as any).tenant_id !== tenantId)
         return NextResponse.json({ error: "forbidden" }, { status: 403 });
-      }
     } else {
       const { data: c, error } = await sb
         .from("campaigns")
@@ -103,16 +116,14 @@ export async function POST(req: Request) {
           { error: "campaign not found" },
           { status: 404 }
         );
-      if ((c as any).tenant_id !== tenantId) {
+      if ((c as any).tenant_id !== tenantId)
         return NextResponse.json({ error: "forbidden" }, { status: 403 });
-      }
     }
 
     const form = await req.formData();
     const files: File[] = form.getAll("files").filter(Boolean) as File[];
-    if (!files.length) {
+    if (!files.length)
       return NextResponse.json({ error: "files が空です" }, { status: 400 });
-    }
 
     await ensureBucket();
 
@@ -124,31 +135,33 @@ export async function POST(req: Request) {
       size_bytes: number;
     }[] = [];
 
-    // 1ファイルずつ保存
     for (const f of files) {
-      const safeName = encodeURIComponent(f.name || "unnamed");
+      const safeName = sanitizeFileName(f.name || "unnamed");
+      // 二重スラッシュなどを避けつつシンプルなASCIIパスに
       const path = `${type}/${id}/${Date.now()}_${safeName}`;
+
       const { error: upErr } = await admin.storage
         .from(BUCKET)
         .upload(path, f, {
           contentType: f.type || "application/octet-stream",
           upsert: false,
         });
+
       if (upErr) {
         return NextResponse.json(
           { error: `upload failed: ${upErr.message}` },
           { status: 400 }
         );
       }
+
       uploaded.push({
-        file_name: f.name || "unnamed",
-        file_path: path,
+        file_name: f.name || "unnamed", // 元の表示名はそのまま保持
+        file_path: path, // 実際に保存した安全キー
         mime_type: f.type || "application/octet-stream",
         size_bytes: f.size ?? 0,
       });
     }
 
-    // DBへ登録
     if (type === "mail") {
       const { error } = await admin.from("mail_attachments").insert(
         uploaded.map((x) => ({
@@ -159,9 +172,8 @@ export async function POST(req: Request) {
           size_bytes: x.size_bytes,
         }))
       );
-      if (error) {
+      if (error)
         return NextResponse.json({ error: error.message }, { status: 400 });
-      }
     } else {
       const { error } = await admin.from("campaign_attachments").insert(
         uploaded.map((x) => ({
@@ -172,9 +184,8 @@ export async function POST(req: Request) {
           size_bytes: x.size_bytes,
         }))
       );
-      if (error) {
+      if (error)
         return NextResponse.json({ error: error.message }, { status: 400 });
-      }
     }
 
     return NextResponse.json({ ok: true, items: uploaded });
