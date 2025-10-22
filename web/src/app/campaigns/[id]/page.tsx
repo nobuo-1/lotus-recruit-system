@@ -23,6 +23,16 @@ const DEFAULT_VISIBLE: RecipientColumnKey[] = [
   "job_categories",
 ];
 
+// 添付型
+type CampAttachmentRow = {
+  id: string;
+  file_name: string | null;
+  file_path: string | null;
+  mime_type: string | null;
+  size_bytes: number | null;
+  created_at?: string | null;
+};
+
 // JSON/オブジェクト/ラベル → 「大(小)」
 const jobLabelFromAny = (it: unknown): string => {
   const toS = (v: unknown) => (typeof v === "string" ? v.trim() : "");
@@ -110,6 +120,14 @@ export default async function CampaignDetailPage({
     .eq("campaign_id", id)
     .order("sent_at", { ascending: false });
 
+  // 添付一覧
+  const { data: atts } = await supabase
+    .from("campaign_attachments")
+    .select("id,file_name,file_path,mime_type,size_bytes,created_at")
+    .eq("campaign_id", id)
+    .order("created_at", { ascending: true })
+    .returns<CampAttachmentRow[]>();
+
   const sentCount = rows?.length ?? 0;
   const buttonLabel = sentCount === 0 ? "配信" : "再配信";
 
@@ -181,6 +199,25 @@ export default async function CampaignDetailPage({
             />
           </div>
         </div>
+      </section>
+
+      {/* 添付ファイル一覧 */}
+      <section className="mt-8 rounded-2xl border border-neutral-200 p-4">
+        <div className="mb-2 text-sm text-neutral-500">添付ファイル</div>
+        {(atts ?? []).length ? (
+          <ul className="list-disc pl-5 text-sm text-neutral-800">
+            {(atts ?? []).map((a) => (
+              <li key={a.id} className="leading-6">
+                {a.file_name ?? "(名称未設定)"}{" "}
+                <span className="text-neutral-400">
+                  {a.size_bytes != null ? `(${a.size_bytes} bytes)` : ""}
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <div className="text-neutral-400 text-sm">添付はありません</div>
+        )}
       </section>
 
       <section className="mt-8 rounded-2xl border border-neutral-200">

@@ -1,12 +1,9 @@
 "use client";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { toastSuccess, toastError } from "@/components/AppToast";
-import { supabase } from "@/lib/supabaseClient";
+import { toastError, toastSuccess } from "@/components/AppToast";
 
-type Settings = {
-  from_email?: string | null;
-};
+type Settings = { from_email?: string | null };
 
 export default function CampaignNewPage() {
   const [mode, setMode] = useState<"plain" | "html">("plain");
@@ -24,16 +21,36 @@ export default function CampaignNewPage() {
           setFromEmail(String(j?.from_email ?? ""));
         }
       } catch {
-        /* no-op */
+        /* noop */
       }
     })();
   }, []);
+
+  async function uploadAttachments(campaignId: string) {
+    const files = fileRef.current?.files;
+    if (!files || files.length === 0) return;
+
+    const fd = new FormData();
+    for (const f of Array.from(files)) fd.append("files", f);
+    const up = await fetch(
+      `/api/attachments/upload?type=campaign&id=${encodeURIComponent(
+        campaignId
+      )}`,
+      {
+        method: "POST",
+        body: fd,
+      }
+    );
+    if (!up.ok) {
+      const t = await up.text();
+      throw new Error(`添付アップロード失敗: ${up.status} ${t}`);
+    }
+  }
 
   const onSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setBusy(true);
     setMsg("保存中…");
-
     try {
       const fd = new FormData(e.currentTarget);
       const plain = (fd.get("body_plain") as string) ?? "";
@@ -60,50 +77,26 @@ export default function CampaignNewPage() {
         body: JSON.stringify(payload),
       });
 
-      let createdId: string | null = null;
-      const ct = res.headers.get("content-type") || "";
-      if (ct.includes("application/json")) {
+      let campaignId: string | null = null;
+      if (
+        (res.headers.get("content-type") || "").includes("application/json")
+      ) {
         const j = await res.json();
-        createdId = j?.id ?? null;
+        campaignId = j?.id ?? null;
         setMsg(`${res.status}: ${JSON.stringify(j)}`);
       } else {
-        const t = await res.text();
-        setMsg(`${res.status}: ${t}`);
+        setMsg(`${res.status}: ${await res.text()}`);
       }
-
       if (!res.ok) {
         toastError(`保存に失敗しました（${res.status}）`);
         setBusy(false);
         return;
       }
 
-      // 添付アップロード & メタ登録
-      const files = fileRef.current?.files;
-      if (createdId && files && files.length) {
-        for (const file of Array.from(files)) {
-          const path = `campaign/${createdId}/${Date.now()}_${file.name}`;
-          const up = await supabase.storage
-            .from("email_attachments")
-            .upload(path, file, { upsert: false });
-          if (up.error) throw up.error;
-
-          // 型エラー回避のため any 配列で insert
-          await supabase.from("campaign_attachments").insert([
-            {
-              campaign_id: createdId,
-              file_path: path,
-              file_name: file.name,
-              mime_type: file.type,
-              size_bytes: file.size,
-            },
-          ] as any);
-        }
-      }
+      // 添付（任意）
+      if (campaignId) await uploadAttachments(campaignId);
 
       toastSuccess("保存しました");
-      if (files && files.length && !createdId) {
-        toastError("添付は保存できませんでした（作成IDが取得できません）");
-      }
     } catch (e: any) {
       toastError(e?.message || "保存でエラー");
     } finally {
@@ -119,7 +112,7 @@ export default function CampaignNewPage() {
   return (
     <main className="mx-auto max-w-3xl p-6">
       {/* ヘッダー：スマホ縦積み */}
-      <div className="mb-4 flex flex colo gap-3 md:flex-row md:items-end md:justify-between">
+      <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
           <h1 className="whitespace-nowrap text-2xl font-semibold text-neutral-900">
             キャンペーン作成
@@ -165,7 +158,6 @@ export default function CampaignNewPage() {
               placeholder="メール件名（例: {{NAME}} 様へのご案内）"
               required
             />
-            {/* ▼ 差し込みヒント（TSエラーにならない書き方） */}
             <p className="mt-1 text-xs text-neutral-500">
               差し込み可: <code className="font-mono">{"{{NAME}}"}</code>,{" "}
               <code className="font-mono">{"{{EMAIL}}"}</code> （例:{" "}
@@ -211,7 +203,6 @@ export default function CampaignNewPage() {
 
         <div>
           <div className="text-sm text-neutral-500">{labelForBody}</div>
-
           {mode === "plain" ? (
             <textarea
               name="body_plain"
@@ -227,31 +218,28 @@ export default function CampaignNewPage() {
               required
             />
           )}
-
-          {/* ▼ 本文の差し込みヒント（TSエラーにならない書き方） */}
           <p className="mt-2 text-xs text-neutral-500">
             差し込み可: <code className="font-mono">{"{{NAME}}"}</code>,{" "}
             <code className="font-mono">{"{{EMAIL}}"}</code>
-            （例: <code className="font-mono">{"{{NAME}}"}</code> 様）
             <br />
             ※「文章」モードでも保存時にHTML化され、送信時に自動で個別化されます。
           </p>
         </div>
 
-        {/* 添付UI（PDF/画像） */}
+        {/* 添付UI（複数・多拡張子対応） */}
         <div className="rounded-xl border border-neutral-200 p-3">
           <div className="text-sm font-medium text-neutral-700">
-            添付ファイル（PDF/画像）
+            添付ファイル（複数可）
           </div>
           <input
             ref={fileRef}
             type="file"
             multiple
-            accept="application/pdf,image/*"
+            accept="*/*"
             className="mt-2"
           />
           <p className="mt-1 text-xs text-neutral-500">
-            保存後、自動でアップロード＆紐付けします。
+            PDF / 画像 / CSV / Excel / PowerPoint などに対応
           </p>
         </div>
 

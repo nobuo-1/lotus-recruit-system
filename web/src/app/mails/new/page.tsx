@@ -1,9 +1,8 @@
 // web/src/app/mails/new/page.tsx
 "use client";
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { toastSuccess, toastError } from "@/components/AppToast";
-import { supabase } from "@/lib/supabaseClient";
+import { toastError, toastSuccess } from "@/components/AppToast";
 
 type Settings = {
   from_email?: string | null;
@@ -12,8 +11,8 @@ type Settings = {
 export default function MailNewPage() {
   const [msg, setMsg] = useState("");
   const [fromEmail, setFromEmail] = useState("");
-  const fileRef = useRef<HTMLInputElement | null>(null);
   const [busy, setBusy] = useState(false);
+  const fileRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -24,10 +23,29 @@ export default function MailNewPage() {
           setFromEmail(String(j?.from_email ?? ""));
         }
       } catch {
-        /* no-op */
+        /* noop */
       }
     })();
   }, []);
+
+  async function uploadAttachments(mailId: string) {
+    const files = fileRef.current?.files;
+    if (!files || files.length === 0) return;
+
+    const fd = new FormData();
+    for (const f of Array.from(files)) fd.append("files", f);
+    const up = await fetch(
+      `/api/attachments/upload?type=mail&id=${encodeURIComponent(mailId)}`,
+      {
+        method: "POST",
+        body: fd,
+      }
+    );
+    if (!up.ok) {
+      const t = await up.text();
+      throw new Error(`添付アップロード失敗: ${up.status} ${t}`);
+    }
+  }
 
   const onSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -56,50 +74,26 @@ export default function MailNewPage() {
         body: JSON.stringify(payload),
       });
 
-      let createdId: string | null = null;
-      const ct = res.headers.get("content-type") || "";
-      if (ct.includes("application/json")) {
+      let mailId: string | null = null;
+      if (
+        (res.headers.get("content-type") || "").includes("application/json")
+      ) {
         const j = await res.json();
-        createdId = j?.id ?? null;
+        mailId = j?.id ?? null;
         setMsg(`${res.status}: ${JSON.stringify(j)}`);
       } else {
-        const t = await res.text();
-        setMsg(`${res.status}: ${t}`);
+        setMsg(`${res.status}: ${await res.text()}`);
       }
-
       if (!res.ok) {
         toastError(`保存に失敗しました（${res.status}）`);
         setBusy(false);
         return;
       }
 
-      // 添付アップロード & メタ登録
-      const files = fileRef.current?.files;
-      if (createdId && files && files.length) {
-        for (const file of Array.from(files)) {
-          const path = `mail/${createdId}/${Date.now()}_${file.name}`;
-          const up = await supabase.storage
-            .from("email_attachments")
-            .upload(path, file, { upsert: false });
-          if (up.error) throw up.error;
-
-          // 型エラー回避のため any 配列で insert
-          await supabase.from("mail_attachments").insert([
-            {
-              mail_id: createdId,
-              file_path: path,
-              file_name: file.name,
-              mime_type: file.type,
-              size_bytes: file.size,
-            },
-          ] as any);
-        }
-      }
+      // 添付（任意）
+      if (mailId) await uploadAttachments(mailId);
 
       toastSuccess("保存しました");
-      if (files && files.length && !createdId) {
-        toastError("添付は保存できませんでした（作成IDが取得できません）");
-      }
     } catch (e: any) {
       toastError(e?.message || "保存でエラー");
     } finally {
@@ -191,20 +185,20 @@ export default function MailNewPage() {
           </p>
         </div>
 
-        {/* 添付UI（PDF/画像） */}
+        {/* 添付UI（複数・多拡張子対応） */}
         <div className="rounded-xl border border-neutral-200 p-3">
           <div className="text-sm font-medium text-neutral-700">
-            添付ファイル（PDF/画像）
+            添付ファイル（複数可）
           </div>
           <input
             ref={fileRef}
             type="file"
             multiple
-            accept="application/pdf,image/*"
+            accept="*/*"
             className="mt-2"
           />
           <p className="mt-1 text-xs text-neutral-500">
-            保存後、自動でアップロード＆紐付けします。
+            PDF / 画像 / CSV / Excel / PowerPoint などに対応
           </p>
         </div>
 

@@ -28,6 +28,15 @@ type DeliveryRow = {
   } | null;
 };
 
+type AttachmentRow = {
+  id: string;
+  file_name: string | null;
+  file_path: string | null;
+  mime_type: string | null;
+  size_bytes: number | null;
+  created_at?: string | null;
+};
+
 function toS(v: unknown): string {
   return typeof v === "string" ? v : v == null ? "" : String(v);
 }
@@ -149,6 +158,14 @@ export default async function MailDetailPage({
     .order("sent_at", { ascending: false })
     .returns<DeliveryRow[]>();
 
+  // 添付一覧
+  const { data: atts } = await supabase
+    .from("mail_attachments")
+    .select("id,file_name,file_path,mime_type,size_bytes,created_at")
+    .eq("mail_id", id)
+    .order("created_at", { ascending: true })
+    .returns<AttachmentRow[]>();
+
   const rows = deliveries ?? [];
   const sentCount = rows.length;
   const statusText = deriveStatus(schedules ?? [], rows);
@@ -212,6 +229,25 @@ export default async function MailDetailPage({
             />
           </div>
         </div>
+      </section>
+
+      {/* 添付ファイル一覧 */}
+      <section className="mt-8 rounded-2xl border border-neutral-200 p-4">
+        <div className="mb-2 text-sm text-neutral-500">添付ファイル</div>
+        {(atts ?? []).length ? (
+          <ul className="list-disc pl-5 text-sm text-neutral-800">
+            {(atts ?? []).map((a) => (
+              <li key={a.id} className="leading-6">
+                {a.file_name ?? "(名称未設定)"}{" "}
+                <span className="text-neutral-400">
+                  {a.size_bytes != null ? `(${a.size_bytes} bytes)` : ""}
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <div className="text-neutral-400 text-sm">添付はありません</div>
+        )}
       </section>
 
       <section className="mt-8 rounded-2xl border border-neutral-200">
