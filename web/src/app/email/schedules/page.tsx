@@ -4,6 +4,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import AppHeader from "@/components/AppHeader";
 import { formatJpDateTime } from "@/lib/formatDate";
+import ScheduleCancelButton from "@/components/ScheduleCancelButton";
 
 type Row = {
   id: string;
@@ -115,21 +116,14 @@ export default function SchedulesPage() {
                         >
                           詳細
                         </Link>
+
                         {canCancel(r) && (
-                          <form
-                            action="/api/campaigns/schedules/cancel"
-                            method="post"
-                            className="inline-block"
-                          >
-                            <input type="hidden" name="id" value={r.id} />
-                            <button
-                              type="submit"
-                              className="rounded-xl border border-red-200 px-3 py-1 text-red-700 hover:bg-red-50 whitespace-nowrap"
-                              title="この予約をキャンセル"
-                            >
-                              予約をキャンセル
-                            </button>
-                          </form>
+                          <ScheduleCancelButton
+                            kind="campaign"
+                            scheduleId={r.id}
+                            campaignId={r.campaign_id || undefined}
+                            onDone={() => window.location.reload()}
+                          />
                         )}
                       </div>
                     </td>

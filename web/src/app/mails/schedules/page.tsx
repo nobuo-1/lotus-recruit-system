@@ -5,6 +5,7 @@ export const dynamic = "force-dynamic";
 import Link from "next/link";
 import { supabaseServer } from "@/lib/supabaseServer";
 import { formatJpDateTime } from "@/lib/formatDate";
+import ScheduleCancelButton from "@/components/ScheduleCancelButton";
 
 type Row = {
   id: string;
@@ -113,29 +114,22 @@ export default async function MailSchedulesPage() {
                 <td className="px-3 py-3">{formatJpDateTime(r.created_at)}</td>
                 <td className="px-3 py-3">
                   <div className="flex flex-wrap gap-2">
-                    {/* 詳細リンクは残す */}
+                    {/* 詳細リンクは維持 */}
                     <Link
                       href={`/mails/${r.mail_id}`}
                       className="rounded-xl border border-neutral-200 px-3 py-1 hover:bg-neutral-50 whitespace-nowrap"
                     >
                       詳細
                     </Link>
-                    {/* 取消は“未送信のみ”表示 */}
+
+                    {/* キャンセルは fetch POST（ページ遷移なし） */}
                     {isCancelable(r) && (
-                      <form
-                        action="/api/mails/schedules/cancel"
-                        method="post"
-                        className="inline-block"
-                      >
-                        <input type="hidden" name="id" value={r.id} />
-                        <button
-                          type="submit"
-                          className="rounded-xl border border-red-200 px-3 py-1 text-red-700 hover:bg-red-50 whitespace-nowrap"
-                          title="この予約をキャンセル"
-                        >
-                          予約をキャンセル
-                        </button>
-                      </form>
+                      <ScheduleCancelButton
+                        kind="mail"
+                        scheduleId={r.id}
+                        mailId={r.mail_id}
+                        onDone={() => window.location.reload()}
+                      />
                     )}
                   </div>
                 </td>
