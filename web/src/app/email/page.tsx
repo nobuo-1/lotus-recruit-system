@@ -16,35 +16,26 @@ import {
 import { Settings, Mail, Megaphone } from "lucide-react";
 
 type SeriesPoint = { date: string; count: number };
-
 type Summary = {
-  campaignCount: number;
-  // 追加: メール総数
-  mailCount?: number;
-  sent30: number;
+  mailTotal: number;
+  campaignTotal: number;
+  allTimeSends: number;
   reachRate: number; // %
   openRate: number; // %
-  unsub30: number;
-  series: SeriesPoint[];
-
-  // 任意（存在すれば使用）
-  sent30Mail?: number;
-  sent30Campaign?: number;
-  reachRateMail?: number;
-  reachRateCampaign?: number;
-  openRateMail?: number;
-  openRateCampaign?: number;
-  seriesMail?: SeriesPoint[];
-  seriesCampaign?: SeriesPoint[];
+  series: {
+    total: SeriesPoint[];
+    mail: SeriesPoint[];
+    campaign: SeriesPoint[];
+  };
 };
 
 type RangeKey = "7d" | "14d" | "1m" | "3m" | "6m" | "1y";
-type StreamKey = "all" | "mail" | "campaign";
+type Mode = "total" | "mail" | "campaign";
 
 export default function EmailLanding() {
   const [data, setData] = useState<Summary | null>(null);
   const [range, setRange] = useState<RangeKey>("14d");
-  const [stream, setStream] = useState<StreamKey>("all");
+  const [mode, setMode] = useState<Mode>("total");
   const [msg, setMsg] = useState("");
 
   useEffect(() => {
@@ -60,63 +51,27 @@ export default function EmailLanding() {
         setData(null);
       }
     })();
-  }, [range]);
+  }, [range]); // KPI は API 側で独立しているため、期間変更時も正しい（モードには依存しない）
 
-  // 合計KPI
-  const reachTotal =
-    typeof data?.reachRate === "number" ? `${data.reachRate}%` : "-";
-  const openTotal =
-    typeof data?.openRate === "number" ? `${data.openRate}%` : "-";
+  const series = useMemo(() => {
+    if (!data) return [];
+    if (mode === "mail") return data.series.mail;
+    if (mode === "campaign") return data.series.campaign;
+    return data.series.total;
+  }, [data, mode]);
 
-  // 内訳
-  const sentMail = (data as any)?.sent30Mail ?? (data as any)?.mailSent30;
-  const sentCamp =
-    (data as any)?.sent30Campaign ?? (data as any)?.campaignSent30;
-  const sentTotal =
-    typeof sentMail === "number" && typeof sentCamp === "number"
-      ? sentMail + sentCamp
-      : data?.sent30;
-
-  const reachMail =
-    typeof (data as any)?.reachRateMail === "number"
-      ? `${(data as any).reachRateMail}%`
-      : undefined;
-  const reachCamp =
-    typeof (data as any)?.reachRateCampaign === "number"
-      ? `${(data as any).reachRateCampaign}%`
-      : undefined;
-  const openMail =
-    typeof (data as any)?.openRateMail === "number"
-      ? `${(data as any).openRateMail}%`
-      : undefined;
-  const openCamp =
-    typeof (data as any)?.openRateCampaign === "number"
-      ? `${(data as any).openRateCampaign}%`
-      : undefined;
-
-  // グラフデータ
-  const seriesAll = data?.series ?? [];
-  const seriesMail =
-    (data as any)?.seriesMail ?? (data as any)?.mailSeries ?? [];
-  const seriesCamp =
-    (data as any)?.seriesCampaign ?? (data as any)?.campaignSeries ?? [];
-
-  let chosen: SeriesPoint[] =
-    stream === "mail"
-      ? seriesMail
-      : stream === "campaign"
-      ? seriesCamp
-      : seriesAll;
-  // フォールバック：空配列なら合計を表示（“押しても出ない”対策）
-  if (!chosen || chosen.length === 0) chosen = seriesAll;
+  const periodTotal = useMemo(
+    () => series.reduce((s, p) => s + (p.count || 0), 0),
+    [series]
+  );
 
   return (
     <>
       <AppHeader />
       <main className="mx-auto max-w-6xl p-6">
-        {/* タイトル：機能メニューと同サイズ／少し紺色 */}
+        {/* タイトル（色を紺寄りに、機能メニューと同サイズ） */}
         <div className="mb-4">
-          <h1 className="text-2xl md:text-[24px] font-semibold tracking-tight text-[#1e2a44]">
+          <h1 className="text-[24px] md:text-[24px] font-extrabold tracking-tight text-indigo-900">
             メール配信
           </h1>
           <p className="mt-2 text-sm text-neutral-500">
@@ -133,6 +88,7 @@ export default function EmailLanding() {
 
         <div className="mb-6 rounded-2xl border border-neutral-200 p-5">
           <div className="grid grid-cols-1 gap-7 md:grid-cols-3">
+            {/* メール */}
             <section>
               <div className="mb-2 flex items-center gap-2">
                 <Mail className="h-5 w-5 text-neutral-700" />
@@ -168,6 +124,7 @@ export default function EmailLanding() {
               </ul>
             </section>
 
+            {/* キャンペーン */}
             <section>
               <div className="mb-2 flex items-center gap-2">
                 <Megaphone className="h-5 w-5 text-neutral-700" />
@@ -203,6 +160,7 @@ export default function EmailLanding() {
               </ul>
             </section>
 
+            {/* その他 */}
             <section>
               <div className="mb-2 flex items-center gap-2">
                 <Settings className="h-5 w-5 text-neutral-700" />
@@ -232,49 +190,50 @@ export default function EmailLanding() {
           </div>
         </div>
 
-        {/* 各KPI */}
+        {/* 各KPI（目立つ3つ + レート） */}
         <header className="mb-2">
           <h2 className="text-2xl md:text-[24px] font-semibold text-neutral-900">
             各KPI
           </h2>
         </header>
 
-        <div className="grid grid-cols-2 gap-4 md:grid-cols-6">
-          {/* ★ 先頭にメール総数 */}
-          <KpiCard label="メール総数" value={(data as any)?.mailCount ?? "-"} />
+        <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
+          {/* 目立たせる3枚 */}
+          <KpiCard
+            label="メール総数"
+            value={data?.mailTotal ?? "-"}
+            className="md:col-span-1 col-span-2 ring-1 ring-indigo-100 shadow-sm"
+          />
           <KpiCard
             label="キャンペーン総数"
-            value={data?.campaignCount ?? "-"}
+            value={data?.campaignTotal ?? "-"}
+            className="md:col-span-1 col-span-2 ring-1 ring-sky-100 shadow-sm"
+          />
+          <KpiCard
+            label="累計配信数（全期間）"
+            value={data?.allTimeSends ?? "-"}
+            className="md:col-span-1 col-span-2 ring-1 ring-emerald-100 shadow-sm"
           />
 
-          {/* 合計系 */}
-          <KpiCard label="直近30日の配信数(合計)" value={sentTotal ?? "-"} />
-          <KpiCard label="メール到達率(合計)" value={reachTotal} />
-          <KpiCard label="メール開封率(合計)" value={openTotal} />
-          <KpiCard label="配信停止数(30日)" value={data?.unsub30 ?? "-"} />
-
-          {/* 内訳（存在すれば表示） */}
-          {typeof sentMail === "number" && (
-            <KpiCard label="メール配信数(30日)" value={sentMail} />
-          )}
-          {typeof sentCamp === "number" && (
-            <KpiCard label="キャンペーン配信数(30日)" value={sentCamp} />
-          )}
-          {reachMail && <KpiCard label="メール到達率" value={reachMail} />}
-          {reachCamp && (
-            <KpiCard label="キャンペーン到達率" value={reachCamp} />
-          )}
-          {openMail && <KpiCard label="メール開封率" value={openMail} />}
-          {openCamp && <KpiCard label="キャンペーン開封率" value={openCamp} />}
+          {/* レート類 */}
+          <KpiCard
+            label="メール到達率（30日）"
+            value={`${data?.reachRate ?? 0}%`}
+          />
+          <KpiCard
+            label="メール開封率（30日）"
+            value={`${data?.openRate ?? 0}%`}
+          />
         </div>
 
-        {/* 折れ線グラフ */}
+        {/* 折れ線グラフ（期間切替 + 対象切替を分離、合計表示をグラフ内に） */}
         <ChartBlock
           range={range}
           setRange={setRange}
-          stream={stream}
-          setStream={setStream}
-          series={chosen}
+          mode={mode}
+          setMode={setMode}
+          series={series}
+          periodTotal={periodTotal}
         />
 
         {msg && (
@@ -290,27 +249,31 @@ export default function EmailLanding() {
 function ChartBlock({
   range,
   setRange,
-  stream,
-  setStream,
+  mode,
+  setMode,
   series,
+  periodTotal,
 }: {
   range: RangeKey;
   setRange: (r: RangeKey) => void;
-  stream: "all" | "mail" | "campaign";
-  setStream: (s: "all" | "mail" | "campaign") => void;
+  mode: "total" | "mail" | "campaign";
+  setMode: (m: "total" | "mail" | "campaign") => void;
   series: { date: string; count: number }[];
+  periodTotal: number;
 }) {
+  const modeLabel =
+    mode === "total" ? "合計" : mode === "mail" ? "メール" : "キャンペーン";
+
   return (
     <div className="mt-6 rounded-2xl border border-neutral-200 p-4">
-      <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-        {/* 太字に */}
+      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div className="text-base font-semibold text-neutral-800">
-          直近{labelOf(range)}の配信数
+          <span className="font-bold">直近{labelOf(range)}の配信数</span>
         </div>
-
-        {/* 切替UI：グループを分け、区切り線で視覚分離 */}
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="flex gap-1">
+        {/* トグル群を分離表示 */}
+        <div className="flex flex-wrap gap-2">
+          {/* 期間 */}
+          <div className="inline-flex items-center gap-1">
             {(["7d", "14d", "1m", "3m", "6m", "1y"] as RangeKey[]).map((r) => (
               <button
                 key={r}
@@ -325,24 +288,21 @@ function ChartBlock({
               </button>
             ))}
           </div>
-
-          {/* 区切り */}
-          <span className="hidden h-5 w-px bg-neutral-200 sm:inline-block mx-1" />
-
-          <div className="flex gap-1">
-            {(["all", "mail", "campaign"] as StreamKey[]).map((s) => (
+          {/* 対象 */}
+          <div className="inline-flex items-center gap-1">
+            {(["total", "mail", "campaign"] as const).map((m) => (
               <button
-                key={s}
-                onClick={() => setStream(s)}
+                key={m}
+                onClick={() => setMode(m)}
                 className={`rounded-lg px-2 py-1 text-xs ${
-                  stream === s
-                    ? "border border-neutral-400 text-neutral-800"
+                  mode === m
+                    ? "border border-indigo-400 text-indigo-700"
                     : "border border-neutral-200 text-neutral-500 hover:bg-neutral-50"
                 }`}
               >
-                {s === "all"
+                {m === "total"
                   ? "合計"
-                  : s === "mail"
+                  : m === "mail"
                   ? "メール"
                   : "キャンペーン"}
               </button>
@@ -351,20 +311,21 @@ function ChartBlock({
         </div>
       </div>
 
+      {/* 期間内の総配信数（対象に応じて変化） */}
+      <div className="mb-2 text-sm text-neutral-600">
+        {modeLabel}の期間内総配信数：
+        <span className="font-semibold">{periodTotal}</span>
+      </div>
+
       <div className="h-56">
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={series ?? []}>
+          <LineChart data={series}>
             <CartesianGrid strokeDasharray="3 3" />
             <XAxis dataKey="date" tick={{ fontSize: 13 }} />
             <YAxis allowDecimals={false} tick={{ fontSize: 13 }} />
             <Tooltip />
-            <Line
-              type="monotone"
-              dataKey="count"
-              name="配信数"
-              dot={false}
-              strokeWidth={2.4}
-            />
+            {/* 線を少し太く */}
+            <Line type="monotone" dataKey="count" dot={false} strokeWidth={2} />
           </LineChart>
         </ResponsiveContainer>
       </div>

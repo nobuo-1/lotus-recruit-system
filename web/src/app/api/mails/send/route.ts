@@ -12,7 +12,7 @@ import { supabaseAdmin } from "@/lib/supabaseAdmin";
 type Payload = {
   mailId: string;
   recipientIds: string[];
-  scheduleAt?: string | null; // 予約ISO（mail_schedules は schedule_at カラム）
+  scheduleAt?: string | null;
 };
 
 const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
@@ -20,7 +20,7 @@ const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
   ""
 );
 
-// ===== helpers =====
+// helpers
 function chunk<T>(arr: T[], size: number): T[][] {
   const a = [...arr];
   const out: T[][] = [];
@@ -39,6 +39,14 @@ function replaceVars(
   return input
     .replaceAll(/\{\{\s*NAME\s*\}\}/g, name)
     .replaceAll(/\{\{\s*EMAIL\s*\}\}/g, email);
+}
+function escapeHtml(s: string) {
+  return String(s)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 export async function OPTIONS() {
@@ -75,13 +83,11 @@ export async function POST(req: Request) {
     }
 
     const sb = await supabaseServer();
-
-    // 認証
     const { data: u } = await sb.auth.getUser();
     if (!u?.user)
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
-    // テナント取得
+    // tenant
     const { data: prof } = await sb
       .from("profiles")
       .select("tenant_id")
@@ -89,13 +95,12 @@ export async function POST(req: Request) {
       .maybeSingle();
     const tenantId = (prof?.tenant_id as string | undefined) ?? undefined;
 
-    // メール本体（プレーン：from_emailは参照しない）
+    // mail
     const { data: mail, error: me } = await sb
       .from("mails")
       .select("id, tenant_id, subject, body_text, status")
       .eq("id", mailId)
       .maybeSingle();
-
     if (me) return NextResponse.json({ error: me.message }, { status: 400 });
     if (!mail)
       return NextResponse.json({ error: "not found" }, { status: 404 });
@@ -107,16 +112,14 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
 
-    // 送信元/ブランド設定
     const cfg = await loadSenderConfig();
 
-    // 宛先
+    // recipients
     const { data: recs, error: re } = await sb
       .from("recipients")
       .select("id, name, email, unsubscribe_token, unsubscribed_at, is_active")
       .in("id", recipientIds);
     if (re) return NextResponse.json({ error: re.message }, { status: 400 });
-
     const recipients = (recs ?? []).filter(
       (r: any) => r?.email && !r?.unsubscribed_at && (r?.is_active ?? true)
     );
@@ -124,12 +127,11 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "no recipients" }, { status: 400 });
     }
 
-    // 既存 delivery を除外（mail_deliveries に tenant_id は無い）
+    // exclude already exists
     const { data: existing } = await sb
       .from("mail_deliveries")
       .select("recipient_id")
       .eq("mail_id", mailId);
-
     const existed = new Set<string>(
       (existing ?? []).map((r: any) => String(r.recipient_id))
     );
@@ -142,7 +144,7 @@ export async function POST(req: Request) {
       });
     }
 
-    // 添付（署名URLを全受信者共通で作成）
+    // attachments (signed url)
     const admin = supabaseAdmin();
     const { data: atts } = await admin
       .from("mail_attachments")
@@ -155,16 +157,16 @@ export async function POST(req: Request) {
         const path = String(a.file_path);
         const filename = String(a.file_name || path.split("/").pop() || "file");
         const mime = a.mime_type || undefined;
-        const { data: signed, error: se } = await admin.storage
+        const { data: signed } = await admin.storage
           .from("email_attachments")
           .createSignedUrl(path, 60 * 60 * 24);
-        if (!se && signed?.signedUrl) {
+        if (signed?.signedUrl) {
           attachList.push({ path: signed.signedUrl, name: filename, mime });
         }
       }
     }
 
-    // 予約 or 即時
+    // schedule / immediate
     let delay = 0;
     let scheduleAt: string | null = null;
     if (scheduleAtISO) {
@@ -179,7 +181,7 @@ export async function POST(req: Request) {
       scheduleAt = new Date(ts).toISOString();
     }
 
-    // deliveries へ事前登録 + 予約テーブル
+    // insert deliveries
     if (scheduleAt) {
       for (const part of chunk(
         targets.map((r: any) => ({
@@ -195,18 +197,15 @@ export async function POST(req: Request) {
         if (error)
           return NextResponse.json({ error: error.message }, { status: 400 });
       }
-      // 予約テーブル
-      {
-        const { error } = await sb.from("mail_schedules").insert({
-          tenant_id: tenantId ?? null,
-          mail_id: mailId,
-          schedule_at: scheduleAt,
-          status: "scheduled",
-          recipient_ids: targets.map((t: any) => t.id),
-        });
-        if (error)
-          return NextResponse.json({ error: error.message }, { status: 400 });
-      }
+      // mail_schedules も作成
+      const { error: se } = await sb.from("mail_schedules").insert({
+        tenant_id: tenantId ?? null,
+        mail_id: mailId,
+        schedule_at: scheduleAt,
+        status: "scheduled",
+        recipient_ids: targets.map((t: any) => t.id),
+      });
+      if (se) return NextResponse.json({ error: se.message }, { status: 400 });
       await sb.from("mails").update({ status: "scheduled" }).eq("id", mailId);
     } else {
       for (const part of chunk(
@@ -226,11 +225,25 @@ export async function POST(req: Request) {
       await sb.from("mails").update({ status: "queued" }).eq("id", mailId);
     }
 
-    // 件名/本文（プレーンテキスト、{{NAME}}/{{EMAIL}} 差し込み）
+    // delivery id を取得（プレーンでも開封ピクセル用に必要）
+    const { data: dels } = await sb
+      .from("mail_deliveries")
+      .select("id, recipient_id")
+      .eq("mail_id", mailId)
+      .in(
+        "recipient_id",
+        targets.map((t: any) => t.id)
+      );
+    const idMap = new Map<string, string>();
+    (dels ?? []).forEach((d: any) =>
+      idMap.set(String(d.recipient_id), String(d.id))
+    );
+
+    // subject/body
     const subjectRaw = toS((mail as any).subject);
     const bodyTextRaw = toS((mail as any).body_text);
 
-    // CC：メール用設定の差出人メールがあればCCへ
+    // cc
     const ccEmail = cfg.fromOverride || undefined;
 
     let queued = 0;
@@ -250,7 +263,7 @@ export async function POST(req: Request) {
           )}`
         : "";
 
-      // ===== footer（テキストのみ）：「運営」→「送信者」／配信停止はURLを直記
+      // footer（テキストのみ）
       const textMeta = [
         cfg.brandCompany ? `送信者：${cfg.brandCompany}` : "",
         cfg.brandAddress ? `所在地：${cfg.brandAddress}` : "",
@@ -259,10 +272,21 @@ export async function POST(req: Request) {
       ]
         .filter(Boolean)
         .join("\n");
-
       const separator = "------------------------------";
       const textFooter = [separator, textMeta].filter(Boolean).join("\n");
       const text = main ? `${main}\n\n${textFooter}` : textFooter;
+
+      // HTML（見た目は装飾無し、本文そのまま + 1px 開封ピクセル）
+      const deliveryId = idMap.get(String(r.id)) ?? "";
+      const pixelUrl = deliveryId
+        ? `${appUrl}/api/email/open?id=${encodeURIComponent(deliveryId)}`
+        : "";
+      const html =
+        `<div style="white-space:pre-wrap;font:16px/1.6 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111827">` +
+        `${escapeHtml(text)}</div>` +
+        (pixelUrl
+          ? `<img src="${pixelUrl}" alt="" width="1" height="1" style="display:block;max-width:1px;max-height:1px;border:0;outline:none" />`
+          : "");
 
       const jobId = `mail:${mailId}:rcpt:${r.id}:${Date.now()}`;
       await emailQueue.add(
@@ -271,8 +295,8 @@ export async function POST(req: Request) {
           kind: "direct_email",
           to: String(r.email),
           subject,
-          text, // ← プレーンテキストのみで送る
-          // html は渡さない（完全にプレーンを保証）
+          text, // プレーン本文
+          html, // ただし装飾なし + ピクセル
           cc: ccEmail,
           tenantId: tenantId ?? undefined,
           unsubscribeToken: (r as any).unsubscribe_token ?? undefined,
@@ -280,7 +304,7 @@ export async function POST(req: Request) {
           brandCompany: cfg.brandCompany,
           brandAddress: cfg.brandAddress,
           brandSupport: cfg.brandSupport,
-          attachments: attachList, // 署名URLの配列
+          attachments: attachList,
         },
         {
           jobId,
@@ -289,7 +313,6 @@ export async function POST(req: Request) {
           removeOnFail: 1000,
         }
       );
-
       queued++;
     }
 
