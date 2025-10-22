@@ -58,6 +58,11 @@ export default async function MailSchedulesPage() {
     console.error("[mail_schedules:list]", error);
   }
 
+  const isCancelable = (r: Row) =>
+    (r.status ?? "").toLowerCase() === "scheduled" &&
+    !!r.scheduled_at &&
+    Date.parse(r.scheduled_at) > Date.now();
+
   return (
     <main className="mx-auto max-w-6xl p-6">
       {/* ヘッダー */}
@@ -91,7 +96,6 @@ export default async function MailSchedulesPage() {
               <th className="px-3 py-3 text-left">メール名</th>
               <th className="px-3 py-3 text-left">件名</th>
               <th className="px-3 py-3 text-left">予約日時</th>
-              <th className="px-3 py-3 text-left">ステータス</th>
               <th className="px-3 py-3 text-left">作成日</th>
               <th className="px-3 py-3 text-left">操作</th>
             </tr>
@@ -106,22 +110,33 @@ export default async function MailSchedulesPage() {
                 <td className="px-3 py-3">
                   {formatJpDateTime(r.scheduled_at)}
                 </td>
-                <td className="px-3 py-3">{r.status ?? ""}</td>
                 <td className="px-3 py-3">{formatJpDateTime(r.created_at)}</td>
                 <td className="px-3 py-3">
                   <div className="flex flex-wrap gap-2">
+                    {/* 詳細リンクは残す */}
                     <Link
                       href={`/mails/${r.mail_id}`}
                       className="rounded-xl border border-neutral-200 px-3 py-1 hover:bg-neutral-50 whitespace-nowrap"
                     >
                       詳細
                     </Link>
-                    <Link
-                      href={`/mails/${r.mail_id}/send`}
-                      className="rounded-xl border border-neutral-200 px-3 py-1 hover:bg-neutral-50 whitespace-nowrap"
-                    >
-                      送信
-                    </Link>
+                    {/* 取消は“未送信のみ”表示 */}
+                    {isCancelable(r) && (
+                      <form
+                        action="/api/mails/schedules/cancel"
+                        method="post"
+                        className="inline-block"
+                      >
+                        <input type="hidden" name="id" value={r.id} />
+                        <button
+                          type="submit"
+                          className="rounded-xl border border-red-200 px-3 py-1 text-red-700 hover:bg-red-50 whitespace-nowrap"
+                          title="この予約をキャンセル"
+                        >
+                          予約をキャンセル
+                        </button>
+                      </form>
+                    )}
                   </div>
                 </td>
               </tr>
@@ -129,7 +144,7 @@ export default async function MailSchedulesPage() {
             {(rows ?? []).length === 0 && (
               <tr>
                 <td
-                  colSpan={6}
+                  colSpan={5}
                   className="px-4 py-8 text-center text-neutral-400"
                 >
                   予約はありません

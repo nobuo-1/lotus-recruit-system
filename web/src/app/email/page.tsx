@@ -15,20 +15,34 @@ import {
 } from "recharts";
 import { Settings, Mail, Megaphone } from "lucide-react";
 
+type SeriesPoint = { date: string; count: number };
+
+// 既存APIを壊さないために、拡張に“ゆるく”対応
 type Summary = {
   campaignCount: number;
   sent30: number;
   reachRate: number; // %
   openRate: number; // %
   unsub30: number;
-  series: { date: string; count: number }[];
+  series: SeriesPoint[];
+  // ▼ 新フィールド（あれば使う）
+  sent30Mail?: number;
+  sent30Campaign?: number;
+  reachRateMail?: number;
+  reachRateCampaign?: number;
+  openRateMail?: number;
+  openRateCampaign?: number;
+  seriesMail?: SeriesPoint[];
+  seriesCampaign?: SeriesPoint[];
 };
 
 type RangeKey = "7d" | "14d" | "1m" | "3m" | "6m" | "1y";
+type StreamKey = "all" | "mail" | "campaign";
 
 export default function EmailLanding() {
   const [data, setData] = useState<Summary | null>(null);
   const [range, setRange] = useState<RangeKey>("14d");
+  const [stream, setStream] = useState<StreamKey>("all"); // ← 追加：シリーズ切替
   const [msg, setMsg] = useState("");
 
   useEffect(() => {
@@ -46,23 +60,63 @@ export default function EmailLanding() {
     })();
   }, [range]);
 
-  const series = data?.series ?? [];
-  const reach = useMemo(
+  // ── KPI（総合）
+  const reachTotal = useMemo(
     () => (typeof data?.reachRate === "number" ? `${data.reachRate}%` : "-"),
     [data?.reachRate]
   );
-  const open = useMemo(
-    () => (typeof data?.openRate === "number" ? `${data?.openRate}%` : "-"),
+  const openTotal = useMemo(
+    () => (typeof data?.openRate === "number" ? `${data.openRate}%` : "-"),
     [data?.openRate]
   );
+
+  // ── KPI（プレーン・キャンペーン別）
+  const sentMail = (data as any)?.sent30Mail ?? (data as any)?.mailSent30;
+  const sentCamp =
+    (data as any)?.sent30Campaign ?? (data as any)?.campaignSent30;
+  const sentTotal =
+    typeof sentMail === "number" && typeof sentCamp === "number"
+      ? sentMail + sentCamp
+      : data?.sent30;
+
+  const reachMail =
+    typeof (data as any)?.reachRateMail === "number"
+      ? `${(data as any).reachRateMail}%`
+      : undefined;
+  const reachCamp =
+    typeof (data as any)?.reachRateCampaign === "number"
+      ? `${(data as any).reachRateCampaign}%`
+      : undefined;
+
+  const openMail =
+    typeof (data as any)?.openRateMail === "number"
+      ? `${(data as any).openRateMail}%`
+      : undefined;
+  const openCamp =
+    typeof (data as any)?.openRateCampaign === "number"
+      ? `${(data as any).openRateCampaign}%`
+      : undefined;
+
+  // ── グラフシリーズ（総合/プレーン/キャンペーン）
+  const seriesAll = data?.series ?? [];
+  const seriesMail =
+    (data as any)?.seriesMail ?? (data as any)?.mailSeries ?? [];
+  const seriesCamp =
+    (data as any)?.seriesCampaign ?? (data as any)?.campaignSeries ?? [];
+  const currentSeries =
+    stream === "mail"
+      ? seriesMail
+      : stream === "campaign"
+      ? seriesCamp
+      : seriesAll;
 
   return (
     <>
       <AppHeader />
       <main className="mx-auto max-w-6xl p-6">
-        {/* 画面タイトル（最も大きく） */}
+        {/* 画面タイトル：機能メニューと同サイズ／やや紺色 */}
         <div className="mb-4">
-          <h1 className="text-2.6xl font-extrabold tracking-tight text-zinc-900 md:text-2.6xl">
+          <h1 className="text-2xl md:text-[24px] font-semibold tracking-tight text-[#1e2a44]">
             メール配信
           </h1>
           <p className="mt-2 text-sm text-neutral-500">
@@ -188,20 +242,41 @@ export default function EmailLanding() {
           </h2>
         </header>
 
-        {/* KPI */}
-        <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
+        {/* KPI（合計＋内訳） */}
+        <div className="grid grid-cols-2 gap-4 md:grid-cols-6">
+          {/* 合計 */}
+          <KpiCard label="直近30日の配信数(合計)" value={sentTotal ?? "-"} />
+          <KpiCard label="メール到達率(合計)" value={reachTotal} />
+          <KpiCard label="メール開封率(合計)" value={openTotal} />
+          <KpiCard label="配信停止数(30日)" value={data?.unsub30 ?? "-"} />
           <KpiCard
             label="キャンペーン総数"
             value={data?.campaignCount ?? "-"}
           />
-          <KpiCard label="直近30日の配信数" value={data?.sent30 ?? "-"} />
-          <KpiCard label="メール到達率" value={reach} />
-          <KpiCard label="メール開封率" value={open} />
-          <KpiCard label="配信停止数(30日)" value={data?.unsub30 ?? "-"} />
+
+          {/* 内訳（存在する場合のみ表示） */}
+          {typeof sentMail === "number" && (
+            <KpiCard label="プレーン配信数(30日)" value={sentMail} />
+          )}
+          {typeof sentCamp === "number" && (
+            <KpiCard label="キャンペーン配信数(30日)" value={sentCamp} />
+          )}
+          {reachMail && <KpiCard label="プレーン到達率" value={reachMail} />}
+          {reachCamp && (
+            <KpiCard label="キャンペーン到達率" value={reachCamp} />
+          )}
+          {openMail && <KpiCard label="プレーン開封率" value={openMail} />}
+          {openCamp && <KpiCard label="キャンペーン開封率" value={openCamp} />}
         </div>
 
-        {/* 折れ線グラフ（期間切替） */}
-        <ChartBlock range={range} setRange={setRange} series={series} />
+        {/* 折れ線グラフ（期間切替＋シリーズ切替） */}
+        <ChartBlock
+          range={range}
+          setRange={setRange}
+          stream={stream}
+          setStream={setStream}
+          series={currentSeries}
+        />
 
         {msg && (
           <pre className="mt-3 whitespace-pre-wrap text-xs text-neutral-500">
@@ -216,34 +291,64 @@ export default function EmailLanding() {
 function ChartBlock({
   range,
   setRange,
+  stream,
+  setStream,
   series,
 }: {
   range: RangeKey;
   setRange: (r: RangeKey) => void;
+  stream: "all" | "mail" | "campaign";
+  setStream: (s: "all" | "mail" | "campaign") => void;
   series: { date: string; count: number }[];
 }) {
   return (
     <div className="mt-6 rounded-2xl border border-neutral-200 p-4">
-      <div className="mb-2 flex items-center justify-between">
+      <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div className="text-base font-medium text-neutral-700">
           直近{labelOf(range)}の配信数
         </div>
-        <div className="flex flex-wrap gap-1">
-          {(["7d", "14d", "1m", "3m", "6m", "1y"] as RangeKey[]).map((r) => (
-            <button
-              key={r}
-              onClick={() => setRange(r)}
-              className={`rounded-lg px-2 py-1 text-xs ${
-                range === r
-                  ? "border border-neutral-400 text-neutral-800"
-                  : "border border-neutral-200 text-neutral-500 hover:bg-neutral-50"
-              }`}
-            >
-              {labelOf(r)}
-            </button>
-          ))}
+
+        {/* トグル群 */}
+        <div className="flex flex-wrap gap-2">
+          {/* 期間 */}
+          <div className="flex gap-1">
+            {(["7d", "14d", "1m", "3m", "6m", "1y"] as RangeKey[]).map((r) => (
+              <button
+                key={r}
+                onClick={() => setRange(r)}
+                className={`rounded-lg px-2 py-1 text-xs ${
+                  range === r
+                    ? "border border-neutral-400 text-neutral-800"
+                    : "border border-neutral-200 text-neutral-500 hover:bg-neutral-50"
+                }`}
+              >
+                {labelOf(r)}
+              </button>
+            ))}
+          </div>
+          {/* シリーズ切替：合計/プレーン/キャンペーン */}
+          <div className="flex gap-1">
+            {(["all", "mail", "campaign"] as StreamKey[]).map((s) => (
+              <button
+                key={s}
+                onClick={() => setStream(s)}
+                className={`rounded-lg px-2 py-1 text-xs ${
+                  stream === s
+                    ? "border border-neutral-400 text-neutral-800"
+                    : "border border-neutral-200 text-neutral-500 hover:bg-neutral-50"
+                }`}
+              >
+                {s === "all"
+                  ? "合計"
+                  : s === "mail"
+                  ? "プレーン"
+                  : "キャンペーン"}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
+
       <div className="h-56">
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={series}>
@@ -251,7 +356,14 @@ function ChartBlock({
             <XAxis dataKey="date" tick={{ fontSize: 13 }} />
             <YAxis allowDecimals={false} tick={{ fontSize: 13 }} />
             <Tooltip />
-            <Line type="monotone" dataKey="count" dot={false} />
+            {/* 線をやや太くし、表示名を「配信数」に */}
+            <Line
+              type="monotone"
+              dataKey="count"
+              name="配信数"
+              dot={false}
+              strokeWidth={2.4}
+            />
           </LineChart>
         </ResponsiveContainer>
       </div>
