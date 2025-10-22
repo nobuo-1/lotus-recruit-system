@@ -20,17 +20,16 @@ const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
   ""
 );
 
+// ===== helpers =====
 function chunk<T>(arr: T[], size: number): T[][] {
   const a = [...arr];
   const out: T[][] = [];
   while (a.length) out.push(a.splice(0, size));
   return out;
 }
-
 function toS(v: unknown) {
   return typeof v === "string" ? v : v == null ? "" : String(v);
 }
-
 function replaceVars(
   input: string,
   vars: { NAME?: string; EMAIL?: string }
@@ -40,6 +39,14 @@ function replaceVars(
   return input
     .replaceAll(/\{\{\s*NAME\s*\}\}/g, name)
     .replaceAll(/\{\{\s*EMAIL\s*\}\}/g, email);
+}
+function esc(s: string) {
+  return s
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 export async function OPTIONS() {
@@ -90,7 +97,7 @@ export async function POST(req: Request) {
       .maybeSingle();
     const tenantId = (prof?.tenant_id as string | undefined) ?? undefined;
 
-    // メール本体（プレーン：from_email は使わない）
+    // メール本体（プレーン：from_emailは参照しない）
     const { data: mail, error: me } = await sb
       .from("mails")
       .select("id, tenant_id, subject, body_text, status")
@@ -196,15 +203,14 @@ export async function POST(req: Request) {
         if (error)
           return NextResponse.json({ error: error.message }, { status: 400 });
       }
-      // 予約テーブル（uuid[] に「配列」をそのまま渡す）
+      // 予約テーブル
       {
-        const recpIds = targets.map((t: any) => t.id);
         const { error } = await sb.from("mail_schedules").insert({
           tenant_id: tenantId ?? null,
           mail_id: mailId,
           schedule_at: scheduleAt, // ← DBは schedule_at
           status: "scheduled",
-          recipient_ids: recpIds, // ← ここで JSON 文字列化しないこと！
+          recipient_ids: targets.map((t: any) => t.id), // ← uuid[] に素の配列を渡す
         });
         if (error)
           return NextResponse.json({ error: error.message }, { status: 400 });
@@ -228,7 +234,7 @@ export async function POST(req: Request) {
       await sb.from("mails").update({ status: "queued" }).eq("id", mailId);
     }
 
-    // 件名/本文（プレーンテキスト、{{NAME}}/{{EMAIL}} 差し込み + 目に見えるフッター）
+    // 件名/本文（プレーンテキスト、{{NAME}}/{{EMAIL}} 差し込み）
     const subjectRaw = toS((mail as any).subject);
     const bodyTextRaw = toS((mail as any).body_text);
 
@@ -252,8 +258,9 @@ export async function POST(req: Request) {
           )}`
         : "";
 
-      const metaLines = [
-        cfg.brandCompany ? `運営：${cfg.brandCompany}` : "",
+      // ===== footer（テキスト/HTML）：「運営」→「送信者」、配信停止は“こちら”リンク =====
+      const textMeta = [
+        cfg.brandCompany ? `送信者：${cfg.brandCompany}` : "",
         cfg.brandAddress ? `所在地：${cfg.brandAddress}` : "",
         cfg.brandSupport ? `連絡先：${cfg.brandSupport}` : "",
         unsubUrl ? `配信停止：${unsubUrl}` : "",
@@ -262,8 +269,29 @@ export async function POST(req: Request) {
         .join("\n");
 
       const separator = "------------------------------";
-      const footerBlock = [separator, metaLines].filter(Boolean).join("\n");
-      const text = main ? `${main}\n\n${footerBlock}` : footerBlock;
+      const textFooter = [separator, textMeta].filter(Boolean).join("\n");
+      const text = main ? `${main}\n\n${textFooter}` : textFooter;
+
+      // HTML版（Gmail等ではこちらが表示され「こちら」がクリック可能）
+      const htmlMain = esc(main).replace(/\n/g, "<br />");
+      const chips: string[] = [];
+      if (cfg.brandCompany) chips.push(`送信者：${esc(cfg.brandCompany)}`);
+      if (cfg.brandAddress) chips.push(`所在地：${esc(cfg.brandAddress)}`);
+      if (cfg.brandSupport)
+        chips.push(
+          `連絡先：<a href="mailto:${esc(cfg.brandSupport)}">${esc(
+            cfg.brandSupport
+          )}</a>`
+        );
+      if (unsubUrl)
+        chips.push(
+          `配信停止は <a href="${unsubUrl}" target="_blank">こちら</a>`
+        );
+      const htmlFooter = `
+<div style="margin-top:16px;padding-top:12px;border-top:1px dashed #e5e7eb;font:14px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111827;">
+  ${chips.map((c) => `<div style="margin-top:6px;">${c}</div>`).join("")}
+</div>`.trim();
+      const html = `<div style="font:16px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111827;">${htmlMain}${htmlFooter}</div>`;
 
       const jobId = `mail:${mailId}:rcpt:${r.id}:${Date.now()}`;
       await emailQueue.add(
@@ -272,8 +300,8 @@ export async function POST(req: Request) {
           kind: "direct_email",
           to: String(r.email),
           subject,
-          text, // ← プレーンのみ
-          html: "", // ← 型満たし（空でOK）
+          text, // プレーン
+          html, // ← 追加：HTMLも併送（「こちら」リンク用）
           cc: ccEmail,
           tenantId: tenantId ?? undefined,
           unsubscribeToken: (r as any).unsubscribe_token ?? undefined,
