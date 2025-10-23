@@ -29,15 +29,18 @@ function chunk<T>(arr: T[], size: number): T[][] {
 function toS(v: unknown) {
   return typeof v === "string" ? v : v == null ? "" : String(v);
 }
+// === 変更点1: COMPANY に対応 ===
 function replaceVars(
   input: string,
-  vars: { NAME?: string; EMAIL?: string }
+  vars: { NAME?: string; EMAIL?: string; COMPANY?: string }
 ): string {
   const name = (vars.NAME ?? "").trim() || "ご担当者";
   const email = (vars.EMAIL ?? "").trim();
+  const company = (vars.COMPANY ?? "").trim();
   return input
     .replaceAll(/\{\{\s*NAME\s*\}\}/g, name)
-    .replaceAll(/\{\{\s*EMAIL\s*\}\}/g, email);
+    .replaceAll(/\{\{\s*EMAIL\s*\}\}/g, email)
+    .replaceAll(/\{\{\s*COMPANY\s*\}\}/g, company);
 }
 function esc(s: string) {
   return s
@@ -118,9 +121,12 @@ export async function POST(req: Request) {
     const cfg = await loadSenderConfig();
 
     // 宛先
+    // === 変更点2: company_name を取得 ===
     const { data: recs, error: re } = await sb
       .from("recipients")
-      .select("id, name, email, unsubscribe_token, unsubscribed_at, is_active")
+      .select(
+        "id, name, email, company_name, unsubscribe_token, unsubscribed_at, is_active"
+      )
       .in("id", recipientIds);
     if (re) return NextResponse.json({ error: re.message }, { status: 400 });
 
@@ -256,13 +262,16 @@ export async function POST(req: Request) {
     // キュー投入
     let queued = 0;
     for (const r of targets as any[]) {
+      // === 変更点3: COMPANY を置換に追加 ===
       const subject = replaceVars(subjectRaw, {
         NAME: r.name ?? "",
         EMAIL: r.email ?? "",
+        COMPANY: r.company_name ?? "",
       });
       const main = replaceVars(bodyTextRaw, {
         NAME: r.name ?? "",
         EMAIL: r.email ?? "",
+        COMPANY: r.company_name ?? "",
       });
 
       const unsubUrl = r.unsubscribe_token

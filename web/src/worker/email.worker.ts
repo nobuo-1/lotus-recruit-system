@@ -23,84 +23,71 @@ function parseMailAndRecipient(source: string | number | undefined) {
 const worker = new Worker<EmailJob>(
   "email",
   async (job) => {
-    const data = job.data;
+    const data = job.data as any;
 
     // ヘルスチェック
-    if ((data as any)?.kind === "noop") {
+    if (data?.kind === "noop") {
       console.log("[email.noop]", { jobId: job.id });
       return { ok: true, kind: "noop" };
     }
 
     if (!isDirectEmailJob(data)) {
-      console.warn("[email.skip]", {
-        jobId: job.id,
-        kind: (data as any)?.kind,
-      });
-      return { messageId: "skipped", kind: (data as any)?.kind ?? "unknown" };
+      console.warn("[email.skip]", { jobId: job.id, kind: data?.kind });
+      return { messageId: "skipped", kind: data?.kind ?? "unknown" };
     }
 
-    // ===== キャンセル・削除のプリフライト存在チェック =====
+    // ---- 送信前ガード（キャンセル済み/削除済みなら送らない）----
     const metaCamp =
       parseCampaignAndRecipient(job.id) || parseCampaignAndRecipient(job.name);
     const metaMail =
       parseMailAndRecipient(job.id) || parseMailAndRecipient(job.name);
 
-    if (metaCamp) {
-      const { data: row } = await admin
-        .from("deliveries")
-        .select("id,status")
-        .eq("campaign_id", metaCamp.campaignId)
-        .eq("recipient_id", metaCamp.recipientId)
-        .maybeSingle();
-
-      if (!row) {
-        console.log("[email.skip.canceled] campaign delivery missing", {
-          jobId: job.id,
-          metaCamp,
-        });
-        return { skipped: "canceled", kind: data.kind };
-      }
-    } else if (metaMail) {
+    if (metaMail) {
       const { data: row } = await admin
         .from("mail_deliveries")
-        .select("id,status")
+        .select("id, status")
         .eq("mail_id", metaMail.mailId)
         .eq("recipient_id", metaMail.recipientId)
         .maybeSingle();
-
-      if (!row) {
-        console.log("[email.skip.canceled] mail delivery missing", {
-          jobId: job.id,
-          metaMail,
-        });
-        return { skipped: "canceled", kind: data.kind };
+      if (!row || String(row.status).toLowerCase() === "cancelled") {
+        console.log("[email.skip.mail-cancelled]", { jobId: job.id });
+        return { messageId: "skipped-cancelled", kind: data.kind };
+      }
+    } else if (metaCamp) {
+      const { data: row } = await admin
+        .from("deliveries")
+        .select("id, status")
+        .eq("campaign_id", metaCamp.campaignId)
+        .eq("recipient_id", metaCamp.recipientId)
+        .maybeSingle();
+      if (!row || String(row.status).toLowerCase() === "cancelled") {
+        console.log("[email.skip.camp-cancelled]", { jobId: job.id });
+        return { messageId: "skipped-cancelled", kind: data.kind };
       }
     }
 
-    // 送信（解除ヘッダーやフッターは mailer.ts に集約）
+    // ---- 送信（解除ヘッダーやフッターは mailer.ts に集約）----
     const info = await sendMail({
       to: data.to,
       subject: data.subject,
-      html: data.html ?? "",
-      text: data.text,
+      html: data.html, // 既定で string（undefined を渡さない）
+      text: data.text, // 任意
       unsubscribeToken: data.unsubscribeToken,
       fromOverride: data.fromOverride,
       brandCompany: data.brandCompany,
       brandAddress: data.brandAddress,
       brandSupport: data.brandSupport,
       cc: data.cc || undefined,
-      attachments: data.attachments
-        ? data.attachments.map((a) => ({
+      attachments: (data as any).attachments
+        ? (data as any).attachments.map((a: any) => ({
             filename: a.name,
             path: a.path,
             contentType: a.mime,
           }))
         : undefined,
-      deliveryId: (data as any).deliveryId, // 型に既に追加済み
-      mailDeliveryId: (data as any).mailDeliveryId, // 型に既に追加済み
     });
 
-    // ---- DB 更新 ----
+    // ---- DB 更新（送信を実施したケースのみ）----
     const nowIso = new Date().toISOString();
 
     if (metaCamp) {
@@ -134,16 +121,22 @@ const worker = new Worker<EmailJob>(
         .eq("mail_id", metaMail.mailId)
         .lte("schedule_at", nowIso)
         .eq("status", "scheduled");
+    } else {
+      console.warn("[email.warn.meta-missing]", {
+        jobId: job.id,
+        name: job.name,
+      });
     }
 
     console.log("[email.sent]", {
       to: data.to,
-      messageId: (info as any)?.messageId,
+      messageId: info?.messageId,
       jobId: job.id,
       jobName: job.name,
+      tenantId: (data as any).tenantId,
     });
 
-    return { messageId: (info as any)?.messageId, kind: data.kind };
+    return { messageId: info?.messageId, kind: data.kind };
   },
   {
     connection: redis,
