@@ -59,19 +59,26 @@ function decodeHtmlEntities(s: string) {
     .replaceAll("&#39;", "'");
 }
 
+// === ここだけ最小変更：COMPANY 置換に対応 ===
 function personalize(
   input: string,
-  vars: { name?: string | null; email?: string | null },
+  vars: {
+    name?: string | null;
+    email?: string | null;
+    company?: string | null;
+  },
   encode: (s: string) => string
 ) {
   const name = (vars.name ?? "").trim() || "ご担当者";
   const email = (vars.email ?? "").trim();
+  const company = (vars.company ?? "").trim();
   return input
     .replaceAll(/\{\{\s*NAME\s*\}\}/g, encode(name))
-    .replaceAll(/\{\{\s*EMAIL\s*\}\}/g, encode(email));
+    .replaceAll(/\{\{\s*EMAIL\s*\}\}/g, encode(email))
+    .replaceAll(/\{\{\s*COMPANY\s*\}\}/g, encode(company));
 }
+/* ========================================= */
 
-/** 入力が“HTMLっぽい”かの簡易判定（HTMLならそのまま扱う） */
 function isLikelyHtml(s: string) {
   if (!s) return false;
   return (
@@ -81,14 +88,12 @@ function isLikelyHtml(s: string) {
   );
 }
 
-/** “リッチHTML”判定：該当時は無改変 */
 function isRichHtml(html: string) {
   return /<(p|h[1-6]|table|thead|tbody|tr|td|th|ul|ol|li|blockquote|strong|b|em|i|section|article|header|footer)\b/i.test(
     html || ""
   );
 }
 
-/** プレーン→HTML：1行目だけ太字＋濃色 */
 function toHtmlFromPlainTextFirstLineBold(raw: string) {
   const t = (raw ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   if (!t.length) return "";
@@ -104,7 +109,6 @@ function toHtmlFromPlainTextFirstLineBold(raw: string) {
   return `<strong style="font-weight:700;color:#0b1220;">${firstHtml}</strong><br />${restHtml}`;
 }
 
-/** 軽量HTML（p/h/strong等なし）の1行目のみ太字化。div/spanラップにも対応 */
 function maybeBoldenFirstLineInLightHtml(html: string) {
   const src = html ?? "";
   if (!src.trim()) return src;
@@ -135,14 +139,12 @@ function maybeBoldenFirstLineInLightHtml(html: string) {
   return `${prefix}<strong style="font-weight:700;color:#0b1220;">${first}</strong><br />${rest}${suffix}`;
 }
 
-/** 入力に応じた本文HTML作成 */
 function buildBodyHtmlFromInput(input: string, inputIsHtml: boolean) {
   return inputIsHtml
     ? maybeBoldenFirstLineInLightHtml(input)
     : toHtmlFromPlainTextFirstLineBold(input);
 }
 
-/** 旧フッター除去 */
 function stripLegacyFooter(html: string) {
   if (!html) return "";
   let out = html;
@@ -159,12 +161,10 @@ function stripLegacyFooter(html: string) {
   return out;
 }
 
-/** 情報チップ：デザインそのまま（暗転禁止に関わる処理なし） */
 function chip(html: string, extraStyle = "") {
   return `<span style="display:inline-block;margin:4px 6px 0 0;padding:4px 10px;border-radius:999px;background:#f9fafb !important;border:1px solid #e5e7eb !important;font-size:8px;line-height:1.6;color:#4b5563 !important;${extraStyle}">${html}</span>`;
 }
 
-/** 本文+メタを“1枚カード”に統合（暗転禁止の仕組みは含めない） */
 function buildCardHtml(opts: {
   innerHtml: string;
   company?: string;
@@ -245,7 +245,6 @@ function buildCardHtml(opts: {
 </table>`;
 }
 
-/** 開封ピクセル注入 */
 function injectOpenPixel(html: string, url: string) {
   const pixel = `<img src="${url}" alt="" width="1" height="1" style="display:block;max-width:1px;max-height:1px;border:0;outline:none;" />`;
   return /<\/body\s*>/i.test(html)
@@ -382,11 +381,15 @@ export async function POST(req: Request) {
     const htmlBodyRaw = ((camp as any).body_html as string | null) ?? "";
     const subjectRaw = String((camp as any).subject ?? "");
 
+    // === 最小変更：company_name を取得 ===
     const { data: recs, error: rErr } = await sb
       .from("recipients")
-      .select("id, name, email, unsubscribe_token, unsubscribed_at")
+      .select(
+        "id, name, email, company_name, unsubscribe_token, unsubscribed_at"
+      )
       .in("id", recipientIds)
       .eq("tenant_id", tenantId);
+    // ================================
     if (rErr)
       return NextResponse.json(
         { error: "db(recipients): " + rErr.message },
@@ -414,7 +417,6 @@ export async function POST(req: Request) {
         skipped: recipientIds.length,
       });
 
-    // キャンペーンの添付（全受信者共通）
     const { data: catts } = await admin
       .from("campaign_attachments")
       .select("file_path, file_name, mime_type")
@@ -510,7 +512,7 @@ export async function POST(req: Request) {
     );
 
     const fromOverride =
-      ((camp as any).from_email as string | undefined) || undefined; // （設定側の CC は mailer 側の company 名/Reply-To で反映）
+      ((camp as any).from_email as string | undefined) || undefined;
 
     let queued = 0;
     for (const r of targets as any[]) {
@@ -525,25 +527,26 @@ export async function POST(req: Request) {
           )}`
         : null;
 
+      // === 最小変更：COMPANY 差し込み ===
       const subjectPersonalized = personalize(
         subjectRaw,
-        { name: r.name, email: r.email },
+        { name: r.name, email: r.email, company: r.company_name },
         identity
       );
 
-      // 本文：HTMLは軽量のみ1行目太字、リッチは無改変。テキストはHTML化＋1行目太字。
       const inputIsHtml = isLikelyHtml(htmlBodyRaw);
       const personalizedInput = personalize(
         htmlBodyRaw,
-        { name: r.name, email: r.email },
+        { name: r.name, email: r.email, company: r.company_name },
         inputIsHtml ? escapeHtml : identity
       );
+      // ===============================
+
       const htmlFilled = buildBodyHtmlFromInput(personalizedInput, inputIsHtml);
 
-      // カード化（暗転禁止は入れない）
       const cardHtml = buildCardHtml({
         innerHtml: htmlFilled,
-        company: (await loadSenderConfigForCurrentUser()).cfg.brandCompany, // 会社名は設定を使う
+        company: (await loadSenderConfigForCurrentUser()).cfg.brandCompany,
         address: (await loadSenderConfigForCurrentUser()).cfg.brandAddress,
         support: (await loadSenderConfigForCurrentUser()).cfg.brandSupport,
         recipientEmail: String(r.email),
@@ -553,12 +556,11 @@ export async function POST(req: Request) {
 
       const htmlFinal = injectOpenPixel(cardHtml, pixelUrl);
 
-      // テキスト版
       const textBody = inputIsHtml
         ? decodeHtmlEntities(htmlToText(htmlFilled))
         : personalize(
             htmlBodyRaw,
-            { name: r.name, email: r.email },
+            { name: r.name, email: r.email, company: r.company_name },
             identity
           ) || "";
       const textFooter = [
