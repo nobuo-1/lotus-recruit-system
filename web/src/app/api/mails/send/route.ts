@@ -108,6 +108,18 @@ function esc(s: string) {
     .replaceAll("'", "&#39;");
 }
 
+// --- 追加：birthday から満年齢を算出 ---
+function ageFromBirthday(birthday?: string | null): string {
+  if (!birthday) return "";
+  const d = new Date(birthday);
+  if (Number.isNaN(d.getTime())) return "";
+  const today = new Date();
+  let age = today.getFullYear() - d.getFullYear();
+  const m = today.getMonth() - d.getMonth();
+  if (m < 0 || (m === 0 && today.getDate() < d.getDate())) age--;
+  return age >= 0 && Number.isFinite(age) ? String(age) : "";
+}
+
 export async function OPTIONS() {
   return new NextResponse(null, {
     status: 204,
@@ -177,11 +189,11 @@ export async function POST(req: Request) {
     // 送信元/ブランド設定
     const cfg = await loadSenderConfig();
 
-    // 宛先（会社名/職種/地域/性別/年齢/電話も取得）
+    // 宛先（birthday を追加取得）
     const { data: recs, error: re } = await sb
       .from("recipients")
       .select(
-        "id, name, email, company_name, region, gender, age, phone, unsubscribe_token, unsubscribed_at, is_active, job_category_large, job_category_small, job_categories"
+        "id, name, email, company_name, region, gender, birthday, phone, unsubscribe_token, unsubscribed_at, is_active, job_category_large, job_category_small, job_categories"
       )
       .in("id", recipientIds);
     if (re) return NextResponse.json({ error: re.message }, { status: 400 });
@@ -321,7 +333,7 @@ export async function POST(req: Request) {
       const genderLabel =
         r.gender === "male" ? "男性" : r.gender === "female" ? "女性" : "";
       const job = jobLabelFromRecipient(r);
-      const ageStr = r.age != null ? String(r.age) : "";
+      const ageStr = ageFromBirthday(r.birthday); // ← ここだけ変更（age ではなく birthday から算出）
 
       const vars = {
         NAME: r.name ?? "",

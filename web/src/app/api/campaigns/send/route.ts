@@ -59,7 +59,7 @@ function decodeHtmlEntities(s: string) {
     .replaceAll("&#39;", "'");
 }
 
-/* ====== 最小変更①：職種ラベル整形（受信者の多様な保存形式に対応） ====== */
+/* ====== 最小変更①：職種ラベル整形 ====== */
 function jobLabelFromRecipient(rec: any): string {
   const toStr = (x: any) => (typeof x === "string" ? x.trim() : "");
   const labelFromAny = (it: any): string | "" => {
@@ -102,7 +102,7 @@ function jobLabelFromRecipient(rec: any): string {
   return L && S ? `${L}（${S}）` : L || S || "";
 }
 
-/* ====== 最小変更②：置換を COMPANY/JOB/GENDER/AGE/REGION/PHONE まで拡張 ====== */
+/* ====== 最小変更②：置換拡張 ====== */
 function personalize(
   input: string,
   vars: {
@@ -136,7 +136,18 @@ function personalize(
     .replaceAll(/\{\{\s*REGION\s*\}\}/g, encode(region))
     .replaceAll(/\{\{\s*PHONE\s*\}\}/g, encode(phone));
 }
-/* ========================================= */
+
+/* --- 追加：birthday から満年齢を算出 --- */
+function ageFromBirthday(birthday?: string | null): string {
+  if (!birthday) return "";
+  const d = new Date(birthday);
+  if (Number.isNaN(d.getTime())) return "";
+  const today = new Date();
+  let age = today.getFullYear() - d.getFullYear();
+  const m = today.getMonth() - d.getMonth();
+  if (m < 0 || (m === 0 && today.getDate() < d.getDate())) age--;
+  return age >= 0 && Number.isFinite(age) ? String(age) : "";
+}
 
 function isLikelyHtml(s: string) {
   if (!s) return false;
@@ -146,13 +157,11 @@ function isLikelyHtml(s: string) {
     ) || /<\/\s*[a-z][\s\S]*?>/i.test(s)
   );
 }
-
 function isRichHtml(html: string) {
   return /<(p|h[1-6]|table|thead|tbody|tr|td|th|ul|ol|li|blockquote|strong|b|em|i|section|article|header|footer)\b/i.test(
     html || ""
   );
 }
-
 function toHtmlFromPlainTextFirstLineBold(raw: string) {
   const t = (raw ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   if (!t.length) return "";
@@ -167,7 +176,6 @@ function toHtmlFromPlainTextFirstLineBold(raw: string) {
   const restHtml = escapeHtml(restRaw).replace(/\n/g, "<br />");
   return `<strong style="font-weight:700;color:#0b1220;">${firstHtml}</strong><br />${restHtml}`;
 }
-
 function maybeBoldenFirstLineInLightHtml(html: string) {
   const src = html ?? "";
   if (!src.trim()) return src;
@@ -197,13 +205,11 @@ function maybeBoldenFirstLineInLightHtml(html: string) {
   const rest = normalized.slice(idx + "<br />".length);
   return `${prefix}<strong style="font-weight:700;color:#0b1220;">${first}</strong><br />${rest}${suffix}`;
 }
-
 function buildBodyHtmlFromInput(input: string, inputIsHtml: boolean) {
   return inputIsHtml
     ? maybeBoldenFirstLineInLightHtml(input)
     : toHtmlFromPlainTextFirstLineBold(input);
 }
-
 function stripLegacyFooter(html: string) {
   if (!html) return "";
   let out = html;
@@ -219,11 +225,9 @@ function stripLegacyFooter(html: string) {
   out = out.replace(/<table[^>]*?border-top:[^>]*?>[\s\S]*?<\/table>\s*$/i, "");
   return out;
 }
-
 function chip(html: string, extraStyle = "") {
   return `<span style="display:inline-block;margin:4px 6px 0 0;padding:4px 10px;border-radius:999px;background:#f9fafb !important;border:1px solid #e5e7eb !important;font-size:8px;line-height:1.6;color:#4b5563 !important;${extraStyle}">${html}</span>`;
 }
-
 function buildCardHtml(opts: {
   innerHtml: string;
   company?: string;
@@ -303,7 +307,6 @@ function buildCardHtml(opts: {
   </tr>
 </table>`;
 }
-
 function injectOpenPixel(html: string, url: string) {
   const pixel = `<img src="${url}" alt="" width="1" height="1" style="display:block;max-width:1px;max-height:1px;border:0;outline:none;" />`;
   return /<\/body\s*>/i.test(html)
@@ -440,15 +443,14 @@ export async function POST(req: Request) {
     const htmlBodyRaw = ((camp as any).body_html as string | null) ?? "";
     const subjectRaw = String((camp as any).subject ?? "");
 
-    // ===== 最小変更③：置換に必要な列を追加取得 =====
+    // birthday を追加取得
     const { data: recs, error: rErr } = await sb
       .from("recipients")
       .select(
-        "id, name, email, company_name, region, gender, age, phone, unsubscribe_token, unsubscribed_at, job_category_large, job_category_small, job_categories"
+        "id, name, email, company_name, region, gender, birthday, phone, unsubscribe_token, unsubscribed_at, job_category_large, job_category_small, job_categories"
       )
       .in("id", recipientIds)
       .eq("tenant_id", tenantId);
-    // ============================================
     if (rErr)
       return NextResponse.json(
         { error: "db(recipients): " + rErr.message },
@@ -586,16 +588,14 @@ export async function POST(req: Request) {
           )}`
         : null;
 
-      // ラベル類
       const job = jobLabelFromRecipient(r);
       const gender =
         r.gender === "male" ? "男性" : r.gender === "female" ? "女性" : "";
-      const ageStr = r.age != null ? String(r.age) : "";
+      const ageStr = ageFromBirthday(r.birthday); // ← ここだけ変更
       const region = r.region ?? "";
       const phone = r.phone ?? "";
       const company = r.company_name ?? "";
 
-      // ===== 最小変更④：全プレースホルダを展開 =====
       const subjectPersonalized = personalize(
         subjectRaw,
         {
@@ -626,7 +626,6 @@ export async function POST(req: Request) {
         },
         inputIsHtml ? escapeHtml : identity
       );
-      // =========================================
 
       const htmlFilled = buildBodyHtmlFromInput(personalizedInput, inputIsHtml);
 
