@@ -39,11 +39,49 @@ const worker = new Worker<EmailJob>(
       return { messageId: "skipped", kind: (data as any)?.kind ?? "unknown" };
     }
 
+    // ===== キャンセル・削除のプリフライト存在チェック =====
+    const metaCamp =
+      parseCampaignAndRecipient(job.id) || parseCampaignAndRecipient(job.name);
+    const metaMail =
+      parseMailAndRecipient(job.id) || parseMailAndRecipient(job.name);
+
+    if (metaCamp) {
+      const { data: row } = await admin
+        .from("deliveries")
+        .select("id,status")
+        .eq("campaign_id", metaCamp.campaignId)
+        .eq("recipient_id", metaCamp.recipientId)
+        .maybeSingle();
+
+      if (!row) {
+        console.log("[email.skip.canceled] campaign delivery missing", {
+          jobId: job.id,
+          metaCamp,
+        });
+        return { skipped: "canceled", kind: data.kind };
+      }
+    } else if (metaMail) {
+      const { data: row } = await admin
+        .from("mail_deliveries")
+        .select("id,status")
+        .eq("mail_id", metaMail.mailId)
+        .eq("recipient_id", metaMail.recipientId)
+        .maybeSingle();
+
+      if (!row) {
+        console.log("[email.skip.canceled] mail delivery missing", {
+          jobId: job.id,
+          metaMail,
+        });
+        return { skipped: "canceled", kind: data.kind };
+      }
+    }
+
     // 送信（解除ヘッダーやフッターは mailer.ts に集約）
     const info = await sendMail({
       to: data.to,
       subject: data.subject,
-      html: data.html ?? "", // ← string を保証（TSエラー回避）
+      html: data.html ?? "",
       text: data.text,
       unsubscribeToken: data.unsubscribeToken,
       fromOverride: data.fromOverride,
@@ -58,28 +96,21 @@ const worker = new Worker<EmailJob>(
             contentType: a.mime,
           }))
         : undefined,
-      // キャンセル防止ガードに必要なIDをそのまま引き継ぐ
-      deliveryId: data.deliveryId,
-      mailDeliveryId: data.mailDeliveryId,
+      deliveryId: (data as any).deliveryId, // 型に既に追加済み
+      mailDeliveryId: (data as any).mailDeliveryId, // 型に既に追加済み
     });
 
     // ---- DB 更新 ----
     const nowIso = new Date().toISOString();
 
-    const metaCamp =
-      parseCampaignAndRecipient(job.id) || parseCampaignAndRecipient(job.name);
-    const metaMail =
-      parseMailAndRecipient(job.id) || parseMailAndRecipient(job.name);
-
     if (metaCamp) {
-      // キャンペーン（既存ロジックを維持）
       await admin
         .from("deliveries")
         .update({ status: "sent", sent_at: nowIso })
         .eq("campaign_id", metaCamp.campaignId)
         .eq("recipient_id", metaCamp.recipientId);
 
-      await admin // 一覧の見た目用
+      await admin
         .from("campaigns")
         .update({ status: "queued" })
         .eq("id", metaCamp.campaignId);
@@ -91,7 +122,6 @@ const worker = new Worker<EmailJob>(
         .lte("scheduled_at", nowIso)
         .eq("status", "scheduled");
     } else if (metaMail) {
-      // プレーンメール
       await admin
         .from("mail_deliveries")
         .update({ status: "sent", sent_at: nowIso })
@@ -104,11 +134,6 @@ const worker = new Worker<EmailJob>(
         .eq("mail_id", metaMail.mailId)
         .lte("schedule_at", nowIso)
         .eq("status", "scheduled");
-    } else {
-      console.warn("[email.warn.meta-missing]", {
-        jobId: job.id,
-        name: job.name,
-      });
     }
 
     console.log("[email.sent]", {
@@ -116,7 +141,6 @@ const worker = new Worker<EmailJob>(
       messageId: (info as any)?.messageId,
       jobId: job.id,
       jobName: job.name,
-      tenantId: (data as any).tenantId,
     });
 
     return { messageId: (info as any)?.messageId, kind: data.kind };

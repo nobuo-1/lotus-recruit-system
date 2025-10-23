@@ -5,110 +5,118 @@ export const revalidate = 0;
 
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-async function readIdFromRequest(req: Request) {
+async function readId(req: Request) {
   const ct = req.headers.get("content-type") || "";
-  if (
-    ct.includes("application/x-www-form-urlencoded") ||
-    ct.includes("multipart/form-data")
-  ) {
-    try {
-      const fd = await req.formData();
-      const v = String(fd.get("id") ?? fd.get("scheduleId") ?? "");
-      return v || null;
-    } catch {
-      /* fallthrough */
-    }
+  if (ct.includes("application/json")) {
+    const j = await req.json().catch(() => ({}));
+    return String((j as any)?.id ?? "");
   }
-  try {
-    const j = (await req.json().catch(() => ({}))) as any;
-    const v = String(j?.id ?? j?.scheduleId ?? "");
-    return v || null;
-  } catch {
-    return null;
-  }
+  const fd = await req.formData().catch(() => null);
+  return String(fd?.get("id") ?? "");
 }
 
 export async function POST(req: Request) {
-  const id = await readIdFromRequest(req);
-  if (!id) {
-    return NextResponse.json(
-      { ok: false, error: "id required" },
-      { status: 400 }
-    );
-  }
+  try {
+    const sb = await supabaseServer();
+    const { data: u } = await sb.auth.getUser();
+    if (!u?.user) {
+      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    }
 
-  const sb = await supabaseServer();
-  const { data: u } = await sb.auth.getUser();
-  if (!u?.user) {
-    return NextResponse.json(
-      { ok: false, error: "unauthorized" },
-      { status: 401 }
-    );
-  }
+    const id = await readId(req);
+    if (!id) {
+      return NextResponse.json({ error: "id required" }, { status: 400 });
+    }
 
-  // 該当スケジュール取得（mail_id）
-  const { data: sched, error: se } = await sb
-    .from("mail_schedules")
-    .select("id, mail_id")
-    .eq("id", id)
-    .maybeSingle();
-  if (se)
-    return NextResponse.json({ ok: false, error: se.message }, { status: 500 });
+    const admin = supabaseAdmin();
 
-  if (!sched) {
-    // 既に消えている場合も一覧へ戻す
+    // 予約行を取得
+    const { data: sch, error: se } = await admin
+      .from("mail_schedules")
+      .select("id, mail_id, recipient_ids, schedule_at, status")
+      .eq("id", id)
+      .maybeSingle();
+
+    if (se) return NextResponse.json({ error: se.message }, { status: 400 });
+    if (!sch) {
+      // 既に消えている → 一覧へ戻す
+      return NextResponse.redirect(new URL("/mails/schedules", req.url), 303);
+    }
+
+    const mailId = String((sch as any).mail_id || "");
+    const recIds: string[] = Array.isArray((sch as any).recipient_ids)
+      ? ((sch as any).recipient_ids as string[])
+      : [];
+
+    // 配信予約(deliveries)を削除（該当受信者のみ）
+    if (mailId && recIds.length) {
+      const { error: de } = await admin
+        .from("mail_deliveries")
+        .delete()
+        .eq("mail_id", mailId)
+        .in("recipient_id", recIds);
+      if (de) return NextResponse.json({ error: de.message }, { status: 400 });
+    }
+
+    // スケジュール行を削除
+    const { error: re } = await admin
+      .from("mail_schedules")
+      .delete()
+      .eq("id", id);
+    if (re) return NextResponse.json({ error: re.message }, { status: 400 });
+
+    // mails.status を再計算
+    if (mailId) {
+      const now = new Date().toISOString();
+
+      // 未来の予約が残っていれば scheduled
+      const { data: restSch } = await admin
+        .from("mail_schedules")
+        .select("id")
+        .eq("mail_id", mailId)
+        .eq("status", "scheduled")
+        .gt("schedule_at", now);
+
+      // キュー済み/送信済みがあれば queued、何も無ければ draft
+      const { data: restDeliv } = await admin
+        .from("mail_deliveries")
+        .select("id,status")
+        .eq("mail_id", mailId);
+
+      let newStatus: "scheduled" | "queued" | "draft" = "draft";
+      if ((restSch ?? []).length > 0) newStatus = "scheduled";
+      else if ((restDeliv ?? []).some((d: any) => d.status !== "scheduled"))
+        newStatus = "queued";
+
+      await admin.from("mails").update({ status: newStatus }).eq("id", mailId);
+    }
+
+    // 一覧へリダイレクト
     return NextResponse.redirect(new URL("/mails/schedules", req.url), 303);
+  } catch (e: any) {
+    console.error("[mails.schedules.cancel] error", e);
+    return NextResponse.json(
+      { error: e?.message || "server error" },
+      { status: 500 }
+    );
   }
-
-  const mailId = String((sched as any).mail_id);
-
-  // 1) mail_schedules の該当行を削除
-  const { error: delSchedErr } = await sb
-    .from("mail_schedules")
-    .delete()
-    .eq("id", id);
-  if (delSchedErr)
-    return NextResponse.json(
-      { ok: false, error: delSchedErr.message },
-      { status: 500 }
-    );
-
-  // 2) mail_deliveries（未送信ぶん）を削除
-  const { error: delDelErr } = await sb
-    .from("mail_deliveries")
-    .delete()
-    .eq("mail_id", mailId)
-    .in("status", ["scheduled", "queued"]);
-  if (delDelErr)
-    return NextResponse.json(
-      { ok: false, error: delDelErr.message },
-      { status: 500 }
-    );
-
-  // 3) mails.status の見直し
-  const { data: remain } = await sb
-    .from("mail_deliveries")
-    .select("status")
-    .eq("mail_id", mailId);
-  const statuses = (remain ?? []).map((r: any) =>
-    String(r.status || "").toLowerCase()
-  );
-  let newStatus = "draft";
-  if (statuses.some((s) => s === "queued" || s === "processing"))
-    newStatus = "queued";
-  else if (statuses.some((s) => s === "scheduled")) newStatus = "scheduled";
-  else if (statuses.some((s) => s === "sent")) newStatus = "sent";
-
-  await sb.from("mails").update({ status: newStatus }).eq("id", mailId);
-
-  // 一覧に戻す
-  return NextResponse.redirect(new URL("/mails/schedules", req.url), 303);
 }
 
 export async function GET() {
-  return NextResponse.json(
-    { ok: false, error: "method not allowed" },
-    { status: 405 }
-  );
+  return NextResponse.json({ error: "method not allowed" }, { status: 405 });
+}
+export async function HEAD() {
+  return new NextResponse(null, { status: 405 });
+}
+export async function OPTIONS() {
+  return new NextResponse(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    },
+  });
 }

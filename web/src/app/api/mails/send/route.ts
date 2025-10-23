@@ -12,7 +12,7 @@ import { supabaseAdmin } from "@/lib/supabaseAdmin";
 type Payload = {
   mailId: string;
   recipientIds: string[];
-  scheduleAt?: string | null; // 予約ISO（mail_schedules は schedule_at カラム）
+  scheduleAt?: string | null; // ISO
 };
 
 const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
@@ -20,7 +20,6 @@ const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
   ""
 );
 
-// ===== helpers =====
 function chunk<T>(arr: T[], size: number): T[][] {
   const a = [...arr];
   const out: T[][] = [];
@@ -97,7 +96,7 @@ export async function POST(req: Request) {
       .maybeSingle();
     const tenantId = (prof?.tenant_id as string | undefined) ?? undefined;
 
-    // メール本体（プレーン：from_emailは参照しない）
+    // メール本体（プレーン）
     const { data: mail, error: me } = await sb
       .from("mails")
       .select("id, tenant_id, subject, body_text, status")
@@ -132,7 +131,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "no recipients" }, { status: 400 });
     }
 
-    // 既存 delivery を除外（mail_deliveries に tenant_id は無い）
+    // 既存 delivery を除外
     const { data: existing } = await sb
       .from("mail_deliveries")
       .select("recipient_id")
@@ -154,7 +153,7 @@ export async function POST(req: Request) {
     const admin = supabaseAdmin();
     const { data: atts } = await admin
       .from("mail_attachments")
-      .select("file_path, file_name, mime_type")
+      .select("id, file_path, file_name, mime_type")
       .eq("mail_id", mailId);
 
     let attachList: Array<{ path: string; name: string; mime?: string }> = [];
@@ -187,8 +186,10 @@ export async function POST(req: Request) {
       scheduleAt = new Date(ts).toISOString();
     }
 
-    // deliveries へ事前登録 + 予約テーブル
+    // deliveries 事前登録 + 予約テーブル
+    let rowsForQueue: Array<{ recipientId: string; deliveryId?: string }> = [];
     if (scheduleAt) {
+      // scheduled で登録
       for (const part of chunk(
         targets.map((r: any) => ({
           mail_id: mailId,
@@ -199,16 +200,23 @@ export async function POST(req: Request) {
         })),
         500
       )) {
-        const { error } = await sb.from("mail_deliveries").insert(part);
+        const { data: ins, error } = await sb
+          .from("mail_deliveries")
+          .insert(part)
+          .select("recipient_id")
+          .returns<{ recipient_id: string }[]>();
         if (error)
           return NextResponse.json({ error: error.message }, { status: 400 });
+        rowsForQueue.push(
+          ...((ins ?? []).map((d) => ({ recipientId: d.recipient_id })) as any)
+        );
       }
-      // 予約テーブル
+      // 予約テーブルに登録（uuid[]）
       {
         const { error } = await sb.from("mail_schedules").insert({
           tenant_id: tenantId ?? null,
           mail_id: mailId,
-          schedule_at: scheduleAt, // ← DBは schedule_at
+          schedule_at: scheduleAt,
           status: "scheduled",
           recipient_ids: targets.map((t: any) => t.id),
         });
@@ -217,6 +225,7 @@ export async function POST(req: Request) {
       }
       await sb.from("mails").update({ status: "scheduled" }).eq("id", mailId);
     } else {
+      // queued で登録
       for (const part of chunk(
         targets.map((r: any) => ({
           mail_id: mailId,
@@ -227,34 +236,25 @@ export async function POST(req: Request) {
         })),
         500
       )) {
-        const { error } = await sb.from("mail_deliveries").insert(part);
+        const { data: ins, error } = await sb
+          .from("mail_deliveries")
+          .insert(part)
+          .select("recipient_id")
+          .returns<{ recipient_id: string }[]>();
         if (error)
           return NextResponse.json({ error: error.message }, { status: 400 });
+        rowsForQueue.push(
+          ...((ins ?? []).map((d) => ({ recipientId: d.recipient_id })) as any)
+        );
       }
       await sb.from("mails").update({ status: "queued" }).eq("id", mailId);
     }
-
-    // ↑ ここまでで mail_deliveries の行は作られているので id を取得して map 化
-    const { data: dels, error: selErr } = await sb
-      .from("mail_deliveries")
-      .select("id, recipient_id")
-      .eq("mail_id", mailId)
-      .in(
-        "recipient_id",
-        targets.map((t: any) => t.id)
-      );
-    if (selErr)
-      return NextResponse.json({ error: selErr.message }, { status: 500 });
-    const idMap = new Map<string, string>();
-    (dels ?? []).forEach((d: any) =>
-      idMap.set(String(d.recipient_id), String(d.id))
-    );
 
     // 件名/本文（プレーンテキスト、{{NAME}}/{{EMAIL}} 差し込み）
     const subjectRaw = toS((mail as any).subject);
     const bodyTextRaw = toS((mail as any).body_text);
 
-    // CC：メール用設定の差出人メールがあればCCへ
+    // CC（差出人設定）
     const ccEmail = cfg.fromOverride || undefined;
 
     let queued = 0;
@@ -274,47 +274,40 @@ export async function POST(req: Request) {
           )}`
         : "";
 
-      // ===== footer（テキスト版：ご指定の4項目 + 仕切り線）=====
-      const textMeta = [
+      // ===== フッター（シンプル版 / 送信者・所在地・連絡先・配信停止） =====
+      const textLines = [
         cfg.brandCompany ? `送信者：${cfg.brandCompany}` : "",
         cfg.brandAddress ? `所在地：${cfg.brandAddress}` : "",
         cfg.brandSupport ? `連絡先：${cfg.brandSupport}` : "",
         unsubUrl ? `配信停止：${unsubUrl}` : "",
-      ]
-        .filter(Boolean)
-        .join("\n");
-      const separator = "------------------------------";
-      const textFooter = [separator, textMeta].filter(Boolean).join("\n");
-      const text = main ? `${main}\n\n${textFooter}` : textFooter;
+      ].filter(Boolean);
 
-      // ===== HTML版（最小限、本文は <br>、配信停止は「こちら」リンク、開封ピクセル t=mail）=====
-      const mailDeliveryId = idMap.get(String(r.id)) || "";
+      const text = [main, "", ...textLines].join("\n").trim();
+
+      // HTML は最小限（装飾/色なし、「こちら」リンクのみ）
       const htmlMain = esc(main).replace(/\n/g, "<br />");
-      const chips: string[] = [];
-      if (cfg.brandCompany) chips.push(`送信者：${esc(cfg.brandCompany)}`);
-      if (cfg.brandAddress) chips.push(`所在地：${esc(cfg.brandAddress)}`);
-      if (cfg.brandSupport)
-        chips.push(
-          `連絡先：<a href="mailto:${esc(cfg.brandSupport)}">${esc(
-            cfg.brandSupport
-          )}</a>`
-        );
-      if (unsubUrl)
-        chips.push(
-          `配信停止は <a href="${unsubUrl}" target="_blank">こちら</a>`
-        );
-      const htmlFooter = `
-<div style="margin-top:16px;padding-top:12px;border-top:1px dashed #e5e7eb;font:14px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111827;">
-  ${chips.map((c) => `<div style="margin-top:6px;">${c}</div>`).join("")}
-</div>`.trim();
-      const pixelUrl = `${appUrl}/api/email/open?t=mail&id=${encodeURIComponent(
-        mailDeliveryId
-      )}`;
-      const html =
-        `<div style="font:16px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111827;">${htmlMain}${htmlFooter}` +
-        `<img src="${pixelUrl}" alt="" width="1" height="1" style="display:block;max-width:1px;max-height:1px;border:0;outline:none;" />` +
-        `</div>`;
+      const htmlFooter =
+        [
+          cfg.brandCompany ? `送信者：${esc(cfg.brandCompany)}` : "",
+          cfg.brandAddress ? `所在地：${esc(cfg.brandAddress)}` : "",
+          cfg.brandSupport
+            ? `連絡先：<a href="mailto:${esc(cfg.brandSupport)}">${esc(
+                cfg.brandSupport
+              )}</a>`
+            : "",
+          unsubUrl
+            ? `配信停止は <a href="${unsubUrl}" target="_blank">こちら</a>`
+            : "",
+        ]
+          .filter(Boolean)
+          .map((l) => `<div>${l}</div>`)
+          .join("") || "";
 
+      const html = `${htmlMain}${
+        htmlFooter ? `<div style="margin-top:12px;">${htmlFooter}</div>` : ""
+      }`;
+
+      // キュー投入（ワーカー側でキャンセル済みチェック有り）
       const jobId = `mail:${mailId}:rcpt:${r.id}:${Date.now()}`;
       await emailQueue.add(
         "direct_email",
@@ -322,8 +315,8 @@ export async function POST(req: Request) {
           kind: "direct_email",
           to: String(r.email),
           subject,
-          text, // プレーン
-          html, // HTML（最小限）
+          text, // プレーン：装飾なし
+          html, // 最小限
           cc: ccEmail,
           tenantId: tenantId ?? undefined,
           unsubscribeToken: (r as any).unsubscribe_token ?? undefined,
@@ -331,9 +324,11 @@ export async function POST(req: Request) {
           brandCompany: cfg.brandCompany,
           brandAddress: cfg.brandAddress,
           brandSupport: cfg.brandSupport,
-          attachments: attachList, // 署名URLの配列
-          mailDeliveryId, // ← キャンセル防止ガード
-        },
+          attachments: attachList, // 署名URL
+          // プレーンメールの配信ガード用（ワーカー→メーラーにも渡る）
+          mailDeliveryId: (rowsForQueue.find((x) => x.recipientId === r.id)
+            ?.deliveryId || "") as any,
+        } as any,
         {
           jobId,
           delay,
