@@ -59,23 +59,82 @@ function decodeHtmlEntities(s: string) {
     .replaceAll("&#39;", "'");
 }
 
-// === ここだけ最小変更：COMPANY 置換に対応 ===
+/* ====== 最小変更①：職種ラベル整形（受信者の多様な保存形式に対応） ====== */
+function jobLabelFromRecipient(rec: any): string {
+  const toStr = (x: any) => (typeof x === "string" ? x.trim() : "");
+  const labelFromAny = (it: any): string | "" => {
+    if (!it) return "";
+    if (typeof it === "string") {
+      const s = it.trim();
+      if (s.startsWith("{") || s.startsWith("[")) {
+        try {
+          const j = JSON.parse(s);
+          if (Array.isArray(j)) {
+            const v = j.map(labelFromAny).filter(Boolean).join(" / ");
+            if (v) return v;
+          }
+          if (j && typeof j === "object") {
+            const L = toStr(j.large);
+            const S = toStr(j.small);
+            return L && S ? `${L}（${S}）` : L || S || "";
+          }
+        } catch {
+          /* no-op */
+        }
+      }
+      return s;
+    }
+    if (typeof it === "object") {
+      const L = toStr((it as any).large);
+      const S = toStr((it as any).small);
+      return L && S ? `${L}（${S}）` : L || S || "";
+    }
+    return "";
+  };
+
+  const jc = rec?.job_categories;
+  if (Array.isArray(jc) && jc.length) {
+    const v = jc.map(labelFromAny).filter(Boolean).join(" / ");
+    if (v) return v;
+  }
+  const L = toStr(rec?.job_category_large);
+  const S = toStr(rec?.job_category_small);
+  return L && S ? `${L}（${S}）` : L || S || "";
+}
+
+/* ====== 最小変更②：置換を COMPANY/JOB/GENDER/AGE/REGION/PHONE まで拡張 ====== */
 function personalize(
   input: string,
   vars: {
     name?: string | null;
     email?: string | null;
     company?: string | null;
+    job?: string | null;
+    gender?: string | null;
+    age?: string | number | null;
+    region?: string | null;
+    phone?: string | null;
   },
   encode: (s: string) => string
 ) {
   const name = (vars.name ?? "").trim() || "ご担当者";
   const email = (vars.email ?? "").trim();
   const company = (vars.company ?? "").trim();
+  const job = (vars.job ?? "").trim();
+  const gender = (vars.gender ?? "").trim();
+  const age = vars.age === 0 || vars.age ? String(vars.age).trim() : "";
+  const region = (vars.region ?? "").trim();
+  const phone = (vars.phone ?? "").trim();
+
   return input
     .replaceAll(/\{\{\s*NAME\s*\}\}/g, encode(name))
     .replaceAll(/\{\{\s*EMAIL\s*\}\}/g, encode(email))
-    .replaceAll(/\{\{\s*COMPANY\s*\}\}/g, encode(company));
+    .replaceAll(/\{\{\s*COMPANY\s*\}\}/g, encode(company))
+    .replaceAll(/\{\{\s*JOB\s*\}\}/g, encode(job))
+    .replaceAll(/\{\{\s*GENDER\s*\}\}/g, encode(gender))
+    .replaceAll(/\{\{\s*AGE\s*\}\}/g, encode(age))
+    .replaceAll(/\{\{\s*REGION\s*\}\}/g, encode(region))
+    .replaceAll(/\{\{\s*PHONE\s*\}\}/g, encode(phone));
 }
 /* ========================================= */
 
@@ -381,15 +440,15 @@ export async function POST(req: Request) {
     const htmlBodyRaw = ((camp as any).body_html as string | null) ?? "";
     const subjectRaw = String((camp as any).subject ?? "");
 
-    // === 最小変更：company_name を取得 ===
+    // ===== 最小変更③：置換に必要な列を追加取得 =====
     const { data: recs, error: rErr } = await sb
       .from("recipients")
       .select(
-        "id, name, email, company_name, unsubscribe_token, unsubscribed_at"
+        "id, name, email, company_name, region, gender, age, phone, unsubscribe_token, unsubscribed_at, job_category_large, job_category_small, job_categories"
       )
       .in("id", recipientIds)
       .eq("tenant_id", tenantId);
-    // ================================
+    // ============================================
     if (rErr)
       return NextResponse.json(
         { error: "db(recipients): " + rErr.message },
@@ -527,20 +586,47 @@ export async function POST(req: Request) {
           )}`
         : null;
 
-      // === 最小変更：COMPANY 差し込み ===
+      // ラベル類
+      const job = jobLabelFromRecipient(r);
+      const gender =
+        r.gender === "male" ? "男性" : r.gender === "female" ? "女性" : "";
+      const ageStr = r.age != null ? String(r.age) : "";
+      const region = r.region ?? "";
+      const phone = r.phone ?? "";
+      const company = r.company_name ?? "";
+
+      // ===== 最小変更④：全プレースホルダを展開 =====
       const subjectPersonalized = personalize(
         subjectRaw,
-        { name: r.name, email: r.email, company: r.company_name },
+        {
+          name: r.name,
+          email: r.email,
+          company,
+          job,
+          gender,
+          age: ageStr,
+          region,
+          phone,
+        },
         identity
       );
 
       const inputIsHtml = isLikelyHtml(htmlBodyRaw);
       const personalizedInput = personalize(
         htmlBodyRaw,
-        { name: r.name, email: r.email, company: r.company_name },
+        {
+          name: r.name,
+          email: r.email,
+          company,
+          job,
+          gender,
+          age: ageStr,
+          region,
+          phone,
+        },
         inputIsHtml ? escapeHtml : identity
       );
-      // ===============================
+      // =========================================
 
       const htmlFilled = buildBodyHtmlFromInput(personalizedInput, inputIsHtml);
 
@@ -560,7 +646,16 @@ export async function POST(req: Request) {
         ? decodeHtmlEntities(htmlToText(htmlFilled))
         : personalize(
             htmlBodyRaw,
-            { name: r.name, email: r.email, company: r.company_name },
+            {
+              name: r.name,
+              email: r.email,
+              company,
+              job,
+              gender,
+              age: ageStr,
+              region,
+              phone,
+            },
             identity
           ) || "";
       const textFooter = [
@@ -584,7 +679,7 @@ export async function POST(req: Request) {
         .join("\n");
       const textFinal = textBody ? `${textBody}\n\n${textFooter}` : textFooter;
 
-      const job: DirectEmailJob = {
+      const jobPayload: DirectEmailJob = {
         kind: "direct_email",
         to: String(r.email),
         subject: subjectPersonalized,
@@ -600,7 +695,7 @@ export async function POST(req: Request) {
       };
 
       const jobId = `camp:${campaignId}:rcpt:${r.id}:${Date.now()}`;
-      await emailQueue.add("direct_email", job, {
+      await emailQueue.add("direct_email", jobPayload, {
         jobId,
         delay,
         removeOnComplete: 1000,
