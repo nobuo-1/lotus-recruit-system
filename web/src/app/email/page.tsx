@@ -79,7 +79,7 @@ export default function EmailLanding() {
       <main className="mx-auto max-w-6xl p-6">
         {/* タイトル（色を紺寄りに、機能メニューと同サイズ） */}
         <div className="mb-4">
-          <h1 className="text-[24px] md:text-[24px] font-extrabold tracking-tight text-indigo-900">
+          <h1 className="text-[26px] md:text-[24px] font-extrabold tracking-tight text-indigo-900">
             メール配信
           </h1>
           <p className="mt-2 text-sm text-neutral-500">
