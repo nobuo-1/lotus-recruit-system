@@ -29,19 +29,76 @@ function chunk<T>(arr: T[], size: number): T[][] {
 function toS(v: unknown) {
   return typeof v === "string" ? v : v == null ? "" : String(v);
 }
-// === 変更点1: COMPANY に対応 ===
+
+// --- 追加：職種の見出し生成（配列/JSON/オブジェクト/旧カラムに対応） ---
+function jobLabelFromRecipient(rec: any): string {
+  const toStr = (x: any) => (typeof x === "string" ? x.trim() : "");
+  const labelFromAny = (it: any): string | "" => {
+    if (!it) return "";
+    if (typeof it === "string") {
+      const s = it.trim();
+      if (s.startsWith("{")) {
+        try {
+          const o = JSON.parse(s);
+          const L = toStr(o?.large);
+          const S = toStr(o?.small);
+          return L && S ? `${L}（${S}）` : L || S || "";
+        } catch {
+          return s;
+        }
+      }
+      return s;
+    }
+    if (typeof it === "object") {
+      const L = toStr((it as any).large);
+      const S = toStr((it as any).small);
+      return L && S ? `${L}（${S}）` : L || S || "";
+    }
+    return "";
+  };
+  const jc = rec?.job_categories;
+  if (Array.isArray(jc) && jc.length) {
+    const v = jc.map(labelFromAny).filter(Boolean).join(" / ");
+    if (v) return v;
+  }
+  const L = toStr(rec?.job_category_large);
+  const S = toStr(rec?.job_category_small);
+  return L && S ? `${L}（${S}）` : L || S || "";
+}
+
+// === 変更：置換を拡張（COMPANY/JOB/GENDER/AGE/REGION/PHONE 追加） ===
 function replaceVars(
   input: string,
-  vars: { NAME?: string; EMAIL?: string; COMPANY?: string }
+  vars: {
+    NAME?: string;
+    EMAIL?: string;
+    COMPANY?: string;
+    JOB?: string;
+    GENDER?: string;
+    AGE?: string | number;
+    REGION?: string;
+    PHONE?: string;
+  }
 ): string {
   const name = (vars.NAME ?? "").trim() || "ご担当者";
   const email = (vars.EMAIL ?? "").trim();
   const company = (vars.COMPANY ?? "").trim();
+  const job = (vars.JOB ?? "").trim();
+  const gender = (vars.GENDER ?? "").trim();
+  const age = vars.AGE != null ? String(vars.AGE) : "";
+  const region = (vars.REGION ?? "").trim();
+  const phone = (vars.PHONE ?? "").trim();
   return input
     .replaceAll(/\{\{\s*NAME\s*\}\}/g, name)
     .replaceAll(/\{\{\s*EMAIL\s*\}\}/g, email)
-    .replaceAll(/\{\{\s*COMPANY\s*\}\}/g, company);
+    .replaceAll(/\{\{\s*COMPANY\s*\}\}/g, company)
+    .replaceAll(/\{\{\s*JOB\s*\}\}/g, job)
+    .replaceAll(/\{\{\s*GENDER\s*\}\}/g, gender)
+    .replaceAll(/\{\{\s*AGE\s*\}\}/g, age)
+    .replaceAll(/\{\{\s*REGION\s*\}\}/g, region)
+    .replaceAll(/\{\{\s*PHONE\s*\}\}/g, phone);
 }
+
 function esc(s: string) {
   return s
     .replaceAll("&", "&amp;")
@@ -120,12 +177,11 @@ export async function POST(req: Request) {
     // 送信元/ブランド設定
     const cfg = await loadSenderConfig();
 
-    // 宛先
-    // === 変更点2: company_name を取得 ===
+    // 宛先（会社名/職種/地域/性別/年齢/電話も取得）
     const { data: recs, error: re } = await sb
       .from("recipients")
       .select(
-        "id, name, email, company_name, unsubscribe_token, unsubscribed_at, is_active"
+        "id, name, email, company_name, region, gender, age, phone, unsubscribe_token, unsubscribed_at, is_active, job_category_large, job_category_small, job_categories"
       )
       .in("id", recipientIds);
     if (re) return NextResponse.json({ error: re.message }, { status: 400 });
@@ -262,17 +318,24 @@ export async function POST(req: Request) {
     // キュー投入
     let queued = 0;
     for (const r of targets as any[]) {
-      // === 変更点3: COMPANY を置換に追加 ===
-      const subject = replaceVars(subjectRaw, {
+      const genderLabel =
+        r.gender === "male" ? "男性" : r.gender === "female" ? "女性" : "";
+      const job = jobLabelFromRecipient(r);
+      const ageStr = r.age != null ? String(r.age) : "";
+
+      const vars = {
         NAME: r.name ?? "",
         EMAIL: r.email ?? "",
         COMPANY: r.company_name ?? "",
-      });
-      const main = replaceVars(bodyTextRaw, {
-        NAME: r.name ?? "",
-        EMAIL: r.email ?? "",
-        COMPANY: r.company_name ?? "",
-      });
+        JOB: job,
+        GENDER: genderLabel,
+        AGE: ageStr,
+        REGION: r.region ?? "",
+        PHONE: r.phone ?? "",
+      };
+
+      const subject = replaceVars(subjectRaw, vars);
+      const main = replaceVars(bodyTextRaw, vars);
 
       const unsubUrl = r.unsubscribe_token
         ? `${appUrl}/api/unsubscribe?token=${encodeURIComponent(
