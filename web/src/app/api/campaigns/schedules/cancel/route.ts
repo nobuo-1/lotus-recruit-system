@@ -32,10 +32,10 @@ export async function POST(req: Request) {
 
     const admin = supabaseAdmin();
 
-    // 予約行
+    // 予約行を取得（必要最小限）
     const { data: sch, error: se } = await admin
       .from("email_schedules")
-      .select("id, campaign_id, recipient_ids, scheduled_at, status")
+      .select("id, campaign_id, scheduled_at, status")
       .eq("id", id)
       .maybeSingle();
 
@@ -45,21 +45,18 @@ export async function POST(req: Request) {
     }
 
     const campaignId = String((sch as any).campaign_id || "");
-    const recIds: string[] = Array.isArray((sch as any).recipient_ids)
-      ? ((sch as any).recipient_ids as string[])
-      : [];
 
-    // deliveries から該当受信者行を削除
-    if (campaignId && recIds.length) {
+    // （重要）未送信 deliveries を一括削除
+    if (campaignId) {
       const { error: de } = await admin
         .from("deliveries")
         .delete()
         .eq("campaign_id", campaignId)
-        .in("recipient_id", recIds);
+        .is("sent_at", null);
       if (de) return NextResponse.json({ error: de.message }, { status: 400 });
     }
 
-    // email_schedules から削除
+    // email_schedules から予約自体を削除
     const { error: re } = await admin
       .from("email_schedules")
       .delete()
@@ -79,12 +76,16 @@ export async function POST(req: Request) {
 
       const { data: restDeliv } = await admin
         .from("deliveries")
-        .select("id,status")
+        .select("id,status,sent_at")
         .eq("campaign_id", campaignId);
 
       let newStatus: "scheduled" | "queued" | "draft" = "draft";
       if ((restSch ?? []).length > 0) newStatus = "scheduled";
-      else if ((restDeliv ?? []).some((d: any) => d.status !== "scheduled"))
+      else if (
+        (restDeliv ?? []).some(
+          (d: any) => (d.status ?? "") !== "scheduled" || d.sent_at
+        )
+      )
         newStatus = "queued";
 
       await admin

@@ -96,7 +96,7 @@ export async function POST(req: Request) {
       .maybeSingle();
     const tenantId = (prof?.tenant_id as string | undefined) ?? undefined;
 
-    // メール本体（プレーン）
+    // メール本体
     const { data: mail, error: me } = await sb
       .from("mails")
       .select("id, tenant_id, subject, body_text, status")
@@ -149,7 +149,7 @@ export async function POST(req: Request) {
       });
     }
 
-    // 添付の署名URLを生成（全受信者共通）
+    // 添付の署名URL
     const admin = supabaseAdmin();
     const { data: atts } = await admin
       .from("mail_attachments")
@@ -186,10 +186,10 @@ export async function POST(req: Request) {
       scheduleAt = new Date(ts).toISOString();
     }
 
-    // deliveries 事前登録 + 予約テーブル
-    let rowsForQueue: Array<{ recipientId: string; deliveryId?: string }> = [];
+    // deliveries 事前登録（id も取得） + map(recipientId -> deliveryId)
+    const idMap = new Map<string, string>(); // recipientId -> deliveryId
+
     if (scheduleAt) {
-      // scheduled で登録
       for (const part of chunk(
         targets.map((r: any) => ({
           mail_id: mailId,
@@ -203,29 +203,26 @@ export async function POST(req: Request) {
         const { data: ins, error } = await sb
           .from("mail_deliveries")
           .insert(part)
-          .select("recipient_id")
-          .returns<{ recipient_id: string }[]>();
+          .select("id, recipient_id");
         if (error)
           return NextResponse.json({ error: error.message }, { status: 400 });
-        rowsForQueue.push(
-          ...((ins ?? []).map((d) => ({ recipientId: d.recipient_id })) as any)
+        (ins ?? []).forEach((d: any) =>
+          idMap.set(String(d.recipient_id), String(d.id))
         );
       }
-      // 予約テーブルに登録（uuid[]）
+      // 予約テーブル
       {
         const { error } = await sb.from("mail_schedules").insert({
           tenant_id: tenantId ?? null,
           mail_id: mailId,
           schedule_at: scheduleAt,
           status: "scheduled",
-          recipient_ids: targets.map((t: any) => t.id),
         });
         if (error)
           return NextResponse.json({ error: error.message }, { status: 400 });
       }
       await sb.from("mails").update({ status: "scheduled" }).eq("id", mailId);
     } else {
-      // queued で登録
       for (const part of chunk(
         targets.map((r: any) => ({
           mail_id: mailId,
@@ -239,24 +236,24 @@ export async function POST(req: Request) {
         const { data: ins, error } = await sb
           .from("mail_deliveries")
           .insert(part)
-          .select("recipient_id")
-          .returns<{ recipient_id: string }[]>();
+          .select("id, recipient_id");
         if (error)
           return NextResponse.json({ error: error.message }, { status: 400 });
-        rowsForQueue.push(
-          ...((ins ?? []).map((d) => ({ recipientId: d.recipient_id })) as any)
+        (ins ?? []).forEach((d: any) =>
+          idMap.set(String(d.recipient_id), String(d.id))
         );
       }
       await sb.from("mails").update({ status: "queued" }).eq("id", mailId);
     }
 
-    // 件名/本文（プレーンテキスト、{{NAME}}/{{EMAIL}} 差し込み）
+    // 件名/本文
     const subjectRaw = toS((mail as any).subject);
     const bodyTextRaw = toS((mail as any).body_text);
 
-    // CC（差出人設定）
+    // CC
     const ccEmail = cfg.fromOverride || undefined;
 
+    // キュー投入
     let queued = 0;
     for (const r of targets as any[]) {
       const subject = replaceVars(subjectRaw, {
@@ -274,17 +271,23 @@ export async function POST(req: Request) {
           )}`
         : "";
 
-      // ===== フッター（シンプル版 / 送信者・所在地・連絡先・配信停止） =====
+      // ---- プレーン本文（装飾なしフッター）----
       const textLines = [
         cfg.brandCompany ? `送信者：${cfg.brandCompany}` : "",
         cfg.brandAddress ? `所在地：${cfg.brandAddress}` : "",
         cfg.brandSupport ? `連絡先：${cfg.brandSupport}` : "",
         unsubUrl ? `配信停止：${unsubUrl}` : "",
       ].filter(Boolean);
-
       const text = [main, "", ...textLines].join("\n").trim();
 
-      // HTML は最小限（装飾/色なし、「こちら」リンクのみ）
+      // ---- HTML（最小限）+ トラッキングピクセル(type=mail) ----
+      const deliveryId = idMap.get(String(r.id)) || "";
+      const pixel = deliveryId
+        ? `<img src="${appUrl}/api/email/open?id=${encodeURIComponent(
+            deliveryId
+          )}&type=mail" width="1" height="1" alt="" style="display:none" />`
+        : "";
+
       const htmlMain = esc(main).replace(/\n/g, "<br />");
       const htmlFooter =
         [
@@ -305,9 +308,8 @@ export async function POST(req: Request) {
 
       const html = `${htmlMain}${
         htmlFooter ? `<div style="margin-top:12px;">${htmlFooter}</div>` : ""
-      }`;
+      }${pixel}`;
 
-      // キュー投入（ワーカー側でキャンセル済みチェック有り）
       const jobId = `mail:${mailId}:rcpt:${r.id}:${Date.now()}`;
       await emailQueue.add(
         "direct_email",
@@ -315,8 +317,8 @@ export async function POST(req: Request) {
           kind: "direct_email",
           to: String(r.email),
           subject,
-          text, // プレーン：装飾なし
-          html, // 最小限
+          text,
+          html,
           cc: ccEmail,
           tenantId: tenantId ?? undefined,
           unsubscribeToken: (r as any).unsubscribe_token ?? undefined,
@@ -324,11 +326,8 @@ export async function POST(req: Request) {
           brandCompany: cfg.brandCompany,
           brandAddress: cfg.brandAddress,
           brandSupport: cfg.brandSupport,
-          attachments: attachList, // 署名URL
-          // プレーンメールの配信ガード用（ワーカー→メーラーにも渡る）
-          mailDeliveryId: (rowsForQueue.find((x) => x.recipientId === r.id)
-            ?.deliveryId || "") as any,
-        } as any,
+          attachments: attachList,
+        },
         {
           jobId,
           delay,
