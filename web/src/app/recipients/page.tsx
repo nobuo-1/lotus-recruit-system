@@ -365,13 +365,13 @@ export default function RecipientsPage() {
             href="/email"
             className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
           >
-            メール配信トップ
+            メール配信トップへ
           </Link>
           <Link
             href="/recipients/new"
             className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
           >
-            新規追加
+            受信者新規追加
           </Link>
         </div>
       </div>

@@ -136,19 +136,19 @@ export default async function CampaignsPage() {
             href="/email"
             className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
           >
-            メール配信トップ
+            メール配信トップへ
           </Link>
           <Link
             href="/email/schedules"
             className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
           >
-            キャンペーン予約リスト
+            キャンペーン予約リストへ
           </Link>
           <Link
             href="/campaigns/new"
             className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
           >
-            新規作成
+            キャンペーン新規作成へ
           </Link>
         </div>
       </div>

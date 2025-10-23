@@ -77,14 +77,22 @@ export default async function MailSchedulesPage() {
             href="/email"
             className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
           >
-            メール配信トップ
+            メール配信トップへ
           </Link>
           <Link
             href="/mails/new"
             className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
           >
-            新規作成
+            メール新規作成へ
           </Link>
+          {/* ▼ 追加：メール一覧へ */}
+          <Link
+            href="/mails"
+            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
+          >
+            メール一覧へ
+          </Link>
+          {/* ▲ 追加ここまで */}
         </div>
       </div>
 

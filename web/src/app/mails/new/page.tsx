@@ -175,8 +175,8 @@ export default function MailNewPage() {
             />
             <p className="mt-1 text-xs text-neutral-500">
               差し込み可: <code className="font-mono">{"{{NAME}}"}</code>,{" "}
-              <code className="font-mono">{"{{EMAIL}}, {{COMPANY}}"}</code>{" "}
-              （例: <code className="font-mono">{"{{NAME}}"}</code> 様）
+              <code className="font-mono">{"{{EMAIL}},{{COMPANY}}"}</code> （例:{" "}
+              <code className="font-mono">{"{{NAME}}"}</code> 様）
             </p>
           </div>
 
@@ -203,7 +203,7 @@ export default function MailNewPage() {
           />
           <p className="mt-2 text-xs text-neutral-500">
             差し込み可: <code className="font-mono">{"{{NAME}}"}</code>,{" "}
-            <code className="font-mono">{"{{EMAIL}}"}</code>
+            <code className="font-mono">{"{{EMAIL}},{{COMPANY}}"}</code>
             （例: <code className="font-mono">{"{{NAME}}"}</code> 様）
           </p>
         </div>
