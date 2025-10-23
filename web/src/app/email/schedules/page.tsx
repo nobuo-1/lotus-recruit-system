@@ -38,7 +38,7 @@ export default async function CampaignSchedulesPage() {
 
   const nowISO = new Date().toISOString();
 
-  // campaigns を結合して件名/名前を取得、未来の scheduled のみ
+  // 未来の予約のみ取得（件名/名前は campaigns 結合で取得）
   let q = sb
     .from("email_schedules")
     .select(
@@ -48,15 +48,10 @@ export default async function CampaignSchedulesPage() {
     .gte("scheduled_at", nowISO)
     .order("scheduled_at", { ascending: true });
 
-  // tenant フィルタ（email_schedules に tenant カラムがある場合は条件追加、無い場合は campaigns 経由で担保）
-  if (tenantId) {
-    q = q.eq("tenant_id", tenantId);
-  }
+  if (tenantId) q = q.eq("tenant_id", tenantId);
 
   const { data: rows, error } = await q.returns<Row[]>();
-  if (error) {
-    console.error("[email_schedules:list]", error);
-  }
+  if (error) console.error("[email_schedules:list]", error);
 
   const isCancelable = (r: Row) =>
     (r.status ?? "").toLowerCase() === "scheduled" &&
@@ -67,8 +62,8 @@ export default async function CampaignSchedulesPage() {
     <>
       <AppHeader showBack />
       <main className="mx-auto max-w-6xl p-6">
-        {/* ヘッダー */}
-        <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+        {/* ヘッダー：右側にボタングループを寄せる */}
+        <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end">
           <div>
             <h1 className="whitespace-nowrap text-2xl font-semibold text-neutral-900">
               キャンペーン予約リスト
@@ -77,18 +72,20 @@ export default async function CampaignSchedulesPage() {
               予約中のメール配信を確認します
             </p>
           </div>
-          <Link
-            href="/email"
-            className="whitespace-nowrap rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
-          >
-            メール配信トップ
-          </Link>
-          <Link
-            href="/campaigns"
-            className="whitespace-nowrap rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
-          >
-            キャンペーン一覧
-          </Link>
+          <div className="flex gap-2 md:ml-auto">
+            <Link
+              href="/email"
+              className="whitespace-nowrap rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
+            >
+              メール配信トップ
+            </Link>
+            <Link
+              href="/campaigns"
+              className="whitespace-nowrap rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
+            >
+              キャンペーン一覧
+            </Link>
+          </div>
         </div>
 
         <div className="overflow-x-auto rounded-2xl border border-neutral-200">
