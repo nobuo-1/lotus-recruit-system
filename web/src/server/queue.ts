@@ -15,7 +15,7 @@ export type DirectEmailJob = {
   kind: "direct_email";
   to: string;
   subject: string;
-  html?: string; // ← optional（プレーンメールは text のみ）
+  html: string;
   text?: string;
   tenantId?: string;
   unsubscribeToken?: string;
@@ -23,7 +23,15 @@ export type DirectEmailJob = {
   brandCompany?: string;
   brandAddress?: string;
   brandSupport?: string;
+  /**
+   * キャンペーン配信(deliveries.id)の存在チェック用
+   */
   deliveryId?: string;
+  /**
+   * プレーンメール配信(mail_deliveries.id)の存在チェック用
+   * （← 追加：これがないと型エラーになります）
+   */
+  mailDeliveryId?: string;
   cc?: string;
   attachments?: Array<{ path: string; name: string; mime?: string }>;
 };

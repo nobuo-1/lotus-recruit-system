@@ -23,38 +23,44 @@ function parseMailAndRecipient(source: string | number | undefined) {
 const worker = new Worker<EmailJob>(
   "email",
   async (job) => {
-    const data = job.data as any;
+    const data = job.data;
 
     // ヘルスチェック
-    if (data?.kind === "noop") {
+    if ((data as any)?.kind === "noop") {
       console.log("[email.noop]", { jobId: job.id });
       return { ok: true, kind: "noop" };
     }
 
     if (!isDirectEmailJob(data)) {
-      console.warn("[email.skip]", { jobId: job.id, kind: data?.kind });
-      return { messageId: "skipped", kind: data?.kind ?? "unknown" };
+      console.warn("[email.skip]", {
+        jobId: job.id,
+        kind: (data as any)?.kind,
+      });
+      return { messageId: "skipped", kind: (data as any)?.kind ?? "unknown" };
     }
 
     // 送信（解除ヘッダーやフッターは mailer.ts に集約）
     const info = await sendMail({
       to: data.to,
       subject: data.subject,
-      html: data.html,
+      html: data.html ?? "", // ← string を保証（TSエラー回避）
       text: data.text,
       unsubscribeToken: data.unsubscribeToken,
       fromOverride: data.fromOverride,
       brandCompany: data.brandCompany,
       brandAddress: data.brandAddress,
       brandSupport: data.brandSupport,
-      cc: data.cc || undefined, // ← 追加
-      attachments: (data as any).attachments
-        ? (data as any).attachments.map((a: any) => ({
+      cc: data.cc || undefined,
+      attachments: data.attachments
+        ? data.attachments.map((a) => ({
             filename: a.name,
             path: a.path,
             contentType: a.mime,
           }))
         : undefined,
+      // キャンセル防止ガードに必要なIDをそのまま引き継ぐ
+      deliveryId: data.deliveryId,
+      mailDeliveryId: data.mailDeliveryId,
     });
 
     // ---- DB 更新 ----
@@ -85,7 +91,7 @@ const worker = new Worker<EmailJob>(
         .lte("scheduled_at", nowIso)
         .eq("status", "scheduled");
     } else if (metaMail) {
-      // プレーンメール（今回追加）
+      // プレーンメール
       await admin
         .from("mail_deliveries")
         .update({ status: "sent", sent_at: nowIso })
@@ -107,13 +113,13 @@ const worker = new Worker<EmailJob>(
 
     console.log("[email.sent]", {
       to: data.to,
-      messageId: info?.messageId,
+      messageId: (info as any)?.messageId,
       jobId: job.id,
       jobName: job.name,
       tenantId: (data as any).tenantId,
     });
 
-    return { messageId: info?.messageId, kind: data.kind };
+    return { messageId: (info as any)?.messageId, kind: data.kind };
   },
   {
     connection: redis,

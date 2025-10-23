@@ -12,7 +12,7 @@ import { supabaseAdmin } from "@/lib/supabaseAdmin";
 type Payload = {
   mailId: string;
   recipientIds: string[];
-  scheduleAt?: string | null;
+  scheduleAt?: string | null; // 予約ISO（mail_schedules は schedule_at カラム）
 };
 
 const appUrl = (process.env.APP_URL || "http://localhost:3000").replace(
@@ -30,7 +30,10 @@ function chunk<T>(arr: T[], size: number): T[][] {
 function toS(v: unknown) {
   return typeof v === "string" ? v : v == null ? "" : String(v);
 }
-function replaceVars(input: string, vars: { NAME?: string; EMAIL?: string }) {
+function replaceVars(
+  input: string,
+  vars: { NAME?: string; EMAIL?: string }
+): string {
   const name = (vars.NAME ?? "").trim() || "ご担当者";
   const email = (vars.EMAIL ?? "").trim();
   return input
@@ -80,10 +83,13 @@ export async function POST(req: Request) {
     }
 
     const sb = await supabaseServer();
+
+    // 認証
     const { data: u } = await sb.auth.getUser();
     if (!u?.user)
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
+    // テナント取得
     const { data: prof } = await sb
       .from("profiles")
       .select("tenant_id")
@@ -91,6 +97,7 @@ export async function POST(req: Request) {
       .maybeSingle();
     const tenantId = (prof?.tenant_id as string | undefined) ?? undefined;
 
+    // メール本体（プレーン：from_emailは参照しない）
     const { data: mail, error: me } = await sb
       .from("mails")
       .select("id, tenant_id, subject, body_text, status")
@@ -108,8 +115,10 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
 
+    // 送信元/ブランド設定
     const cfg = await loadSenderConfig();
 
+    // 宛先
     const { data: recs, error: re } = await sb
       .from("recipients")
       .select("id, name, email, unsubscribe_token, unsubscribed_at, is_active")
@@ -123,11 +132,12 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "no recipients" }, { status: 400 });
     }
 
-    // 既送信 delivery を除外
+    // 既存 delivery を除外（mail_deliveries に tenant_id は無い）
     const { data: existing } = await sb
       .from("mail_deliveries")
       .select("recipient_id")
       .eq("mail_id", mailId);
+
     const existed = new Set<string>(
       (existing ?? []).map((r: any) => String(r.recipient_id))
     );
@@ -140,7 +150,7 @@ export async function POST(req: Request) {
       });
     }
 
-    // 添付（全受信者共通）
+    // 添付の署名URLを生成（全受信者共通）
     const admin = supabaseAdmin();
     const { data: atts } = await admin
       .from("mail_attachments")
@@ -153,11 +163,12 @@ export async function POST(req: Request) {
         const path = String(a.file_path);
         const filename = String(a.file_name || path.split("/").pop() || "file");
         const mime = a.mime_type || undefined;
-        const { data: signed } = await admin.storage
+        const { data: signed, error: se } = await admin.storage
           .from("email_attachments")
           .createSignedUrl(path, 60 * 60 * 24);
-        if (signed?.signedUrl)
+        if (!se && signed?.signedUrl) {
           attachList.push({ path: signed.signedUrl, name: filename, mime });
+        }
       }
     }
 
@@ -166,48 +177,65 @@ export async function POST(req: Request) {
     let scheduleAt: string | null = null;
     if (scheduleAtISO) {
       const ts = Date.parse(scheduleAtISO);
-      if (Number.isNaN(ts))
+      if (Number.isNaN(ts)) {
         return NextResponse.json(
           { error: "scheduleAt が不正です" },
           { status: 400 }
         );
+      }
       delay = Math.max(0, ts - Date.now());
       scheduleAt = new Date(ts).toISOString();
     }
 
-    // deliveries 事前登録
-    const baseRows = targets.map((r: any) => ({
-      mail_id: mailId,
-      recipient_id: r.id,
-      status: scheduleAt ? ("scheduled" as const) : ("queued" as const),
-      sent_at: null as any,
-      error: null as any,
-    }));
-
-    for (const part of chunk(baseRows, 500)) {
-      const ins = await sb.from("mail_deliveries").insert(part);
-      if (ins.error)
-        return NextResponse.json({ error: ins.error.message }, { status: 400 });
-    }
-
-    // 予約テーブル
+    // deliveries へ事前登録 + 予約テーブル
     if (scheduleAt) {
-      const { error } = await sb.from("mail_schedules").insert({
-        tenant_id: tenantId ?? null,
-        mail_id: mailId,
-        schedule_at: scheduleAt,
-        status: "scheduled",
-        recipient_ids: targets.map((t: any) => t.id),
-      });
-      if (error)
-        return NextResponse.json({ error: error.message }, { status: 400 });
+      for (const part of chunk(
+        targets.map((r: any) => ({
+          mail_id: mailId,
+          recipient_id: r.id,
+          status: "scheduled" as const,
+          sent_at: null,
+          error: null,
+        })),
+        500
+      )) {
+        const { error } = await sb.from("mail_deliveries").insert(part);
+        if (error)
+          return NextResponse.json({ error: error.message }, { status: 400 });
+      }
+      // 予約テーブル
+      {
+        const { error } = await sb.from("mail_schedules").insert({
+          tenant_id: tenantId ?? null,
+          mail_id: mailId,
+          schedule_at: scheduleAt, // ← DBは schedule_at
+          status: "scheduled",
+          recipient_ids: targets.map((t: any) => t.id),
+        });
+        if (error)
+          return NextResponse.json({ error: error.message }, { status: 400 });
+      }
       await sb.from("mails").update({ status: "scheduled" }).eq("id", mailId);
     } else {
+      for (const part of chunk(
+        targets.map((r: any) => ({
+          mail_id: mailId,
+          recipient_id: r.id,
+          status: "queued" as const,
+          sent_at: null,
+          error: null,
+        })),
+        500
+      )) {
+        const { error } = await sb.from("mail_deliveries").insert(part);
+        if (error)
+          return NextResponse.json({ error: error.message }, { status: 400 });
+      }
       await sb.from("mails").update({ status: "queued" }).eq("id", mailId);
     }
 
-    // deliveryId を取得（開封ピクセルで使用）
-    const { data: dels, error: dErr } = await sb
+    // ↑ ここまでで mail_deliveries の行は作られているので id を取得して map 化
+    const { data: dels, error: selErr } = await sb
       .from("mail_deliveries")
       .select("id, recipient_id")
       .eq("mail_id", mailId)
@@ -215,23 +243,22 @@ export async function POST(req: Request) {
         "recipient_id",
         targets.map((t: any) => t.id)
       );
-    if (dErr)
-      return NextResponse.json({ error: dErr.message }, { status: 400 });
-
+    if (selErr)
+      return NextResponse.json({ error: selErr.message }, { status: 500 });
     const idMap = new Map<string, string>();
     (dels ?? []).forEach((d: any) =>
       idMap.set(String(d.recipient_id), String(d.id))
     );
 
-    // 件名/本文
+    // 件名/本文（プレーンテキスト、{{NAME}}/{{EMAIL}} 差し込み）
     const subjectRaw = toS((mail as any).subject);
     const bodyTextRaw = toS((mail as any).body_text);
 
+    // CC：メール用設定の差出人メールがあればCCへ
     const ccEmail = cfg.fromOverride || undefined;
 
     let queued = 0;
     for (const r of targets as any[]) {
-      const deliveryId = idMap.get(String(r.id)) || "";
       const subject = replaceVars(subjectRaw, {
         NAME: r.name ?? "",
         EMAIL: r.email ?? "",
@@ -247,6 +274,7 @@ export async function POST(req: Request) {
           )}`
         : "";
 
+      // ===== footer（テキスト版：ご指定の4項目 + 仕切り線）=====
       const textMeta = [
         cfg.brandCompany ? `送信者：${cfg.brandCompany}` : "",
         cfg.brandAddress ? `所在地：${cfg.brandAddress}` : "",
@@ -255,17 +283,37 @@ export async function POST(req: Request) {
       ]
         .filter(Boolean)
         .join("\n");
-
       const separator = "------------------------------";
       const textFooter = [separator, textMeta].filter(Boolean).join("\n");
       const text = main ? `${main}\n\n${textFooter}` : textFooter;
 
-      // HTML版（装飾なし・開封ピクセルのみ）
+      // ===== HTML版（最小限、本文は <br>、配信停止は「こちら」リンク、開封ピクセル t=mail）=====
+      const mailDeliveryId = idMap.get(String(r.id)) || "";
       const htmlMain = esc(main).replace(/\n/g, "<br />");
+      const chips: string[] = [];
+      if (cfg.brandCompany) chips.push(`送信者：${esc(cfg.brandCompany)}`);
+      if (cfg.brandAddress) chips.push(`所在地：${esc(cfg.brandAddress)}`);
+      if (cfg.brandSupport)
+        chips.push(
+          `連絡先：<a href="mailto:${esc(cfg.brandSupport)}">${esc(
+            cfg.brandSupport
+          )}</a>`
+        );
+      if (unsubUrl)
+        chips.push(
+          `配信停止は <a href="${unsubUrl}" target="_blank">こちら</a>`
+        );
+      const htmlFooter = `
+<div style="margin-top:16px;padding-top:12px;border-top:1px dashed #e5e7eb;font:14px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111827;">
+  ${chips.map((c) => `<div style="margin-top:6px;">${c}</div>`).join("")}
+</div>`.trim();
       const pixelUrl = `${appUrl}/api/email/open?t=mail&id=${encodeURIComponent(
-        deliveryId
+        mailDeliveryId
       )}`;
-      const html = `${htmlMain}<img src="${pixelUrl}" alt="" width="1" height="1" style="display:block;max-width:1px;max-height:1px;border:0;outline:none;" />`;
+      const html =
+        `<div style="font:16px/1.7 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111827;">${htmlMain}${htmlFooter}` +
+        `<img src="${pixelUrl}" alt="" width="1" height="1" style="display:block;max-width:1px;max-height:1px;border:0;outline:none;" />` +
+        `</div>`;
 
       const jobId = `mail:${mailId}:rcpt:${r.id}:${Date.now()}`;
       await emailQueue.add(
@@ -275,7 +323,7 @@ export async function POST(req: Request) {
           to: String(r.email),
           subject,
           text, // プレーン
-          html, // 装飾なし + ピクセル
+          html, // HTML（最小限）
           cc: ccEmail,
           tenantId: tenantId ?? undefined,
           unsubscribeToken: (r as any).unsubscribe_token ?? undefined,
@@ -283,10 +331,17 @@ export async function POST(req: Request) {
           brandCompany: cfg.brandCompany,
           brandAddress: cfg.brandAddress,
           brandSupport: cfg.brandSupport,
-          attachments: attachList,
+          attachments: attachList, // 署名URLの配列
+          mailDeliveryId, // ← キャンセル防止ガード
         },
-        { jobId, delay, removeOnComplete: 1000, removeOnFail: 1000 }
+        {
+          jobId,
+          delay,
+          removeOnComplete: 1000,
+          removeOnFail: 1000,
+        }
       );
+
       queued++;
     }
 

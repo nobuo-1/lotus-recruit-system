@@ -1,6 +1,7 @@
 // web/src/server/mailer.ts
 import nodemailer from "nodemailer";
 import type SMTPTransport from "nodemailer/lib/smtp-transport";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 /* ========= Env & defaults ========= */
 const host = process.env.SMTP_HOST!;
@@ -33,8 +34,7 @@ const fallbackSupport =
 export type SendArgs = {
   to: string;
   subject: string;
-  /** HTML は任意（プレーンメールは text のみで送る） */
-  html?: string;
+  html: string;
   text?: string;
   unsubscribeToken?: string;
   fromOverride?: string;
@@ -43,6 +43,10 @@ export type SendArgs = {
   brandSupport?: string;
   cc?: string;
   attachments?: Array<{ filename: string; path: string; contentType?: string }>;
+
+  /** ↓↓↓ 追加：送信前の存在チェック（キャンセル済みなら送らない） */
+  deliveryId?: string; // campaigns.deliveries.id
+  mailDeliveryId?: string; // mails.mail_deliveries.id
 };
 
 const transporter = nodemailer.createTransport({
@@ -83,10 +87,46 @@ function stripLegacyFooter(html: string) {
 }
 
 export async function sendMail(args: SendArgs) {
+  // ===== キャンセル防止：送信直前チェック =====
+  try {
+    const admin = supabaseAdmin();
+    if (args.mailDeliveryId) {
+      const { data } = await admin
+        .from("mail_deliveries")
+        .select("id")
+        .eq("id", args.mailDeliveryId)
+        .maybeSingle();
+      if (!data) {
+        return {
+          messageId: "skipped:mail_cancelled",
+          accepted: [],
+          rejected: [],
+          response: "SKIPPED_MAIL_CANCELLED",
+        } as any;
+      }
+    } else if (args.deliveryId) {
+      const { data } = await admin
+        .from("deliveries")
+        .select("id")
+        .eq("id", args.deliveryId)
+        .maybeSingle();
+      if (!data) {
+        return {
+          messageId: "skipped:campaign_cancelled",
+          accepted: [],
+          rejected: [],
+          response: "SKIPPED_CAMPAIGN_CANCELLED",
+        } as any;
+      }
+    }
+  } catch {
+    // 失敗しても送信は継続（チェック不能時は送る）
+  }
+
   const company = args.brandCompany || fallbackCompany;
+  const address = args.brandAddress || fallbackAddress;
   const support = args.brandSupport || fallbackSupport;
 
-  // 表示名は会社名。実送信は defaultFrom。返信先は fromOverride。
   const fromHeader = { name: company, address: defaultFrom };
   const senderHeader = defaultFrom;
   const replyToHeader = args.fromOverride || undefined;
@@ -103,19 +143,18 @@ export async function sendMail(args: SendArgs) {
     headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click";
   }
 
-  const finalHtml =
-    typeof args.html === "string" && args.html.trim().length > 0
-      ? stripLegacyFooter(args.html)
-      : undefined;
+  const finalHtml = stripLegacyFooter(args.html);
   const finalText = args.text && args.text.trim() ? args.text : undefined;
 
-  const mailOptions: any = {
+  const info = await transporter.sendMail({
     from: fromHeader,
     sender: senderHeader,
     replyTo: replyToHeader,
     to: args.to,
     cc: args.cc || undefined,
     subject: args.subject,
+    html: finalHtml,
+    text: finalText,
     headers,
     attachments: (args.attachments ?? []).map((a) => ({
       filename: a.filename,
@@ -123,9 +162,7 @@ export async function sendMail(args: SendArgs) {
       contentType: a.contentType,
     })),
     envelope: { from: senderHeader, to: args.to },
-  };
-  if (finalText) mailOptions.text = finalText; // ← textだけでも送れる
-  if (finalHtml) mailOptions.html = finalHtml; // ← HTMLがあれば同梱
+  });
 
-  return transporter.sendMail(mailOptions);
+  return info;
 }
