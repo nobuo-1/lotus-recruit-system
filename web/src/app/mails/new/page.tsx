@@ -175,8 +175,11 @@ export default function MailNewPage() {
             />
             <p className="mt-1 text-xs text-neutral-500">
               差し込み可: <code className="font-mono">{"{{NAME}}"}</code>,{" "}
-              <code className="font-mono">{"{{EMAIL}},{{COMPANY}}"}</code> （例:{" "}
-              <code className="font-mono">{"{{NAME}}"}</code> 様）
+              <code className="font-mono">
+                {
+                  "{{EMAIL}},{{COMPANY}},{{JOB}},{{GENDER}},{{AGE}},{{REGION}},{{PHONE}}"
+                }
+              </code>
             </p>
           </div>
 
@@ -198,12 +201,16 @@ export default function MailNewPage() {
           <textarea
             name="body_text"
             className="mt-1 w-full min-h-[240px] rounded-lg border border-neutral-300 px-3 py-2"
-            placeholder="そのまま文章を入力してください（差し込み可: {{NAME}}, {{EMAIL}}, {{COMPANY}}）"
+            placeholder="そのまま文章を入力してください（差し込み例: {{NAME}}, {{EMAIL}}, {{COMPANY}}）"
             required
           />
           <p className="mt-2 text-xs text-neutral-500">
             差し込み可: <code className="font-mono">{"{{NAME}}"}</code>,{" "}
-            <code className="font-mono">{"{{EMAIL}},{{COMPANY}}"}</code>
+            <code className="font-mono">
+              {
+                "{{EMAIL}},{{COMPANY}},{{JOB}},{{GENDER}},{{AGE}},{{REGION}},{{PHONE}}"
+              }
+            </code>
             （例: <code className="font-mono">{"{{NAME}}"}</code> 様）
           </p>
         </div>

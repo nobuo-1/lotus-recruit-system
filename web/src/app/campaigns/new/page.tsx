@@ -176,8 +176,11 @@ export default function CampaignNewPage() {
             />
             <p className="mt-1 text-xs text-neutral-500">
               差し込み可: <code className="font-mono">{"{{NAME}}"}</code>,{" "}
-              <code className="font-mono">{"{{EMAIL}}, {{COMPANY}}"}</code>{" "}
-              （例: <code className="font-mono">{"{{NAME}}"}</code> 様）
+              <code className="font-mono">
+                {
+                  "{{EMAIL}},{{COMPANY}},{{JOB}},{{GENDER}},{{AGE}},{{REGION}},{{PHONE}}"
+                }
+              </code>{" "}
             </p>
           </div>
 
@@ -238,8 +241,11 @@ export default function CampaignNewPage() {
 
           <p className="mt-2 text-xs text-neutral-500">
             差し込み可: <code className="font-mono">{"{{NAME}}"}</code>,{" "}
-            <code className="font-mono">{"{{EMAIL}}, {{COMPANY}}"}</code>
-            （例: <code className="font-mono">{"{{NAME}}"}</code> 様）
+            <code className="font-mono">
+              {
+                "{{EMAIL}}, {{COMPANY}},{{JOB}},{{GENDER}},{{AGE}},{{REGION}},{{PHONE}}"
+              }
+            </code>
             <br />
             ※「文章」モードでも保存時にHTML化され、送信時に自動で個別化されます。
           </p>
