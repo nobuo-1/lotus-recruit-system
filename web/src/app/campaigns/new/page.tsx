@@ -140,13 +140,13 @@ export default function CampaignNewPage() {
             href="/email"
             className="whitespace-nowrap rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
           >
-            メール配信トップへ
+            メール配信トップ
           </Link>
           <Link
             href="/campaigns"
             className="whitespace-nowrap rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
           >
-            キャンペーン一覧へ
+            キャンペーン一覧
           </Link>
         </div>
       </div>

@@ -139,13 +139,13 @@ export default function MailNewPage() {
             href="/email"
             className="whitespace-nowrap rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
           >
-            メール配信トップへ
+            メール配信トップ
           </Link>
           <Link
             href="/mails"
             className="whitespace-nowrap rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
           >
-            メール一覧へ
+            メール一覧
           </Link>
         </div>
       </div>

@@ -156,22 +156,22 @@ export default async function CampaignDetailPage({
         </div>
         <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
           <Link
-            href={`/campaigns/${id}/send`}
-            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
-          >
-            {buttonLabel}
-          </Link>
-          <Link
             href="/campaigns"
             className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
           >
-            一覧に戻る
+            キャンペーン一覧
           </Link>
           <Link
             href="/email/schedules"
             className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
           >
-            キャンペーン予約リストへ
+            キャンペーン予約リスト
+          </Link>
+          <Link
+            href={`/campaigns/${id}/send`}
+            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
+          >
+            {buttonLabel}
           </Link>
         </div>
       </div>

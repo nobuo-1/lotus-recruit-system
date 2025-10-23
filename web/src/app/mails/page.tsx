@@ -131,19 +131,19 @@ export default async function MailsPage() {
             href="/email"
             className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
           >
-            メール配信トップへ
+            メール配信トップ
           </Link>
           <Link
             href="/mails/schedules"
             className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
           >
-            メール予約リストへ
+            メール予約リスト
           </Link>
           <Link
             href="/mails/new"
             className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
           >
-            メール新規作成へ
+            メール新規作成
           </Link>
         </div>
       </div>

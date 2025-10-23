@@ -185,12 +185,6 @@ export default async function MailDetailPage({
           </p>
         </div>
         <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
-          <Link
-            href={`/mails/${id}/send`}
-            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
-          >
-            送信
-          </Link>
           {/* ▼ 追加：メール予約リストへ */}
           <Link
             href="/mails/schedules"
@@ -203,7 +197,13 @@ export default async function MailDetailPage({
             href="/mails"
             className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
           >
-            メール一覧へ
+            メール一覧
+          </Link>
+          <Link
+            href={`/mails/${id}/send`}
+            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
+          >
+            送信
           </Link>
         </div>
       </div>
