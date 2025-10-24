@@ -64,36 +64,63 @@ export async function GET(req: Request) {
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
     }
 
+    // ▼ tenant_id を取得
+    const { data: prof } = await sb
+      .from("profiles")
+      .select("tenant_id")
+      .eq("id", u.user.id)
+      .maybeSingle();
+    const tenantId = (prof?.tenant_id as string | undefined) ?? undefined;
+
+    if (!tenantId) {
+      const zeroSeries = emptySeries(days);
+      return NextResponse.json({
+        metrics: {
+          mailTotal: 0,
+          campaignTotal: 0,
+          allTimeSends: 0,
+          reachRate: 0,
+          openRate: 0,
+          series: { total: zeroSeries, mail: zeroSeries, campaign: zeroSeries },
+        },
+      });
+    }
+
     const admin = supabaseAdmin();
 
-    // 総数
-    const { count: mailTotal } = await admin
-      .from("mails")
-      .select("id", { count: "exact", head: true });
+    // ▼ テナント毎の総数
+    const [{ count: mailTotal }, { count: campaignTotal }] = await Promise.all([
+      admin
+        .from("mails")
+        .select("id", { count: "exact", head: true })
+        .eq("tenant_id", tenantId),
+      admin
+        .from("campaigns")
+        .select("id", { count: "exact", head: true })
+        .eq("tenant_id", tenantId),
+    ]);
 
-    const { count: campaignTotal } = await admin
-      .from("campaigns")
-      .select("id", { count: "exact", head: true });
-
-    // 30日KPI：到達率/開封率
+    // ▼ 30日KPI（到達率/開封率）※ mail_deliveries は tenant_id で絞り込む
     const since30 = new Date();
     since30.setDate(since30.getDate() - 30);
     const since30Iso = since30.toISOString();
 
-    // プレーン（mail_deliveries）
-    const { data: m30 } = await admin
-      .from("mail_deliveries")
-      .select("status, opened_at, sent_at")
-      .gte("sent_at", since30Iso);
+    const [{ data: m30 }, { data: c30 }] = await Promise.all([
+      admin
+        .from("mail_deliveries")
+        .select("status, opened_at, sent_at")
+        .eq("tenant_id", tenantId)
+        .gte("sent_at", since30Iso),
+      admin
+        .from("deliveries")
+        .select("status, opened_at, sent_at")
+        .eq("tenant_id", tenantId)
+        .gte("sent_at", since30Iso),
+    ]);
+
     const msent = (m30 ?? []).filter((r: any) => (r.status ?? "") === "sent");
     const mfail = (m30 ?? []).filter((r: any) => (r.status ?? "") === "failed");
     const mopen = (m30 ?? []).filter((r: any) => !!r.opened_at);
-
-    // キャンペーン（deliveries）
-    const { data: c30 } = await admin
-      .from("deliveries")
-      .select("status, opened_at, sent_at")
-      .gte("sent_at", since30Iso);
     const csent = (c30 ?? []).filter((r: any) => (r.status ?? "") === "sent");
     const cfail = (c30 ?? []).filter((r: any) => (r.status ?? "") === "failed");
     const copen = (c30 ?? []).filter((r: any) => !!r.opened_at);
@@ -105,7 +132,7 @@ export async function GET(req: Request) {
     const reachRate = base > 0 ? two((sent30 / base) * 100) : 0;
     const openRate = sent30 > 0 ? two((open30 / sent30) * 100) : 0;
 
-    // 折れ線グラフ（期間中の送信数：合計/プレーン/キャンペーン）
+    // ▼ 折れ線グラフ用（直近 range 期間）
     const since = new Date();
     since.setDate(since.getDate() - (days - 1));
     const sinceIso = startOfDay(since).toISOString();
@@ -114,13 +141,15 @@ export async function GET(req: Request) {
       admin
         .from("mail_deliveries")
         .select("sent_at, status")
-        .gte("sent_at", sinceIso)
-        .eq("status", "sent"),
+        .eq("tenant_id", tenantId)
+        .eq("status", "sent")
+        .gte("sent_at", sinceIso),
       admin
         .from("deliveries")
         .select("sent_at, status")
-        .gte("sent_at", sinceIso)
-        .eq("status", "sent"),
+        .eq("tenant_id", tenantId)
+        .eq("status", "sent")
+        .gte("sent_at", sinceIso),
     ]);
 
     const sumMail: Record<string, number> = {};
@@ -142,15 +171,17 @@ export async function GET(req: Request) {
       count: (sumMail[date] ?? 0) + (sumCamp[date] ?? 0),
     }));
 
-    // 全期間累計送信数
+    // ▼ 全期間の累計送信数（テナント別）
     const [{ count: allMail }, { count: allCamp }] = await Promise.all([
       admin
         .from("mail_deliveries")
         .select("id", { count: "exact", head: true })
+        .eq("tenant_id", tenantId)
         .eq("status", "sent"),
       admin
         .from("deliveries")
         .select("id", { count: "exact", head: true })
+        .eq("tenant_id", tenantId)
         .eq("status", "sent"),
     ]);
     const allTimeSends = (allMail ?? 0) + (allCamp ?? 0);

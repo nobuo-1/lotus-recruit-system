@@ -266,6 +266,7 @@ export async function POST(req: Request) {
     if (scheduleAt) {
       for (const part of chunk(
         targets.map((r: any) => ({
+          tenant_id: tenantId ?? null, // ★追加：tenant を保存
           mail_id: mailId,
           recipient_id: r.id,
           status: "scheduled" as const,
@@ -299,6 +300,7 @@ export async function POST(req: Request) {
     } else {
       for (const part of chunk(
         targets.map((r: any) => ({
+          tenant_id: tenantId ?? null, // ★追加：tenant を保存
           mail_id: mailId,
           recipient_id: r.id,
           status: "queued" as const,
@@ -333,7 +335,7 @@ export async function POST(req: Request) {
       const genderLabel =
         r.gender === "male" ? "男性" : r.gender === "female" ? "女性" : "";
       const job = jobLabelFromRecipient(r);
-      const ageStr = ageFromBirthday(r.birthday); // ← ここだけ変更（age ではなく birthday から算出）
+      const ageStr = ageFromBirthday(r.birthday); // birthday から算出
 
       const vars = {
         NAME: r.name ?? "",
