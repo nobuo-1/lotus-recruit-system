@@ -23,15 +23,8 @@ export type DirectEmailJob = {
   brandCompany?: string;
   brandAddress?: string;
   brandSupport?: string;
-  /**
-   * キャンペーン配信(deliveries.id)の存在チェック用
-   */
-  deliveryId?: string;
-  /**
-   * プレーンメール配信(mail_deliveries.id)の存在チェック用
-   * （← 追加：これがないと型エラーになります）
-   */
-  mailDeliveryId?: string;
+  deliveryId?: string; // キャンペーン deliveries.id
+  mailDeliveryId?: string; // プレーン mail_deliveries.id
   cc?: string;
   attachments?: Array<{ path: string; name: string; mime?: string }>;
 };
@@ -43,18 +36,46 @@ export type CampaignSendJob = {
   scheduleAt?: string | null;
 };
 
+/** ▼ 追加：Ops用のジョブ型 */
+export type FormOutreachJob = {
+  kind: "form_outreach";
+  tenantId: string;
+  jobId: string; // form_outreach_jobs.id
+  channel: "form" | "email";
+};
+
+export type JobBoardRunJob = {
+  kind: "job_board_run";
+  tenantId: string;
+  site: string; // 'mynavi' | 'doda' | ...
+  runId: string; // job_board_runs.id
+};
+
 export type EmailJob = DirectEmailJob | CampaignSendJob;
+export type OpsJob = FormOutreachJob | JobBoardRunJob;
 
 export const isCampaignJob = (j: EmailJob): j is CampaignSendJob =>
   j.kind === "campaign_send";
 export const isDirectEmailJob = (j: EmailJob): j is DirectEmailJob =>
   j.kind === "direct_email";
 
+/** 既存：メール配信キュー */
 export const emailQueue = new Queue<EmailJob>("email", {
   connection: redis,
   defaultJobOptions: {
     attempts: 3,
     backoff: { type: "exponential", delay: 2000 },
+    removeOnComplete: 1000,
+    removeOnFail: 1000,
+  },
+});
+
+/** 追加：スクレイピング/フォーム送信などの運用キュー */
+export const opsQueue = new Queue<OpsJob>("ops", {
+  connection: redis,
+  defaultJobOptions: {
+    attempts: 2,
+    backoff: { type: "exponential", delay: 5000 },
     removeOnComplete: 1000,
     removeOnFail: 1000,
   },
