@@ -1,10 +1,10 @@
-// web/src/app/job-boards/runs/page.tsx
+// web/src/app/form-outreach/templates/page.tsx
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 import { Suspense } from "react";
 import AppHeader from "@/components/AppHeader";
-import Client from "./Client";
+import Client from "./client";
 
 export default function Page() {
   return (

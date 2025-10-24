@@ -5,12 +5,7 @@ export const revalidate = 0;
 
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
-
-function avgSec(durs: number[]) {
-  if (!durs.length) return 0;
-  const s = durs.reduce((a, b) => a + b, 0);
-  return Math.round((s / durs.length) * 100) / 100;
-}
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 export async function GET() {
   try {
@@ -21,77 +16,59 @@ export async function GET() {
 
     const { data: prof } = await sb
       .from("profiles")
-      .select("tenant_id, is_admin")
+      .select("tenant_id")
       .eq("id", u.user.id)
       .maybeSingle();
     const tenantId = prof?.tenant_id as string | undefined;
-    if (!tenantId)
-      return NextResponse.json({ error: "no tenant" }, { status: 400 });
 
-    const now = new Date();
+    const admin = supabaseAdmin();
 
-    // 直近14日：実行回数 & 平均処理時間
-    const since14 = new Date(now);
-    since14.setDate(since14.getDate() - 14);
-    const { data: last14 } = await sb
+    // 30日内の KPI
+    const since = new Date();
+    since.setDate(since.getDate() - 30);
+    const sinceIso = since.toISOString();
+
+    const { data: runs } = await admin
       .from("job_board_runs")
-      .select("status, started_at, finished_at")
-      .eq("tenant_id", tenantId)
-      .gte("started_at", since14.toISOString())
+      .select("id, site, status, started_at, finished_at, note")
+      .eq("tenant_id", tenantId ?? null)
+      .gte("started_at", sinceIso)
       .order("started_at", { ascending: false });
 
-    const runCount14 = (last14 ?? []).length;
-    const durations = (last14 ?? [])
-      .filter((r: any) => r.finished_at && r.started_at)
-      .map(
-        (r: any) =>
-          (new Date(r.finished_at).getTime() -
-            new Date(r.started_at).getTime()) /
-          1000
-      );
-
-    // 直近30日：成功率
-    const since30 = new Date(now);
-    since30.setDate(since30.getDate() - 30);
-    const { data: last30 } = await sb
-      .from("job_board_runs")
-      .select("status")
-      .eq("tenant_id", tenantId)
-      .gte("started_at", since30.toISOString());
-
-    const total30 = (last30 ?? []).length;
-    const success30 = (last30 ?? []).filter(
+    const runs30 = runs?.length ?? 0;
+    const success30 = (runs ?? []).filter(
       (r: any) => r.status === "success"
     ).length;
-    const successRate30 = total30
-      ? Math.round((success30 / total30) * 10000) / 100
-      : 0;
-
-    // 現在のキュー数（queued）
-    const { count: queuedNow } = await sb
-      .from("job_board_runs")
-      .select("id", { count: "exact", head: true })
-      .eq("tenant_id", tenantId)
-      .in("status", ["queued"]);
+    const fail30 = (runs ?? []).filter(
+      (r: any) => r.status === "failed"
+    ).length;
+    const base = success30 + fail30;
+    const successRate30 =
+      base > 0 ? Math.round((success30 / base) * 1000) / 10 : 0;
 
     // 直近20件
-    const { data: last20 } = await sb
+    const { data: latest } = await admin
       .from("job_board_runs")
-      .select("id, site, status, error, started_at, finished_at")
-      .eq("tenant_id", tenantId)
+      .select("id, site, status, started_at, finished_at, note")
+      .eq("tenant_id", tenantId ?? null)
       .order("started_at", { ascending: false })
       .limit(20);
 
+    // lastRun/lastFailed/nextSchedule（任意：あれば）
+    const lastRunAt = runs && runs[0]?.started_at ? runs[0].started_at : null;
+
     return NextResponse.json({
       ok: true,
-      metrics: {
-        runCount14,
+      kpi: {
+        runs30,
+        success30,
+        fail30,
         successRate30,
-        avgDurationSec14: avgSec(durations),
-        queuedNow: queuedNow ?? 0,
-        last20: last20 ?? [],
-        isAdmin: !!prof?.is_admin,
+        lastRunAt,
+        lastFailedAt: null,
+        nextScheduleAt: null,
       },
+      latest: latest ?? [],
     });
   } catch (e: any) {
     console.error("[api.job-boards.summary] error", e);

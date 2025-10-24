@@ -1,21 +1,22 @@
-// web/src/app/job-boards/runs/Client.tsx
+// web/src/app/form-outreach/companies/client.tsx
 "use client";
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { useSearchParams, useRouter } from "next/navigation";
 
-type Item = {
+type Company = {
   id: string;
-  site: string;
-  status: "queued" | "running" | "success" | "failed";
-  started_at: string;
-  finished_at?: string | null;
-  note?: string | null;
+  name: string;
+  site_url?: string | null;
+  contact_form_url?: string | null;
+  created_at: string;
+  last_contacted_at?: string | null;
+  status?: string | null; // queued/sent/failed etc
 };
+
 type Resp = {
   ok: boolean;
-  items: Item[];
+  items: Company[];
   paging: {
     page: number;
     limit: number;
@@ -26,79 +27,78 @@ type Resp = {
 };
 
 export default function Client() {
-  const sp = useSearchParams();
-  const router = useRouter();
-  const page = Math.max(parseInt(sp.get("page") || "0", 10), 0);
-
   const [data, setData] = useState<Resp | null>(null);
+  const [page, setPage] = useState(0);
 
   useEffect(() => {
     (async () => {
       const res = await fetch(
-        `/api/job-boards/summary/runs?limit=40&page=${page}`,
-        {
-          cache: "no-store",
-        }
+        `/api/form-outreach/prospects?limit=40&page=${page}`,
+        { cache: "no-store" }
       );
       setData(await res.json());
     })();
   }, [page]);
 
-  const total = data?.paging.total ?? 0;
-
   return (
     <main className="mx-auto max-w-6xl p-6">
       <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-[22px] font-bold text-neutral-900">
-          取得状況 一覧
-        </h1>
+        <h1 className="text-[22px] font-bold">取得した法人リスト</h1>
         <Link
-          href="/job-boards"
+          href="/form-outreach"
           className="text-sm text-indigo-700 underline-offset-2 hover:underline"
         >
           戻る
         </Link>
       </div>
 
-      <div className="mb-2 text-sm text-neutral-600">全件数：{total}</div>
-
       <div className="overflow-hidden rounded-xl border border-neutral-200">
         <table className="w-full text-sm">
           <thead className="bg-neutral-50 text-neutral-700">
             <tr>
+              <th className="px-3 py-2 text-left">法人名</th>
               <th className="px-3 py-2 text-left">サイト</th>
-              <th className="px-3 py-2 text-left">ステータス</th>
-              <th className="px-3 py-2 text-left">開始</th>
-              <th className="px-3 py-2 text-left">終了</th>
-              <th className="px-3 py-2 text-left">備考</th>
+              <th className="px-3 py-2 text-left">フォーム</th>
+              <th className="px-3 py-2 text-left">最終連絡</th>
+              <th className="px-3 py-2 text-left">状況</th>
             </tr>
           </thead>
           <tbody>
-            {(data?.items ?? []).map((r) => (
-              <tr key={r.id} className="border-t">
-                <td className="px-3 py-2">{r.site}</td>
+            {(data?.items ?? []).map((c) => (
+              <tr key={c.id} className="border-t">
+                <td className="px-3 py-2">{c.name}</td>
                 <td className="px-3 py-2">
-                  <span
-                    className={
-                      r.status === "success"
-                        ? "text-emerald-600"
-                        : r.status === "failed"
-                        ? "text-rose-600"
-                        : "text-neutral-700"
-                    }
-                  >
-                    {r.status}
-                  </span>
+                  {c.site_url ? (
+                    <a
+                      href={c.site_url}
+                      target="_blank"
+                      className="text-indigo-700 underline-offset-2 hover:underline"
+                    >
+                      {c.site_url}
+                    </a>
+                  ) : (
+                    "—"
+                  )}
                 </td>
                 <td className="px-3 py-2">
-                  {new Date(r.started_at).toLocaleString()}
+                  {c.contact_form_url ? (
+                    <a
+                      href={c.contact_form_url}
+                      target="_blank"
+                      className="text-indigo-700 underline-offset-2 hover:underline"
+                    >
+                      {c.contact_form_url}
+                    </a>
+                  ) : (
+                    "—"
+                  )}
                 </td>
                 <td className="px-3 py-2">
-                  {r.finished_at
-                    ? new Date(r.finished_at).toLocaleString()
+                  {c.last_contacted_at
+                    ? new Date(c.last_contacted_at).toLocaleString()
                     : "—"}
                 </td>
-                <td className="px-3 py-2 text-neutral-600">{r.note ?? ""}</td>
+                <td className="px-3 py-2">{c.status ?? ""}</td>
               </tr>
             ))}
           </tbody>
@@ -109,9 +109,7 @@ export default function Client() {
       <div className="mt-3 flex items-center justify-between">
         <button
           disabled={!data?.paging.hasPrev}
-          onClick={() =>
-            router.push(`/job-boards/runs?page=${Math.max(page - 1, 0)}`)
-          }
+          onClick={() => setPage((p) => Math.max(p - 1, 0))}
           className={`rounded-lg border px-3 py-1 text-sm ${
             data?.paging.hasPrev
               ? "border-neutral-300 hover:bg-neutral-50"
@@ -121,11 +119,15 @@ export default function Client() {
           前へ
         </button>
         <div className="text-sm text-neutral-600">
-          ページ：{page + 1} / {Math.max(Math.ceil(total / 40), 1)}
+          ページ：{(data?.paging.page ?? 0) + 1} /{" "}
+          {Math.max(
+            Math.ceil((data?.paging.total ?? 0) / (data?.paging.limit ?? 40)),
+            1
+          )}
         </div>
         <button
           disabled={!data?.paging.hasNext}
-          onClick={() => router.push(`/job-boards/runs?page=${page + 1}`)}
+          onClick={() => setPage((p) => p + 1)}
           className={`rounded-lg border px-3 py-1 text-sm ${
             data?.paging.hasNext
               ? "border-neutral-300 hover:bg-neutral-50"
