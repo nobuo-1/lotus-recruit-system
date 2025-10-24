@@ -1,10 +1,10 @@
-// web/src/app/api/form-outreach/summary/route.ts
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 export async function GET() {
   try {
@@ -12,56 +12,43 @@ export async function GET() {
     const { data: u } = await sb.auth.getUser();
     if (!u?.user)
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-
     const { data: prof } = await sb
       .from("profiles")
-      .select("tenant_id, is_admin")
+      .select("tenant_id")
       .eq("id", u.user.id)
       .maybeSingle();
-    const tenantId = prof?.tenant_id as string | undefined;
+    const tenantId = prof?.tenant_id ?? null;
+    const admin = supabaseAdmin();
 
-    if (!tenantId) {
-      return NextResponse.json({ error: "no tenant" }, { status: 400 });
-    }
-
-    const [{ count: companies }, { count: msgs }, { data: last30 }] =
-      await Promise.all([
-        sb
-          .from("form_outreach_companies")
-          .select("id", { count: "exact", head: true })
-          .eq("tenant_id", tenantId),
-        sb
-          .from("form_outreach_messages")
-          .select("id", { count: "exact", head: true })
-          .eq("tenant_id", tenantId),
-        sb
-          .from("form_outreach_jobs")
-          .select("status, sent_at, created_at")
-          .eq("tenant_id", tenantId)
-          .gte(
-            "created_at",
-            new Date(Date.now() - 30 * 86400_000).toISOString()
-          ),
-      ]);
-
-    const sent = (last30 ?? []).filter((r: any) => r.status === "sent").length;
-    const failed = (last30 ?? []).filter(
-      (r: any) => r.status === "failed"
-    ).length;
-    const queued = (last30 ?? []).filter(
-      (r: any) => r.status === "queued"
-    ).length;
+    const { count: companyCount } = await admin
+      .from("form_prospects")
+      .select("id", { count: "exact", head: true })
+      .eq("tenant_id", tenantId);
+    const { count: totalMessages } = await admin
+      .from("form_outreach_messages")
+      .select("id", { count: "exact", head: true })
+      .eq("tenant_id", tenantId);
+    const { count: firstContacts } = await admin
+      .from("form_outreach_messages")
+      .select("id", { count: "exact", head: true })
+      .eq("tenant_id", tenantId)
+      .eq("step", 1);
+    const { count: followups } = await admin
+      .from("form_outreach_messages")
+      .select("id", { count: "exact", head: true })
+      .eq("tenant_id", tenantId)
+      .gte("step", 2);
 
     return NextResponse.json({
-      ok: true,
-      metrics: {
-        companies: companies ?? 0,
-        templates: msgs ?? 0,
-        last30: { sent, failed, queued },
+      kpi: {
+        companyCount: companyCount ?? 0,
+        totalMessages: totalMessages ?? 0,
+        firstContacts: firstContacts ?? 0,
+        followups: followups ?? 0,
       },
     });
   } catch (e: any) {
-    console.error("[api.form-outreach.summary] error", e);
+    console.error("[api.form-outreach.summary]", e);
     return NextResponse.json(
       { error: e?.message || "server error" },
       { status: 500 }

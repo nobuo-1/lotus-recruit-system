@@ -4,7 +4,6 @@ export const revalidate = 0;
 import { Suspense } from "react";
 import AppHeader from "@/components/AppHeader";
 import Client from "./client";
-
 export default function Page() {
   return (
     <>
