@@ -49,10 +49,10 @@ export default function DashboardPage() {
             desc="キャンペーン作成・配信、KPIの可視化"
           />
           <CardAction
-            href="/job-boards" // まだ未実装でもOK
+            href="/job-boards"
             icon={Search}
             title="転職サイトリサーチ"
-            desc="Doda/Type/女の転職/マイナビの横断検索（予定）"
+            desc="Doda/Type/女の転職/マイナビなどの横断検索"
           />
           <CardAction
             href="/scout" // まだ未実装でもOK
@@ -61,10 +61,10 @@ export default function DashboardPage() {
             desc="保存済みスカウト文で送信（予定）"
           />
           <CardAction
-            href="/form-outreach" // まだ未実装でもOK
+            href="/form-outreach"
             icon={FileText}
             title="フォーム営業"
-            desc="法人サイトの問い合わせフォームへ送信（予定）"
+            desc="法人サイトの問い合わせフォームへ送信"
           />
         </div>
       </main>

@@ -6,10 +6,10 @@ export const revalidate = 0;
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
 
-function dayKey(d: Date) {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  return x.toISOString();
+function avgSec(durs: number[]) {
+  if (!durs.length) return 0;
+  const s = durs.reduce((a, b) => a + b, 0);
+  return Math.round((s / durs.length) * 100) / 100;
 }
 
 export async function GET() {
@@ -28,69 +28,68 @@ export async function GET() {
     if (!tenantId)
       return NextResponse.json({ error: "no tenant" }, { status: 400 });
 
-    // 直近4週のrun状況
-    const since = new Date();
-    since.setDate(since.getDate() - 28);
-    const { data: runs } = await sb
+    const now = new Date();
+
+    // 直近14日：実行回数 & 平均処理時間
+    const since14 = new Date(now);
+    since14.setDate(since14.getDate() - 14);
+    const { data: last14 } = await sb
       .from("job_board_runs")
-      .select("site,status,started_at,finished_at,error")
+      .select("status, started_at, finished_at")
       .eq("tenant_id", tenantId)
-      .gte("started_at", since.toISOString())
+      .gte("started_at", since14.toISOString())
       .order("started_at", { ascending: false });
 
-    // 直近の集計（最新 result_id をサイト毎に拾う）
-    const { data: latest } = await sb
-      .from("job_board_results")
-      .select("id, site, captured_at")
+    const runCount14 = (last14 ?? []).length;
+    const durations = (last14 ?? [])
+      .filter((r: any) => r.finished_at && r.started_at)
+      .map(
+        (r: any) =>
+          (new Date(r.finished_at).getTime() -
+            new Date(r.started_at).getTime()) /
+          1000
+      );
+
+    // 直近30日：成功率
+    const since30 = new Date(now);
+    since30.setDate(since30.getDate() - 30);
+    const { data: last30 } = await sb
+      .from("job_board_runs")
+      .select("status")
       .eq("tenant_id", tenantId)
-      .order("captured_at", { ascending: false });
+      .gte("started_at", since30.toISOString());
 
-    const latestBySite = new Map<string, any>();
-    for (const r of latest ?? [])
-      if (!latestBySite.has(r.site)) latestBySite.set(r.site, r);
+    const total30 = (last30 ?? []).length;
+    const success30 = (last30 ?? []).filter(
+      (r: any) => r.status === "success"
+    ).length;
+    const successRate30 = total30
+      ? Math.round((success30 / total30) * 10000) / 100
+      : 0;
 
-    let totals = { jobs: 0, candidates: 0 };
-    for (const r of latestBySite.values()) {
-      const { data: counts } = await sb
-        .from("job_board_counts")
-        .select("jobs_count, candidates_count")
-        .eq("result_id", r.id);
-
-      (counts ?? []).forEach((c: any) => {
-        totals.jobs += Number(c.jobs_count || 0);
-        totals.candidates += Number(c.candidates_count || 0);
-      });
-    }
-
-    // 折れ線用（直近14日の「保存件数」合計）
-    const since14 = new Date();
-    since14.setDate(since14.getDate() - 13);
-    const { data: results14 } = await sb
-      .from("job_board_results")
-      .select("id, captured_at")
+    // 現在のキュー数（queued）
+    const { count: queuedNow } = await sb
+      .from("job_board_runs")
+      .select("id", { count: "exact", head: true })
       .eq("tenant_id", tenantId)
-      .gte("captured_at", since14.toISOString());
+      .in("status", ["queued"]);
 
-    const counter: Record<string, number> = {};
-    for (const r of results14 ?? []) {
-      const k = dayKey(new Date(r.captured_at));
-      counter[k] = (counter[k] ?? 0) + 1;
-    }
-    const series: { date: string; count: number }[] = [];
-    for (let i = 13; i >= 0; i--) {
-      const d = new Date();
-      d.setDate(d.getDate() - i);
-      const k = dayKey(d);
-      series.push({ date: k.slice(0, 10), count: counter[k] ?? 0 });
-    }
+    // 直近20件
+    const { data: last20 } = await sb
+      .from("job_board_runs")
+      .select("id, site, status, error, started_at, finished_at")
+      .eq("tenant_id", tenantId)
+      .order("started_at", { ascending: false })
+      .limit(20);
 
     return NextResponse.json({
       ok: true,
       metrics: {
-        totalJobs: totals.jobs,
-        totalCandidates: totals.candidates,
-        runs: runs ?? [],
-        series,
+        runCount14,
+        successRate30,
+        avgDurationSec14: avgSec(durations),
+        queuedNow: queuedNow ?? 0,
+        last20: last20 ?? [],
         isAdmin: !!prof?.is_admin,
       },
     });

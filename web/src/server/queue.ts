@@ -51,8 +51,19 @@ export type JobBoardRunJob = {
   runId: string; // job_board_runs.id
 };
 
+export type FormOutreachRunJob = {
+  kind: "form_outreach_run";
+  tenantId: string;
+  runId: string; // 下の /api/form-outreach/runs で作るランID
+  flow: "crawl" | "send" | "followup";
+};
+
+declare module "@/server/queue" {
+  // 既存のOpsJobに足してOK（なければ union に追加）
+}
+
 export type EmailJob = DirectEmailJob | CampaignSendJob;
-export type OpsJob = FormOutreachJob | JobBoardRunJob;
+export type OpsJob = FormOutreachJob | JobBoardRunJob | FormOutreachRunJob;
 
 export const isCampaignJob = (j: EmailJob): j is CampaignSendJob =>
   j.kind === "campaign_send";

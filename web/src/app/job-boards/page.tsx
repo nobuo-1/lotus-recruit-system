@@ -1,4 +1,4 @@
-//web/src/app/job-boards/page.tsx
+// web/src/app/job-boards/page.tsx
 "use client";
 import React, { useEffect, useMemo, useState } from "react";
 import AppHeader from "@/components/AppHeader";
@@ -13,18 +13,21 @@ import {
   Tooltip,
   CartesianGrid,
 } from "recharts";
-import { Settings, RefreshCw, BarChart3, Mail } from "lucide-react";
+import { Settings, RefreshCw } from "lucide-react";
 
 type Summary = {
-  totalJobs: number;
-  totalCandidates: number;
-  runs: {
+  runCount14: number;
+  successRate30: number; // %
+  avgDurationSec14: number;
+  queuedNow: number;
+  last20: {
+    id: string;
     site: string;
     status: string;
-    started_at: string;
     error?: string | null;
+    started_at: string;
+    finished_at?: string | null;
   }[];
-  series: { date: string; count: number }[];
   isAdmin: boolean;
 };
 
@@ -46,10 +49,10 @@ export default function JobBoardsTop() {
     })();
   }, []);
 
-  const total14 = useMemo(
-    () => (data?.series ?? []).reduce((s, p) => s + (p.count || 0), 0),
-    [data]
-  );
+  const fmtPct = (x?: number) =>
+    Number.isFinite(Number(x)) ? `${Number(x).toFixed(2)}%` : "-";
+  const fmtSec = (x?: number) =>
+    Number.isFinite(Number(x)) ? `${Number(x).toFixed(1)}秒` : "-";
 
   return (
     <>
@@ -60,7 +63,7 @@ export default function JobBoardsTop() {
             転職サイトリサーチ
           </h1>
           <p className="mt-2 text-sm text-neutral-500">
-            求人数・求職者数の定期取得／可視化（テナント別）
+            実行状況と履歴（テナント別）
           </p>
         </div>
 
@@ -74,10 +77,10 @@ export default function JobBoardsTop() {
               desc="アカウント/通知/サイト選択"
             />
             <MenuLink
-              href="/job-boards/results"
-              icon={BarChart3}
-              title="結果一覧"
-              desc="表＋カテゴリ別の集計"
+              href="/job-boards/runs"
+              icon={RefreshCw}
+              title="取得状況の詳細"
+              desc="履歴の一覧・ページング"
             />
             <button
               onClick={() => runNow("doda")}
@@ -100,48 +103,36 @@ export default function JobBoardsTop() {
           </div>
         </div>
 
-        {/* KPI */}
+        {/* KPI（実行系） */}
         <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-          <KpiCard label="直近合計 求人数" value={data?.totalJobs ?? "-"} />
+          <KpiCard label="直近14日 実行回数" value={data?.runCount14 ?? "-"} />
           <KpiCard
-            label="直近合計 求職者数"
-            value={data?.totalCandidates ?? "-"}
+            label="直近30日 成功率"
+            value={fmtPct(data?.successRate30)}
           />
-          <KpiCard label="直近14日 保存結果" value={total14} />
-          <KpiCard label="管理機能" value={data?.isAdmin ? "有効" : "—"} />
+          <KpiCard
+            label="平均処理時間（14日）"
+            value={fmtSec(data?.avgDurationSec14)}
+          />
+          <KpiCard label="現在のキュー数" value={data?.queuedNow ?? 0} />
         </div>
 
-        {/* 折れ線（直近14日） */}
+        {/* 直近20件（常時表示） */}
         <div className="mt-6 rounded-2xl border border-neutral-200 p-4">
-          <div className="mb-2 text-base font-semibold text-neutral-800">
-            直近14日の保存回数
-          </div>
-          <div className="h-56">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={data?.series ?? []}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="date" />
-                <YAxis allowDecimals={false} />
-                <Tooltip />
-                <Line
-                  type="monotone"
-                  dataKey="count"
-                  dot={false}
-                  strokeWidth={2}
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-
-        {/* 直近Runs */}
-        <div className="mt-6 rounded-2xl border border-neutral-200 p-4">
-          <div className="mb-3 text-base font-semibold text-neutral-800">
-            直近の取得状況
+          <div className="mb-2 flex items-center justify-between">
+            <div className="text-base font-semibold text-neutral-800">
+              直近の取得状況（20件）
+            </div>
+            <Link
+              href="/job-boards/runs"
+              className="text-sm text-indigo-700 underline-offset-2 hover:underline"
+            >
+              詳細を見る
+            </Link>
           </div>
           <ul className="space-y-2">
-            {(data?.runs ?? []).slice(0, 10).map((r, i) => (
-              <li key={i} className="text-sm">
+            {(data?.last20 ?? []).map((r) => (
+              <li key={r.id} className="text-sm">
                 <span className="inline-block w-20 font-mono text-neutral-500">
                   {r.site}
                 </span>
@@ -151,7 +142,7 @@ export default function JobBoardsTop() {
                       ? "text-emerald-600"
                       : r.status === "failed"
                       ? "text-rose-600"
-                      : "text-neutral-600"
+                      : "text-neutral-700"
                   }`}
                 >
                   {r.status}
