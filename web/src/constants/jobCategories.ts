@@ -1,6 +1,4 @@
 // web/src/constants/jobCategories.ts
-// 各大手求人サイト（マイナビ・doda・リクナビNEXT・エン転職 等）の分類を参考に、
-// 重複最小・抜け漏れ最小（MECE）になるよう再編。
 // 既存と同じ export 形（JOB_LARGE / JOB_CATEGORIES）を維持しています。
 
 export const JOB_LARGE: string[] = [
