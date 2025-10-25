@@ -1,57 +1,43 @@
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-export const revalidate = 0;
-
+// web/src/app/api/form-outreach/summary/route.ts
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
-import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 export async function GET() {
-  try {
-    const sb = await supabaseServer();
-    const { data: u } = await sb.auth.getUser();
-    if (!u?.user)
-      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-    const { data: prof } = await sb
-      .from("profiles")
-      .select("tenant_id")
-      .eq("id", u.user.id)
-      .maybeSingle();
-    const tenantId = prof?.tenant_id ?? null;
-    const admin = supabaseAdmin();
+  const supabase = await supabaseServer();
 
-    const { count: companyCount } = await admin
-      .from("form_prospects")
-      .select("id", { count: "exact", head: true })
-      .eq("tenant_id", tenantId);
-    const { count: totalMessages } = await admin
-      .from("form_outreach_messages")
-      .select("id", { count: "exact", head: true })
-      .eq("tenant_id", tenantId);
-    const { count: firstContacts } = await admin
-      .from("form_outreach_messages")
-      .select("id", { count: "exact", head: true })
-      .eq("tenant_id", tenantId)
-      .eq("step", 1);
-    const { count: followups } = await admin
-      .from("form_outreach_messages")
-      .select("id", { count: "exact", head: true })
-      .eq("tenant_id", tenantId)
-      .gte("step", 2);
+  // 総テンプレ数
+  const { count: tplCount } = await supabase
+    .from("form_outreach_templates")
+    .select("*", { count: "exact", head: true });
 
-    return NextResponse.json({
-      kpi: {
-        companyCount: companyCount ?? 0,
-        totalMessages: totalMessages ?? 0,
-        firstContacts: firstContacts ?? 0,
-        followups: followups ?? 0,
-      },
-    });
-  } catch (e: any) {
-    console.error("[api.form-outreach.summary]", e);
-    return NextResponse.json(
-      { error: e?.message || "server error" },
-      { status: 500 }
-    );
-  }
+  // 当月送信数
+  const now = new Date();
+  const monthStart = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    1
+  ).toISOString();
+  const { count: sentThisMonth } = await supabase
+    .from("form_outreach_messages")
+    .select("*", { count: "exact", head: true })
+    .gte("sent_at", monthStart)
+    .eq("status", "sent");
+
+  // 見込み企業件数
+  const { count: prospectCount } = await supabase
+    .from("form_prospects")
+    .select("*", { count: "exact", head: true });
+
+  // 全期間送信累計
+  const { count: allSent } = await supabase
+    .from("form_outreach_messages")
+    .select("*", { count: "exact", head: true })
+    .eq("status", "sent");
+
+  return NextResponse.json({
+    tplCount: tplCount ?? 0,
+    prospectCount: prospectCount ?? 0,
+    sentThisMonth: sentThisMonth ?? 0,
+    allSent: allSent ?? 0,
+  });
 }

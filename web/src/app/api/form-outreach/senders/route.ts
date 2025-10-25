@@ -1,41 +1,38 @@
 // web/src/app/api/form-outreach/senders/route.ts
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
-export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const sb = await supabaseServer();
-  const { data } = await sb
+  const supabase = await supabaseServer();
+  const { data, error } = await supabase
     .from("form_outreach_senders")
-    .select(
-      "id, from_name, from_email, reply_to, signature, is_default, created_at"
-    )
-    .order("created_at", { ascending: false });
-  return NextResponse.json({ rows: data ?? [] });
-}
-
-export async function POST(req: Request) {
-  const body = await req.json();
-  const sb = await supabaseServer();
-  await sb.from("form_outreach_senders").insert(body);
-  return NextResponse.json({ ok: true });
+    .select("id,company_name,sender_name,sender_email,website_url")
+    .limit(1);
+  if (error)
+    return NextResponse.json({ error: error.message }, { status: 400 });
+  return NextResponse.json({ row: (data ?? [])[0] ?? null });
 }
 
 export async function PUT(req: Request) {
-  const body = await req.json(); // {id, ...fields}
-  const { id, ...fields } = body || {};
-  const sb = await supabaseServer();
-  await sb.from("form_outreach_senders").update(fields).eq("id", id);
-  return NextResponse.json({ ok: true });
-}
-
-export async function DELETE(req: Request) {
-  const { searchParams } = new URL(req.url);
-  const id = searchParams.get("id");
-  const sb = await supabaseServer();
-  await sb
+  const supabase = await supabaseServer();
+  const body = await req.json();
+  // 既存があれば update、なければ insert。テナント一意制約により常に1件化される。
+  const { data: existing } = await supabase
     .from("form_outreach_senders")
-    .delete()
-    .eq("id", id as string);
+    .select("id")
+    .limit(1);
+  if ((existing ?? []).length > 0) {
+    const id = existing![0].id;
+    const { error } = await supabase
+      .from("form_outreach_senders")
+      .update(body)
+      .eq("id", id);
+    if (error)
+      return NextResponse.json({ error: error.message }, { status: 400 });
+  } else {
+    const { error } = await supabase.from("form_outreach_senders").insert(body);
+    if (error)
+      return NextResponse.json({ error: error.message }, { status: 400 });
+  }
   return NextResponse.json({ ok: true });
 }

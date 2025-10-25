@@ -1,32 +1,18 @@
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-export const revalidate = 0;
+// web/src/app/api/job-boards/manual/route.ts
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
-import { supabaseAdmin } from "@/lib/supabaseAdmin";
+
 export async function POST(req: Request) {
-  const body = await req.json().catch(() => ({}));
-  const site = String(body.site || "");
-  if (!site)
-    return NextResponse.json({ error: "site required" }, { status: 400 });
-  const sb = await supabaseServer();
-  const { data: u } = await sb.auth.getUser();
-  if (!u?.user)
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  const { data: prof } = await sb
-    .from("profiles")
-    .select("tenant_id")
-    .eq("id", u.user.id)
-    .maybeSingle();
-  const tenantId = prof?.tenant_id ?? null;
-  const admin = supabaseAdmin();
-  await admin
-    .from("job_board_runs")
-    .insert({
-      tenant_id: tenantId,
-      site,
-      status: "queued",
-      note: "manual trigger",
-    });
+  const supabase = await supabaseServer();
+  const body = await req.json();
+  // job_board_runs が存在しない環境でも壊れないように on-the-fly で作ることも可能ですが、
+  // ここでは insert を試み、エラーはそのまま返す（既存テーブルを使う）方針。
+  const { error } = await supabase.from("job_board_runs").insert({
+    status: "queued",
+    filter_json: body, // JSONB 列を想定（存在しない場合はテーブル側を調整してください）
+    requested_at: new Date().toISOString(),
+  } as any);
+  if (error)
+    return NextResponse.json({ error: error.message }, { status: 400 });
   return NextResponse.json({ ok: true });
 }
