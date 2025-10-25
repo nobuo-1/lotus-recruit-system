@@ -1,11 +1,9 @@
-// web/src/app/job-boards/runs/page.tsx
-import React from "react";
-import AppHeader from "@/components/AppHeader";
-import Link from "next/link";
-import { supabaseServer } from "@/lib/supabaseServer";
-import { formatJpDateTime } from "@/lib/formatDate";
+// web/src/app/job-boards/runs/all/page.tsx
+"use client";
 
-export const dynamic = "force-dynamic";
+import React, { useEffect, useState } from "react";
+import AppHeader from "@/components/AppHeader";
+import { formatJpDateTime } from "@/lib/formatDate";
 
 type RunRow = {
   id: string;
@@ -16,42 +14,29 @@ type RunRow = {
   error: string | null;
 };
 
-export default async function JobBoardRuns() {
-  const sb = await supabaseServer();
+export default function JobBoardRunsAll() {
+  const [rows, setRows] = useState<RunRow[]>([]);
+  const [page, setPage] = useState(1);
 
-  // 直近20件
-  let rows: RunRow[] = [];
-  try {
-    const { data } = await sb
-      .from("job_board_runs")
-      .select("id, site, status, started_at, finished_at, error")
-      .order("started_at", { ascending: false })
-      .limit(20)
-      .returns<RunRow[]>();
-    rows = data ?? [];
-  } catch {}
+  useEffect(() => {
+    (async () => {
+      const res = await fetch(`/api/job-boards/runs?page=${page}`, {
+        cache: "no-store",
+      });
+      const j = await res.json();
+      setRows(j?.rows ?? []);
+    })();
+  }, [page]);
 
   return (
     <>
       <AppHeader showBack />
       <main className="mx-auto max-w-6xl p-6">
-        <div className="mb-6 flex flex-col gap-1 md:flex-row md:items-end md:justify-between">
-          <div>
-            <h1 className="text-2xl font-semibold text-neutral-900">
-              実行状況
-            </h1>
-            <p className="text-sm text-neutral-500">
-              直近20件を表示。詳細一覧へ移動可。
-            </p>
-          </div>
-          <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
-            <Link
-              href="/job-boards/runs/all"
-              className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
-            >
-              一覧（ページング）
-            </Link>
-          </div>
+        <div className="mb-4">
+          <h1 className="text-2xl font-semibold text-neutral-900">
+            実行状況（一覧）
+          </h1>
+          <p className="text-sm text-neutral-500">40件ごとにページ切替</p>
         </div>
 
         <div className="overflow-x-auto rounded-2xl border border-neutral-200">
@@ -76,7 +61,7 @@ export default async function JobBoardRuns() {
                     {formatJpDateTime(r.finished_at)}
                   </td>
                   <td className="px-3 py-2">{r.status ?? "-"}</td>
-                  <td className="px-3 py-2 text-neutral-500">
+                  <td className="px-3 py-2">
                     {r.error ? (
                       <span className="text-red-600">{r.error}</span>
                     ) : (
@@ -91,12 +76,28 @@ export default async function JobBoardRuns() {
                     colSpan={5}
                     className="px-4 py-8 text-center text-neutral-400"
                   >
-                    まだ実行履歴がありません
+                    データがありません
                   </td>
                 </tr>
               )}
             </tbody>
           </table>
+        </div>
+
+        <div className="mt-3 flex items-center gap-2">
+          <button
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            className="rounded-lg border border-neutral-200 px-3 py-1 text-sm hover:bg-neutral-50"
+          >
+            前へ
+          </button>
+          <span className="text-sm text-neutral-600">Page {page}</span>
+          <button
+            onClick={() => setPage((p) => p + 1)}
+            className="rounded-lg border border-neutral-200 px-3 py-1 text-sm hover:bg-neutral-50"
+          >
+            次へ
+          </button>
         </div>
       </main>
     </>
