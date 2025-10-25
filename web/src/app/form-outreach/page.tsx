@@ -1,18 +1,31 @@
-// web/src/app/form-outreach/page.tsx  ✅ 完全版
+// web/src/app/form-outreach/page.tsx
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import AppHeader from "@/components/AppHeader";
 import KpiCard from "@/components/KpiCard";
 import Link from "next/link";
+import {
+  ResponsiveContainer,
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  Tooltip,
+  CartesianGrid,
+} from "recharts";
+
+type Summary = {
+  tplCount: number;
+  prospectCount: number;
+  sentThisMonth: number;
+  allSent: number;
+};
+type SeriesPoint = { date: string; count: number };
 
 export default function FormOutreachTop() {
-  const [kpi, setKpi] = useState<{
-    tplCount: number;
-    prospectCount: number;
-    sentThisMonth: number;
-    allSent: number;
-  } | null>(null);
+  const [kpi, setKpi] = useState<Summary | null>(null);
+  const [series, setSeries] = useState<SeriesPoint[]>([]);
   const [msg, setMsg] = useState("");
 
   useEffect(() => {
@@ -31,6 +44,24 @@ export default function FormOutreachTop() {
     })();
   }, []);
 
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("/api/form-outreach/series?range=30d", {
+          cache: "no-store",
+        });
+        const j = await res.json();
+        if (!res.ok) throw new Error(j?.error || "fetch error");
+        setSeries(j?.rows ?? []);
+      } catch (e) {}
+    })();
+  }, []);
+
+  const periodTotal = useMemo(
+    () => series.reduce((s, p) => s + (p.count || 0), 0),
+    [series]
+  );
+
   return (
     <>
       <AppHeader />
@@ -44,10 +75,8 @@ export default function FormOutreachTop() {
           </p>
         </div>
 
-        {/* メニュー */}
         <div className="mb-6 rounded-2xl border border-neutral-200 p-5">
           <div className="grid grid-cols-1 gap-7 md:grid-cols-3">
-            {/* 運用 */}
             <section>
               <div className="mb-2 text-lg font-semibold text-neutral-900">
                 運用
@@ -59,14 +88,6 @@ export default function FormOutreachTop() {
                     className="text-base text-neutral-800 underline-offset-2 hover:underline"
                   >
                     手動実行
-                  </Link>
-                </li>
-                <li>
-                  <Link
-                    href="/form-outreach/companies"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    企業一覧
                   </Link>
                 </li>
                 <li>
@@ -85,10 +106,16 @@ export default function FormOutreachTop() {
                     メッセージテンプレート
                   </Link>
                 </li>
+                <li>
+                  <Link
+                    href="/form-outreach/companies"
+                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
+                  >
+                    企業一覧
+                  </Link>
+                </li>
               </ul>
             </section>
-
-            {/* 設定 */}
             <section>
               <div className="mb-2 text-lg font-semibold text-neutral-900">
                 設定
@@ -99,7 +126,7 @@ export default function FormOutreachTop() {
                     href="/form-outreach/senders"
                     className="text-base text-neutral-800 underline-offset-2 hover:underline"
                   >
-                    送信元設定（テナント1件）
+                    送信元設定
                   </Link>
                 </li>
                 <li>
@@ -107,24 +134,7 @@ export default function FormOutreachTop() {
                     href="/form-outreach/automation"
                     className="text-base text-neutral-800 underline-offset-2 hover:underline"
                   >
-                    自動実行設定（企業リスト今すぐ取得）
-                  </Link>
-                </li>
-              </ul>
-            </section>
-
-            {/* ヘルプ等（必要なら） */}
-            <section>
-              <div className="mb-2 text-lg font-semibold text-neutral-900">
-                ヘルプ
-              </div>
-              <ul className="space-y-1.5">
-                <li>
-                  <Link
-                    href="/docs/form-outreach"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    使い方ガイド
+                    自動実行設定
                   </Link>
                 </li>
               </ul>
@@ -132,7 +142,6 @@ export default function FormOutreachTop() {
           </div>
         </div>
 
-        {/* KPI */}
         <header className="mb-2">
           <h2 className="text-2xl md:text-[24px] font-semibold text-neutral-900">
             各KPI
@@ -159,6 +168,29 @@ export default function FormOutreachTop() {
             value={kpi?.allSent ?? "-"}
             className="ring-1 ring-neutral-100 shadow-sm"
           />
+        </div>
+
+        {/* 送信数折れ線（メール配信ページと同デザイン） */}
+        <div className="mt-6 rounded-2xl border border-neutral-200 p-4">
+          <div className="mb-2 text-base font-semibold text-neutral-800">
+            直近30日の送信数（合計：{periodTotal}）
+          </div>
+          <div className="h-56">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={series}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="date" tick={{ fontSize: 13 }} />
+                <YAxis allowDecimals={false} tick={{ fontSize: 13 }} />
+                <Tooltip />
+                <Line
+                  type="monotone"
+                  dataKey="count"
+                  dot={false}
+                  strokeWidth={2}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
         </div>
 
         {msg && (

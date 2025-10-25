@@ -15,7 +15,7 @@ import {
   CartesianGrid,
   Legend,
 } from "recharts";
-import { JOB_LARGE, JOB_CATEGORIES } from "@/constants/jobCategories";
+import JobCategoryModal from "@/components/job-boards/JobCategoryModal";
 
 type Mode = "weekly" | "monthly";
 type RangeW = "12w" | "26w" | "52w";
@@ -35,9 +35,9 @@ type ApiRow = {
   site_key: string;
   large_category: string;
   small_category: string;
-  age_band: string | null;
-  employment_type: string | null;
-  salary_band: string | null;
+  age_band: string;
+  employment_type: string;
+  salary_band: string;
   jobs_count: number;
   candidates_count: number;
 };
@@ -61,6 +61,7 @@ export default function JobBoardsPage() {
   const [ageChart, setAgeChart] = useState<string[]>([]);
   const [empChart, setEmpChart] = useState<string[]>([]);
   const [salChart, setSalChart] = useState<string[]>([]);
+  const [showFiltersChart, setShowFiltersChart] = useState<boolean>(true);
 
   // ===== 表側フィルタ（独立） =====
   const [modeTable, setModeTable] = useState<Mode>("weekly");
@@ -74,6 +75,7 @@ export default function JobBoardsPage() {
   const [ageTable, setAgeTable] = useState<string[]>([]);
   const [empTable, setEmpTable] = useState<string[]>([]);
   const [salTable, setSalTable] = useState<string[]>([]);
+  const [showFiltersTable, setShowFiltersTable] = useState<boolean>(true);
 
   // ===== データ =====
   const [rowsChart, setRowsChart] = useState<ApiRow[]>([]);
@@ -81,15 +83,7 @@ export default function JobBoardsPage() {
   const [msgChart, setMsgChart] = useState("");
   const [msgTable, setMsgTable] = useState("");
 
-  // 総小分類数（ALL表示のため）
-  const SMALL_TOTAL = useMemo(
-    () => Object.values(JOB_CATEGORIES).reduce((s, arr) => s + arr.length, 0),
-    []
-  );
-  const toAllLabel = (count: number, total: number) =>
-    count >= total ? `${total}(ALL)` : `${count || 0}`;
-
-  // ====== フェッチ（グラフ用） ======
+  // グラフ用データ取得
   useEffect(() => {
     (async () => {
       try {
@@ -99,6 +93,7 @@ export default function JobBoardsPage() {
           body: JSON.stringify({
             mode: modeChart,
             metric: metricChart,
+            // 空配列は「全選択扱い」にするため API 側で解釈
             sites: sitesChart,
             large: largeChart,
             small: smallChart,
@@ -129,7 +124,7 @@ export default function JobBoardsPage() {
     salChart.join(","),
   ]);
 
-  // ====== フェッチ（表用） ======
+  // 表用データ取得
   useEffect(() => {
     (async () => {
       try {
@@ -169,7 +164,7 @@ export default function JobBoardsPage() {
     salTable.join(","),
   ]);
 
-  // ===== 折れ線グラフ化 =====
+  // 折れ線グラフ化
   const dateKeyChart = modeChart === "weekly" ? "week_start" : "month_start";
   const seriesChart: SeriesPoint[] = useMemo(() => {
     const byDate: Record<string, Record<string, number>> = {};
@@ -191,7 +186,7 @@ export default function JobBoardsPage() {
     });
   }, [rowsChart, dateKeyChart, metricChart]);
 
-  // ===== 表（サイト合計） =====
+  // 表（サイト合計）
   const tableAgg = useMemo(() => {
     const metricKey =
       metricTable === "jobs" ? "jobs_count" : "candidates_count";
@@ -208,7 +203,7 @@ export default function JobBoardsPage() {
       .sort((a, b) => b.total - a.total);
   }, [rowsTable, metricTable, sitesTable]);
 
-  // ===== 職種モーダル制御 =====
+  // 職種モーダル制御
   const [openChartCat, setOpenChartCat] = useState(false);
   const [openTableCat, setOpenTableCat] = useState(false);
 
@@ -259,6 +254,10 @@ export default function JobBoardsPage() {
     "800万~",
   ];
 
+  // ALL 表示ヘルパ（全選択時 N(ALL)）
+  const allText = (selectedLen: number, totalLen: number) =>
+    selectedLen === totalLen ? `${selectedLen}(ALL)` : selectedLen || "すべて";
+
   return (
     <>
       <AppHeader showBack />
@@ -295,20 +294,14 @@ export default function JobBoardsPage() {
           </div>
         </div>
 
-        {/* ===== KPI（グラフ側） ===== */}
+        {/* KPI */}
         <div className="grid grid-cols-2 gap-4 md:grid-cols-4 mb-6">
           <KpiCard
             label="対象サイト"
-            value={toAllLabel(sitesChart.length, SITE_OPTIONS.length)}
+            value={allText(sitesChart.length, SITE_OPTIONS.length)}
           />
-          <KpiCard
-            label="職種（大）"
-            value={toAllLabel(largeChart.length, JOB_LARGE.length)}
-          />
-          <KpiCard
-            label="職種（小）"
-            value={toAllLabel(smallChart.length, SMALL_TOTAL)}
-          />
+          <KpiCard label="職種（大）" value={allText(largeChart.length, 19)} />
+          <KpiCard label="職種（小）" value={smallChart.length || "すべて"} />
           <KpiCard label="ビュー" value={labelOfMode(modeChart)} />
         </div>
 
@@ -319,100 +312,147 @@ export default function JobBoardsPage() {
               折れ線グラフ（サイト重ね描画）
             </div>
             <div className="flex flex-wrap gap-2">
-              {(["weekly", "monthly"] as const).map((m) => (
-                <Chip
-                  key={m}
-                  label={m === "weekly" ? "週次" : "月次"}
-                  active={modeChart === m}
-                  onClick={() => {
-                    setModeChart(m);
-                    setRangeChart(m === "weekly" ? "26w" : "12m");
-                  }}
-                />
-              ))}
-              {(modeChart === "weekly"
-                ? (["12w", "26w", "52w"] as const)
-                : (["12m", "36m"] as const)
-              ).map((r) => (
-                <Chip
-                  key={r}
-                  label={r}
-                  active={rangeChart === r}
-                  onClick={() => setRangeChart(r)}
-                />
-              ))}
-              {(["jobs", "candidates"] as const).map((k) => (
-                <Chip
-                  key={k}
-                  label={k === "jobs" ? "求人数" : "求職者数"}
-                  active={metricChart === k}
-                  onClick={() => setMetricChart(k)}
-                />
-              ))}
+              <button
+                onClick={() => setShowFiltersChart((v) => !v)}
+                className="rounded-lg border px-2 py-1 text-xs hover:bg-neutral-50"
+              >
+                フィルタを{showFiltersChart ? "隠す" : "表示"}
+              </button>
             </div>
           </div>
 
           {/* フィルタ（タグUI） */}
-          <div className="rounded-xl border border-neutral-200 p-3 bg-neutral-50/40">
-            <FilterRow label="サイト">
-              <Chip
-                active={sitesChart.length === SITE_OPTIONS.length}
-                label="すべて"
-                onClick={() => setSitesChart(SITE_OPTIONS.map((s) => s.value))}
-              />
-              <Chip
-                active={sitesChart.length === 0}
-                label="解除"
-                onClick={() => setSitesChart([])}
-              />
-              {SITE_OPTIONS.map((o) => (
-                <Chip
-                  key={o.value}
-                  label={o.label}
-                  active={sitesChart.includes(o.value)}
-                  onClick={() =>
-                    setSitesChart(
-                      sitesChart.includes(o.value)
-                        ? sitesChart.filter((x) => x !== o.value)
-                        : [...sitesChart, o.value]
-                    )
-                  }
-                />
-              ))}
-            </FilterRow>
+          {showFiltersChart && (
+            <div className="rounded-xl border border-neutral-200 p-3 bg-neutral-50/40">
+              <div className="mb-2">
+                <div className="mb-1 text-xs font-medium text-neutral-600">
+                  ビュー/範囲/指標
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {(["weekly", "monthly"] as const).map((m) => (
+                    <Chip
+                      key={m}
+                      label={m === "weekly" ? "週次" : "月次"}
+                      active={modeChart === m}
+                      onClick={() => {
+                        setModeChart(m);
+                        setRangeChart(m === "weekly" ? "26w" : "12m");
+                      }}
+                    />
+                  ))}
+                  {(modeChart === "weekly"
+                    ? (["12w", "26w", "52w"] as const)
+                    : (["12m", "36m"] as const)
+                  ).map((r) => (
+                    <Chip
+                      key={r}
+                      label={r}
+                      active={rangeChart === r}
+                      onClick={() => setRangeChart(r)}
+                    />
+                  ))}
+                  {(["jobs", "candidates"] as const).map((k) => (
+                    <Chip
+                      key={k}
+                      label={k === "jobs" ? "求人数" : "求職者数"}
+                      active={metricChart === k}
+                      onClick={() => setMetricChart(k)}
+                    />
+                  ))}
+                </div>
+              </div>
 
-            <FilterRow label="職種">
-              <button
-                className="px-2 py-1 text-xs rounded-lg border border-neutral-300 hover:bg-neutral-50"
-                onClick={() => setOpenChartCat(true)}
-              >
-                選択（大:{toAllLabel(largeChart.length, JOB_LARGE.length)} / 小:
-                {toAllLabel(smallChart.length, SMALL_TOTAL)}）
-              </button>
-            </FilterRow>
+              <div className="mb-2">
+                <div className="mb-1 text-xs font-medium text-neutral-600">
+                  サイト
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Chip
+                    active={sitesChart.length === SITE_OPTIONS.length}
+                    label="すべて"
+                    onClick={() =>
+                      setSitesChart(SITE_OPTIONS.map((s) => s.value))
+                    }
+                  />
+                  <Chip
+                    active={sitesChart.length === 0}
+                    label="解除"
+                    onClick={() => setSitesChart([])}
+                  />
+                  {SITE_OPTIONS.map((o) => (
+                    <Chip
+                      key={o.value}
+                      label={o.label}
+                      active={sitesChart.includes(o.value)}
+                      onClick={() =>
+                        setSitesChart(
+                          sitesChart.includes(o.value)
+                            ? sitesChart.filter((x) => x !== o.value)
+                            : [...sitesChart, o.value]
+                        )
+                      }
+                    />
+                  ))}
+                </div>
+              </div>
 
-            <FilterRow label="年齢層">
-              <TagMulti
+              <div className="mb-2">
+                <div className="mb-1 text-xs font-medium text-neutral-600">
+                  職種
+                </div>
+                <button
+                  className="px-2 py-1 text-xs rounded-lg border border-neutral-300 hover:bg-neutral-50"
+                  onClick={() => setOpenChartCat(true)}
+                >
+                  選択（大:{largeChart.length || "すべて"} / 小:
+                  {smallChart.length || "すべて"}）
+                </button>
+              </div>
+
+              <RowTag
+                label="年齢層"
                 values={ageChart}
                 setValues={setAgeChart}
-                options={AGE_BANDS}
+                options={[
+                  "20歳以下",
+                  "25歳以下",
+                  "30歳以下",
+                  "35歳以下",
+                  "40歳以下",
+                  "45歳以下",
+                  "50歳以下",
+                  "55歳以下",
+                  "60歳以下",
+                  "65歳以下",
+                ]}
               />
-            </FilterRow>
-            <FilterRow label="雇用形態">
-              <TagMulti
+              <RowTag
+                label="雇用形態"
                 values={empChart}
                 setValues={setEmpChart}
-                options={EMP_TYPES}
+                options={[
+                  "正社員",
+                  "契約社員",
+                  "派遣社員",
+                  "アルバイト",
+                  "業務委託",
+                ]}
               />
-            </FilterRow>
-            <FilterRow label="年収帯">
-              <TagMulti
+              <RowTag
+                label="年収帯"
                 values={salChart}
                 setValues={setSalChart}
-                options={SALARY_BAND}
+                options={[
+                  "~300万",
+                  "300~400万",
+                  "400~500万",
+                  "500~600万",
+                  "600~800万",
+                  "800万~",
+                ]}
               />
-            </FilterRow>
-          </div>
+            </div>
+          )}
 
           <div className="h-64 mt-3">
             <ResponsiveContainer width="100%" height="100%">
@@ -445,121 +485,170 @@ export default function JobBoardsPage() {
 
         {/* ========== 表ブロック（独立フィルタ） ========== */}
         <section className="mt-6 rounded-2xl border border-neutral-200 p-4">
-          {/* 表側 KPI（同期表示） */}
-          <div className="grid grid-cols-2 gap-4 md:grid-cols-4 mb-4">
-            <KpiCard
-              label="対象サイト"
-              value={toAllLabel(sitesTable.length, SITE_OPTIONS.length)}
-            />
-            <KpiCard
-              label="職種（大）"
-              value={toAllLabel(largeTable.length, JOB_LARGE.length)}
-            />
-            <KpiCard
-              label="職種（小）"
-              value={toAllLabel(smallTable.length, SMALL_TOTAL)}
-            />
-            <KpiCard label="ビュー" value={labelOfMode(modeTable)} />
-          </div>
-
           <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="text-base font-semibold text-neutral-800">
               サイト別合計（{labelOfMode(modeTable)}）
             </div>
             <div className="flex flex-wrap gap-2">
-              {(["weekly", "monthly"] as const).map((m) => (
-                <Chip
-                  key={m}
-                  label={m === "weekly" ? "週次" : "月次"}
-                  active={modeTable === m}
-                  onClick={() => {
-                    setModeTable(m);
-                    setRangeTable(m === "weekly" ? "26w" : "12m");
-                  }}
-                />
-              ))}
-              {(modeTable === "weekly"
-                ? (["12w", "26w", "52w"] as const)
-                : (["12m", "36m"] as const)
-              ).map((r) => (
-                <Chip
-                  key={r}
-                  label={r}
-                  active={rangeTable === r}
-                  onClick={() => setRangeTable(r)}
-                />
-              ))}
-              {(["jobs", "candidates"] as const).map((k) => (
-                <Chip
-                  key={k}
-                  label={k === "jobs" ? "求人数" : "求職者数"}
-                  active={metricTable === k}
-                  onClick={() => setMetricTable(k)}
-                />
-              ))}
+              <button
+                onClick={() => setShowFiltersTable((v) => !v)}
+                className="rounded-lg border px-2 py-1 text-xs hover:bg-neutral-50"
+              >
+                フィルタを{showFiltersTable ? "隠す" : "表示"}
+              </button>
             </div>
           </div>
 
-          <div className="rounded-xl border border-neutral-200 p-3 bg-neutral-50/40">
-            <FilterRow label="サイト">
-              <Chip
-                active={sitesTable.length === SITE_OPTIONS.length}
-                label="すべて"
-                onClick={() => setSitesTable(SITE_OPTIONS.map((s) => s.value))}
-              />
-              <Chip
-                active={sitesTable.length === 0}
-                label="解除"
-                onClick={() => setSitesTable([])}
-              />
-              {SITE_OPTIONS.map((o) => (
-                <Chip
-                  key={o.value}
-                  label={o.label}
-                  active={sitesTable.includes(o.value)}
-                  onClick={() =>
-                    setSitesTable(
-                      sitesTable.includes(o.value)
-                        ? sitesTable.filter((x) => x !== o.value)
-                        : [...sitesTable, o.value]
-                    )
-                  }
-                />
-              ))}
-            </FilterRow>
-            <FilterRow label="職種">
-              <button
-                className="px-2 py-1 text-xs rounded-lg border border-neutral-300 hover:bg-neutral-50"
-                onClick={() => setOpenTableCat(true)}
-              >
-                選択（大:{toAllLabel(largeTable.length, JOB_LARGE.length)} / 小:
-                {toAllLabel(smallTable.length, SMALL_TOTAL)}）
-              </button>
-            </FilterRow>
-            <FilterRow label="年齢層">
-              <TagMulti
+          {showFiltersTable && (
+            <div className="rounded-xl border border-neutral-200 p-3 bg-neutral-50/40">
+              <div className="mb-2">
+                <div className="mb-1 text-xs font-medium text-neutral-600">
+                  ビュー/範囲/指標
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {(["weekly", "monthly"] as const).map((m) => (
+                    <Chip
+                      key={m}
+                      label={m === "weekly" ? "週次" : "月次"}
+                      active={modeTable === m}
+                      onClick={() => {
+                        setModeTable(m);
+                        setRangeTable(m === "weekly" ? "26w" : "12m");
+                      }}
+                    />
+                  ))}
+                  {(modeTable === "weekly"
+                    ? (["12w", "26w", "52w"] as const)
+                    : (["12m", "36m"] as const)
+                  ).map((r) => (
+                    <Chip
+                      key={r}
+                      label={r}
+                      active={rangeTable === r}
+                      onClick={() => setRangeTable(r)}
+                    />
+                  ))}
+                  {(["jobs", "candidates"] as const).map((k) => (
+                    <Chip
+                      key={k}
+                      label={k === "jobs" ? "求人数" : "求職者数"}
+                      active={metricTable === k}
+                      onClick={() => setMetricTable(k)}
+                    />
+                  ))}
+                </div>
+              </div>
+
+              <div className="mb-2">
+                <div className="mb-1 text-xs font-medium text-neutral-600">
+                  サイト
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Chip
+                    active={sitesTable.length === SITE_OPTIONS.length}
+                    label="すべて"
+                    onClick={() =>
+                      setSitesTable(SITE_OPTIONS.map((s) => s.value))
+                    }
+                  />
+                  <Chip
+                    active={sitesTable.length === 0}
+                    label="解除"
+                    onClick={() => setSitesTable([])}
+                  />
+                  {SITE_OPTIONS.map((o) => (
+                    <Chip
+                      key={o.value}
+                      label={o.label}
+                      active={sitesTable.includes(o.value)}
+                      onClick={() =>
+                        setSitesTable(
+                          sitesTable.includes(o.value)
+                            ? sitesTable.filter((x) => x !== o.value)
+                            : [...sitesTable, o.value]
+                        )
+                      }
+                    />
+                  ))}
+                </div>
+              </div>
+
+              <div className="mb-2">
+                <div className="mb-1 text-xs font-medium text-neutral-600">
+                  職種
+                </div>
+                <button
+                  className="px-2 py-1 text-xs rounded-lg border border-neutral-300 hover:bg-neutral-50"
+                  onClick={() => setOpenTableCat(true)}
+                >
+                  選択（大:{largeTable.length || "すべて"} / 小:
+                  {smallTable.length || "すべて"}）
+                </button>
+              </div>
+
+              <RowTag
+                label="年齢層"
                 values={ageTable}
                 setValues={setAgeTable}
-                options={AGE_BANDS}
+                options={[
+                  "20歳以下",
+                  "25歳以下",
+                  "30歳以下",
+                  "35歳以下",
+                  "40歳以下",
+                  "45歳以下",
+                  "50歳以下",
+                  "55歳以下",
+                  "60歳以下",
+                  "65歳以下",
+                ]}
               />
-            </FilterRow>
-            <FilterRow label="雇用形態">
-              <TagMulti
+              <RowTag
+                label="雇用形態"
                 values={empTable}
                 setValues={setEmpTable}
-                options={EMP_TYPES}
+                options={[
+                  "正社員",
+                  "契約社員",
+                  "派遣社員",
+                  "アルバイト",
+                  "業務委託",
+                ]}
               />
-            </FilterRow>
-            <FilterRow label="年収帯">
-              <TagMulti
+              <RowTag
+                label="年収帯"
                 values={salTable}
                 setValues={setSalTable}
-                options={SALARY_BAND}
+                options={[
+                  "~300万",
+                  "300~400万",
+                  "400~500万",
+                  "500~600万",
+                  "600~800万",
+                  "800万~",
+                ]}
               />
-            </FilterRow>
+            </div>
+          )}
+
+          {/* 表上にもKPIミニ（選択が同期してわかるように） */}
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-4 my-3">
+            <KpiCard
+              label="対象サイト（表）"
+              value={allText(sitesTable.length, SITE_OPTIONS.length)}
+            />
+            <KpiCard
+              label="職種（大）"
+              value={allText(largeTable.length, 19)}
+            />
+            <KpiCard label="職種（小）" value={smallTable.length || "すべて"} />
+            <KpiCard
+              label="指標"
+              value={metricTable === "jobs" ? "求人数" : "求職者数"}
+            />
           </div>
 
-          <div className="overflow-x-auto rounded-xl border border-neutral-200 mt-3">
+          <div className="overflow-x-auto rounded-xl border border-neutral-200">
             <table className="min-w-[760px] w-full text-sm">
               <thead className="bg-neutral-50 text-neutral-600">
                 <tr>
@@ -598,11 +687,11 @@ export default function JobBoardsPage() {
 
         {/* 職種モーダル（グラフ用） */}
         {openChartCat && (
-          <CategoryPicker
-            large={largeChart}
-            small={smallChart}
-            onClose={() => setOpenChartCat(false)}
-            onApply={(L, S) => {
+          <JobCategoryModal
+            initialLarge={largeChart}
+            initialSmall={smallChart}
+            onCloseAction={() => setOpenChartCat(false)}
+            onApplyAction={(L, S) => {
               setLargeChart(L);
               setSmallChart(S);
               setOpenChartCat(false);
@@ -611,11 +700,11 @@ export default function JobBoardsPage() {
         )}
         {/* 職種モーダル（表用） */}
         {openTableCat && (
-          <CategoryPicker
-            large={largeTable}
-            small={smallTable}
-            onClose={() => setOpenTableCat(false)}
-            onApply={(L, S) => {
+          <JobCategoryModal
+            initialLarge={largeTable}
+            initialSmall={smallTable}
+            onCloseAction={() => setOpenTableCat(false)}
+            onApplyAction={(L, S) => {
               setLargeTable(L);
               setSmallTable(S);
               setOpenTableCat(false);
@@ -627,26 +716,13 @@ export default function JobBoardsPage() {
   );
 }
 
-function FilterRow({
+function RowTag({
   label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="mb-2">
-      <div className="mb-1 text-xs font-medium text-neutral-600">{label}</div>
-      <div className="flex flex-wrap items-center">{children}</div>
-    </div>
-  );
-}
-
-function TagMulti({
   values,
   setValues,
   options,
 }: {
+  label: string;
   values: string[];
   setValues: (v: string[]) => void;
   options: string[];
@@ -672,198 +748,27 @@ function TagMulti({
     </button>
   );
   return (
-    <>
-      <Chip
-        active={values.length === options.length}
-        label="すべて"
-        onClick={() => setValues(options)}
-      />
-      <Chip
-        active={values.length === 0}
-        label="解除"
-        onClick={() => setValues([])}
-      />
-      {options.map((o) => (
+    <div className="mb-2">
+      <div className="mb-1 text-xs font-medium text-neutral-600">{label}</div>
+      <div className="flex flex-wrap items-center">
         <Chip
-          key={o}
-          label={o}
-          active={values.includes(o)}
-          onClick={() => toggle(o)}
+          active={values.length === options.length}
+          label="すべて"
+          onClick={() => setValues(options)}
         />
-      ))}
-    </>
-  );
-}
-
-/** 職種モーダル：左=大分類（クリックで右の小分類を切替）。大分類複数選択時は右側にグルーピング表示。 */
-function CategoryPicker({
-  large,
-  small,
-  onClose,
-  onApply,
-}: {
-  large: string[];
-  small: string[];
-  onClose: () => void;
-  onApply: (L: string[], S: string[]) => void;
-}) {
-  const [L, setL] = useState<string[]>(large);
-  const [S, setS] = useState<string[]>(small);
-  const [activeL, setActiveL] = useState<string>(L[0] || JOB_LARGE[0]);
-
-  const toggleL = (v: string) =>
-    setL(L.includes(v) ? L.filter((x) => x !== v) : [...L, v]);
-  const toggleS = (v: string) =>
-    setS(S.includes(v) ? S.filter((x) => x !== v) : [...S, v]);
-
-  // 右ペインに出す対象の大分類
-  const rightGroups = useMemo(() => {
-    if (L.length === 0) return JOB_LARGE;
-    return L;
-  }, [L]);
-
-  useEffect(() => {
-    if (!rightGroups.includes(activeL))
-      setActiveL(rightGroups[0] || JOB_LARGE[0]);
-  }, [rightGroups, activeL]);
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-      <div className="w-[1000px] max-w-[96vw] max-h-[92vh] overflow-hidden rounded-2xl bg-white shadow-xl">
-        <div className="flex items-center justify-between px-4 py-3 border-b">
-          <div className="font-semibold">職種選択</div>
-          <button
-            onClick={onClose}
-            className="rounded-lg px-2 py-1 border hover:bg-neutral-50 text-sm"
-          >
-            閉じる
-          </button>
-        </div>
-
-        <div className="p-4 grid grid-cols-12 gap-4 overflow-hidden">
-          {/* 左：大分類 */}
-          <div className="col-span-4 overflow-y-auto max-h-[70vh]">
-            <div className="flex items-center justify-between mb-2">
-              <label className="text-sm">
-                <input
-                  type="checkbox"
-                  className="mr-2"
-                  checked={L.length === JOB_LARGE.length}
-                  onChange={(e) => setL(e.target.checked ? [...JOB_LARGE] : [])}
-                />
-                大分類 すべて選択
-              </label>
-            </div>
-            <div className="rounded-xl border divide-y">
-              {JOB_LARGE.map((lg) => {
-                const checked = L.includes(lg);
-                const on = activeL === lg;
-                return (
-                  <div
-                    key={lg}
-                    onClick={() => setActiveL(lg)}
-                    className={`flex items-center justify-between px-3 py-2 cursor-pointer ${
-                      on ? "bg-neutral-50" : ""
-                    }`}
-                  >
-                    <div className="text-sm font-medium">{lg}</div>
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() => toggleL(lg)}
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* 右：小分類 */}
-          <div className="col-span-8 overflow-y-auto max-h-[70vh]">
-            <div className="flex items-center justify-between mb-2">
-              <div className="text-sm font-semibold text-neutral-800">
-                小分類
-              </div>
-              <label className="text-sm">
-                <input
-                  type="checkbox"
-                  className="mr-2"
-                  checked={
-                    rightGroups.every((g) =>
-                      (JOB_CATEGORIES[g] || []).every((s) => S.includes(s))
-                    ) && rightGroups.length > 0
-                  }
-                  onChange={(e) => {
-                    if (e.target.checked) {
-                      const union = new Set<string>(S);
-                      rightGroups.forEach((g) =>
-                        (JOB_CATEGORIES[g] || []).forEach((x) => union.add(x))
-                      );
-                      setS(Array.from(union));
-                    } else {
-                      const rest = new Set<string>(S);
-                      rightGroups.forEach((g) =>
-                        (JOB_CATEGORIES[g] || []).forEach((x) => rest.delete(x))
-                      );
-                      setS(Array.from(rest));
-                    }
-                  }}
-                />
-                表示中の小分類をすべて選択/解除
-              </label>
-            </div>
-
-            {rightGroups.map((grp) => (
-              <div key={grp} id={`grp-${grp}`} className="mb-4">
-                <div className="flex items-center justify-between mb-2">
-                  <div className="text-sm font-semibold text-indigo-700">
-                    {grp}
-                  </div>
-                  <div className="text-xs text-neutral-500">
-                    （{(JOB_CATEGORIES[grp] || []).length}件）
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  {(JOB_CATEGORIES[grp] || []).map((s) => (
-                    <label
-                      key={`${grp}-${s}`}
-                      className="inline-flex items-center gap-2"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={S.includes(s)}
-                        onChange={() => toggleS(s)}
-                      />
-                      <span className="text-sm">{s}</span>
-                      <span className="ml-auto text-xs text-neutral-500">
-                        ({grp})
-                      </span>
-                    </label>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t">
-          <button
-            onClick={() => {
-              setL([]);
-              setS([]);
-            }}
-            className="rounded-lg px-3 py-1 border text-sm"
-          >
-            クリア
-          </button>
-          <button
-            onClick={() => onApply(L, S)}
-            className="rounded-lg px-3 py-1 border text-sm hover:bg-neutral-50"
-          >
-            適用して閉じる
-          </button>
-        </div>
+        <Chip
+          active={values.length === 0}
+          label="解除"
+          onClick={() => setValues([])}
+        />
+        {options.map((o) => (
+          <Chip
+            key={o}
+            label={o}
+            active={values.includes(o)}
+            onClick={() => toggle(o)}
+          />
+        ))}
       </div>
     </div>
   );

@@ -1,75 +1,79 @@
 // web/src/components/job-boards/JobCategoryModal.tsx
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { JOB_LARGE, JOB_CATEGORIES } from "@/constants/jobCategories";
 
-export type JobCatValue = { large: string[]; small: string[] };
-
+/**
+ * 大分類を押すとハイライト＆右ペインの小分類が切替
+ * 小分類は「チップ」方式でトグル選択（チェックボックスは使わない）
+ * 既存選択は初期値に反映。画面サイズで見切れないよう max-h + overflow
+ */
 export default function JobCategoryModal({
-  open,
-  value,
-  onChangeAction,
+  initialLarge,
+  initialSmall,
   onCloseAction,
+  onApplyAction,
 }: {
-  open: boolean;
-  value: JobCatValue;
-  onChangeAction: (v: JobCatValue) => void;
+  initialLarge: string[];
+  initialSmall: string[];
   onCloseAction: () => void;
+  onApplyAction: (L: string[], S: string[]) => void;
 }) {
+  const [L, setL] = useState<string[]>(initialLarge ?? []);
+  const [S, setS] = useState<string[]>(initialSmall ?? []);
   const [activeLarge, setActiveLarge] = useState<string>(
-    value.large[0] || JOB_LARGE[0]
+    (initialLarge?.[0] as string) || JOB_LARGE[0]
   );
-  const smalls = useMemo(
+
+  // 大分類トグル
+  const toggleLarge = (v: string) =>
+    setL((prev) =>
+      prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v]
+    );
+
+  // 右ペインに出すのは「現在アクティブの大分類」のみ
+  const smallOptions = useMemo(
     () => JOB_CATEGORIES[activeLarge] ?? [],
     [activeLarge]
   );
 
-  if (!open) return null;
+  // チップ
+  const Chip: React.FC<{
+    active: boolean;
+    label: string;
+    onClick: () => void;
+  }> = ({ active, label, onClick }) => (
+    <button
+      onClick={onClick}
+      className={`px-2 py-1 text-xs rounded-full border ${
+        active
+          ? "bg-indigo-50 border-indigo-400 text-indigo-700"
+          : "border-neutral-300 text-neutral-700 hover:bg-neutral-50"
+      }`}
+    >
+      {label}
+    </button>
+  );
 
-  const toggleLarge = (lg: string) => {
-    const exists = value.large.includes(lg);
-    const nextLg = exists
-      ? value.large.filter((x) => x !== lg)
-      : [...value.large, lg];
-    const ownSmalls = JOB_CATEGORIES[lg] ?? [];
-    const nextSm = exists
-      ? value.small.filter((s) => !ownSmalls.includes(s))
-      : [...value.small, ...ownSmalls.filter((s) => !value.small.includes(s))];
-    onChangeAction({ large: nextLg, small: nextSm });
-  };
+  // 小分類トグル（チップ）
+  const toggleSmall = (v: string) =>
+    setS((prev) =>
+      prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v]
+    );
 
-  const toggleSmall = (sm: string) => {
-    const exists = value.small.includes(sm);
-    const nextSm = exists
-      ? value.small.filter((x) => x !== sm)
-      : [...value.small, sm];
-    const belongLg = Object.entries(JOB_CATEGORIES).find(([, arr]) =>
-      arr.includes(sm)
-    )?.[0];
-    const nextLg =
-      belongLg && !value.large.includes(belongLg)
-        ? [...value.large, belongLg]
-        : value.large;
-    onChangeAction({ large: nextLg, small: nextSm });
-  };
-
-  const allChecked = smalls.every((s) => value.small.includes(s));
-  const toggleAllSmalls = (checked: boolean) => {
-    const target = JOB_CATEGORIES[activeLarge] ?? [];
-    const base = value.small.filter((s) => !target.includes(s));
-    const nextSm = checked ? [...base, ...target] : base;
-    const nextLg = checked
-      ? Array.from(new Set([...value.large, activeLarge]))
-      : value.large.filter((lg) => lg !== activeLarge);
-    onChangeAction({ large: nextLg, small: nextSm });
-  };
+  // 既存選択の反映（モーダル開時に一度だけ）
+  useEffect(() => {
+    setL(initialLarge ?? []);
+    setS(initialSmall ?? []);
+  }, []); // eslint-disable-line
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-      <div className="w-[1000px] max-w-[96vw] rounded-2xl bg-white shadow-xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-3">
+      <div className="w-[980px] max-w-[96vw] rounded-2xl bg-white shadow-xl">
+        {/* ヘッダー */}
         <div className="flex items-center justify-between px-4 py-3 border-b">
-          <div className="font-semibold">職種選択</div>
+          <div className="font-semibold">職種の選択</div>
           <button
             onClick={onCloseAction}
             className="rounded-lg px-2 py-1 border hover:bg-neutral-50 text-sm"
@@ -78,81 +82,123 @@ export default function JobCategoryModal({
           </button>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-0 max-h[85vh] md:max-h-[85vh]">
-          {/* left large list */}
-          <div className="border-r max-h-[85vh] overflow-y-auto">
-            {JOB_LARGE.map((lg) => {
-              const on = value.large.includes(lg);
-              const isActive = activeLarge === lg;
-              return (
-                <div
-                  key={lg}
-                  className={`flex items-center justify-between px-3 py-2 cursor-pointer ${
-                    isActive ? "bg-neutral-50" : ""
-                  }`}
-                >
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      checked={on}
-                      onChange={() => toggleLarge(lg)}
-                    />
+        {/* 本体 */}
+        <div className="p-4 grid grid-cols-12 gap-4">
+          {/* 左ペイン：大分類（押下でアクティブ切替 & トグル） */}
+          <div className="col-span-4">
+            <div className="flex items-center justify-between mb-2">
+              <button
+                onClick={() => setL([...JOB_LARGE])}
+                className="rounded-lg border px-2 py-1 text-xs hover:bg-neutral-50"
+              >
+                大分類 すべて選択
+              </button>
+              <button
+                onClick={() => setL([])}
+                className="rounded-lg border px-2 py-1 text-xs hover:bg-neutral-50"
+              >
+                解除
+              </button>
+            </div>
+
+            <div className="rounded-xl border divide-y max-h-[520px] overflow-auto">
+              {JOB_LARGE.map((lg) => {
+                const picked = L.includes(lg);
+                const active = activeLarge === lg;
+                return (
+                  <div
+                    key={lg}
+                    onClick={() => setActiveLarge(lg)}
+                    className={`flex items-center justify-between px-3 py-2 cursor-pointer ${
+                      active ? "bg-neutral-50" : ""
+                    }`}
+                  >
+                    <div className="text-sm font-medium">{lg}</div>
                     <button
-                      className="text-sm text-left text-neutral-800"
-                      onClick={() => setActiveLarge(lg)}
+                      className={`rounded-full border px-2 py-0.5 text-xs ${
+                        picked
+                          ? "bg-indigo-50 border-indigo-400 text-indigo-700"
+                          : "border-neutral-300 text-neutral-600"
+                      }`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleLarge(lg);
+                      }}
                     >
-                      {lg}
+                      {picked ? "選択中" : "選択"}
                     </button>
                   </div>
-                </div>
-              );
-            })}
-          </div>
-
-          {/* right small list */}
-          <div className="md:col-span-2 p-3 max-h-[85vh] overflow-y-auto">
-            <div className="mb-2 flex items-center justify-between">
-              <div className="font-medium">{activeLarge}</div>
-              <label className="inline-flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={allChecked}
-                  onChange={(e) => toggleAllSmalls(e.target.checked)}
-                />
-                すべて選択/解除
-              </label>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-              {smalls.map((sm) => {
-                const on = value.small.includes(sm);
-                return (
-                  <label
-                    key={sm}
-                    className="flex items-center gap-2 rounded-lg border border-neutral-200 px-2 py-1"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={on}
-                      onChange={() => toggleSmall(sm)}
-                    />
-                    <span className="text-sm">{sm}</span>
-                    <span className="ml-auto text-xs text-neutral-500">
-                      ({activeLarge})
-                    </span>
-                  </label>
                 );
               })}
-              {smalls.length === 0 && (
-                <div className="text-sm text-neutral-500">
-                  この大分類に小分類はありません
-                </div>
-              )}
+            </div>
+          </div>
+
+          {/* 右ペイン：小分類（activeLarge のみ表示、チップでトグル） */}
+          <div className="col-span-8">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-sm font-semibold text-neutral-800">
+                小分類（{activeLarge}）
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    const union = new Set<string>(S);
+                    (smallOptions || []).forEach((x) => union.add(x));
+                    setS(Array.from(union));
+                  }}
+                  className="rounded-lg border px-2 py-1 text-xs hover:bg-neutral-50"
+                >
+                  すべて選択
+                </button>
+                <button
+                  onClick={() => {
+                    const rest = new Set<string>(S);
+                    (smallOptions || []).forEach((x) => rest.delete(x));
+                    setS(Array.from(rest));
+                  }}
+                  className="rounded-lg border px-2 py-1 text-xs hover:bg-neutral-50"
+                >
+                  解除
+                </button>
+              </div>
+            </div>
+
+            <div className="rounded-xl border p-3 max-h-[520px] overflow-auto">
+              <div className="grid grid-cols-2 gap-2">
+                {(smallOptions || []).map((s) => (
+                  <Chip
+                    key={`${activeLarge}-${s}`}
+                    label={s}
+                    active={S.includes(s)}
+                    onClick={() => toggleSmall(s)}
+                  />
+                ))}
+              </div>
+            </div>
+
+            <div className="mt-2 text-xs text-neutral-500">
+              ※ 左の大分類を押すと、右側の小分類リストが切り替わります。
             </div>
           </div>
         </div>
 
-        <div className="px-4 py-3 border-t text-right text-xs text-neutral-500">
-          選択: 大{value.large.length} / 小{value.small.length}
+        {/* フッター */}
+        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t">
+          <button
+            onClick={() => {
+              setL([]);
+              setS([]);
+            }}
+            className="rounded-lg px-3 py-1 border text-sm"
+          >
+            クリア
+          </button>
+          <button
+            onClick={() => onApplyAction(L, S)}
+            className="rounded-lg px-3 py-1 border text-sm hover:bg-neutral-50"
+          >
+            適用して閉じる
+          </button>
         </div>
       </div>
     </div>
