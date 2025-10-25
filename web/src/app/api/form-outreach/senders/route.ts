@@ -3,10 +3,13 @@ import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
 
 export async function GET() {
-  const supabase = await supabaseServer();
-  const { data, error } = await supabase
+  const sb = await supabaseServer();
+  const { data, error } = await sb
     .from("form_outreach_senders")
-    .select("id,company_name,sender_name,sender_email,website_url")
+    .select(
+      "id,from_name,from_email,reply_to,phone,website,signature,is_default"
+    )
+    .eq("is_default", true)
     .limit(1);
   if (error)
     return NextResponse.json({ error: error.message }, { status: 400 });
@@ -14,23 +17,28 @@ export async function GET() {
 }
 
 export async function PUT(req: Request) {
-  const supabase = await supabaseServer();
+  const sb = await supabaseServer();
   const body = await req.json();
-  // 既存があれば update、なければ insert。テナント一意制約により常に1件化される。
-  const { data: existing } = await supabase
+
+  // 既定行があれば update、無ければ insert（部分ユニークindexにより is_default=true はテナントで1件）
+  const { data } = await sb
     .from("form_outreach_senders")
     .select("id")
+    .eq("is_default", true)
     .limit(1);
-  if ((existing ?? []).length > 0) {
-    const id = existing![0].id;
-    const { error } = await supabase
+
+  if ((data ?? []).length > 0) {
+    const id = data![0].id as string;
+    const { error } = await sb
       .from("form_outreach_senders")
       .update(body)
       .eq("id", id);
     if (error)
       return NextResponse.json({ error: error.message }, { status: 400 });
   } else {
-    const { error } = await supabase.from("form_outreach_senders").insert(body);
+    const { error } = await sb
+      .from("form_outreach_senders")
+      .insert({ ...body, is_default: true });
     if (error)
       return NextResponse.json({ error: error.message }, { status: 400 });
   }

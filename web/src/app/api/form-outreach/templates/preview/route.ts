@@ -1,21 +1,23 @@
 // web/src/app/api/form-outreach/templates/preview/route.ts
 import { NextResponse } from "next/server";
 
-type Vars = Record<string, string>;
-
-function applyVars(template: string, vars: Vars): string {
-  let out = template || "";
-  for (const [key, val] of Object.entries(vars)) {
-    const re = new RegExp(String.raw`\{\{\s*${key}\s*\}\}`, "g");
-    out = out.replace(re, val ?? "");
-  }
-  return out;
-}
+type PreviewReq = {
+  template: string;
+  vars?: Record<string, string | number | null | undefined>;
+};
 
 export async function POST(req: Request) {
-  const body = (await req.json()) as { template?: string; vars?: Vars };
-  const tpl = body?.template ?? "";
-  const vars = body?.vars ?? {};
-  const preview = applyVars(tpl, vars);
+  const body = (await req.json()) as PreviewReq;
+  const tpl = String(body.template ?? "");
+  const vars = (body.vars ?? {}) as Record<string, any>;
+
+  const preview = tpl.replace(
+    /\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g,
+    (_m: string, key: string) => {
+      const v = vars[key];
+      return v === null || v === undefined ? `{{${key}}}` : String(v);
+    }
+  );
+
   return NextResponse.json({ preview });
 }

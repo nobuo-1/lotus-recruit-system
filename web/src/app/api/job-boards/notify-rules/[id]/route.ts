@@ -3,11 +3,11 @@ import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
 
 export async function PUT(req: Request, ctx: { params: { id: string } }) {
-  const supabase = await supabaseServer();
-  const body = await req.json();
-  const { error } = await supabase
+  const sb = await supabaseServer();
+  const patch = await req.json();
+  const { error } = await sb
     .from("job_board_notify_rules")
-    .update(body)
+    .update(patch)
     .eq("id", ctx.params.id);
   if (error)
     return NextResponse.json({ error: error.message }, { status: 400 });
@@ -15,8 +15,8 @@ export async function PUT(req: Request, ctx: { params: { id: string } }) {
 }
 
 export async function DELETE(_req: Request, ctx: { params: { id: string } }) {
-  const supabase = await supabaseServer();
-  const { error } = await supabase
+  const sb = await supabaseServer();
+  const { error } = await sb
     .from("job_board_notify_rules")
     .delete()
     .eq("id", ctx.params.id);
