@@ -1,4 +1,4 @@
-// web/src/app/form-outreach/page.tsx
+// web/src/app/form-outreach/page.tsx  ✅ 完全版
 "use client";
 
 import React, { useEffect, useState } from "react";
@@ -44,8 +44,10 @@ export default function FormOutreachTop() {
           </p>
         </div>
 
+        {/* メニュー */}
         <div className="mb-6 rounded-2xl border border-neutral-200 p-5">
           <div className="grid grid-cols-1 gap-7 md:grid-cols-3">
+            {/* 運用 */}
             <section>
               <div className="mb-2 text-lg font-semibold text-neutral-900">
                 運用
@@ -57,6 +59,14 @@ export default function FormOutreachTop() {
                     className="text-base text-neutral-800 underline-offset-2 hover:underline"
                   >
                     手動実行
+                  </Link>
+                </li>
+                <li>
+                  <Link
+                    href="/form-outreach/companies"
+                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
+                  >
+                    企業一覧
                   </Link>
                 </li>
                 <li>
@@ -77,6 +87,8 @@ export default function FormOutreachTop() {
                 </li>
               </ul>
             </section>
+
+            {/* 設定 */}
             <section>
               <div className="mb-2 text-lg font-semibold text-neutral-900">
                 設定
@@ -87,7 +99,32 @@ export default function FormOutreachTop() {
                     href="/form-outreach/senders"
                     className="text-base text-neutral-800 underline-offset-2 hover:underline"
                   >
-                    送信元設定
+                    送信元設定（テナント1件）
+                  </Link>
+                </li>
+                <li>
+                  <Link
+                    href="/form-outreach/automation"
+                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
+                  >
+                    自動実行設定（企業リスト今すぐ取得）
+                  </Link>
+                </li>
+              </ul>
+            </section>
+
+            {/* ヘルプ等（必要なら） */}
+            <section>
+              <div className="mb-2 text-lg font-semibold text-neutral-900">
+                ヘルプ
+              </div>
+              <ul className="space-y-1.5">
+                <li>
+                  <Link
+                    href="/docs/form-outreach"
+                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
+                  >
+                    使い方ガイド
                   </Link>
                 </li>
               </ul>
@@ -95,6 +132,7 @@ export default function FormOutreachTop() {
           </div>
         </div>
 
+        {/* KPI */}
         <header className="mb-2">
           <h2 className="text-2xl md:text-[24px] font-semibold text-neutral-900">
             各KPI

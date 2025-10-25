@@ -1,4 +1,3 @@
-// web/src/app/api/job-boards/manual/route.ts
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
 

@@ -76,68 +76,67 @@ export default function TemplatesPage() {
           </button>
         </div>
 
-        <section className="rounded-2xl border border-neutral-200 p-4">
-          <div className="overflow-x-auto rounded-xl border border-neutral-200">
-            <table className="min-w-[900px] w-full text-sm">
-              <thead className="bg-neutral-50 text-neutral-600">
-                <tr>
-                  <th className="px-3 py-3 text-left">名称</th>
-                  <th className="px-3 py-3 text-left">本文</th>
-                  <th className="px-3 py-3 text-left">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r) => (
-                  <tr key={r.id} className="border-t border-neutral-200">
-                    <td className="px-3 py-3">
-                      <input
-                        defaultValue={r.name}
-                        onBlur={(e) =>
-                          updateInline(r.id, { name: e.target.value })
-                        }
-                        className="rounded-lg border border-neutral-200 px-2 py-1 text-sm w-56"
-                      />
-                    </td>
-                    <td className="px-3 py-3">
-                      <textarea
-                        defaultValue={r.body_text}
-                        rows={3}
-                        onBlur={(e) =>
-                          updateInline(r.id, { body_text: e.target.value })
-                        }
-                        className="rounded-lg border border-neutral-200 px-2 py-1 text-sm w-full"
-                      />
-                    </td>
-                    <td className="px-3 py-3">
-                      <button
-                        className="rounded-lg px-2 py-1 border text-xs"
-                        onClick={() => remove(r.id)}
-                      >
-                        削除
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-                {rows.length === 0 && (
-                  <tr>
-                    <td
-                      colSpan={3}
-                      className="px-4 py-8 text-center text-neutral-400"
+        {/* ▼ 表のみ（入れ子カードを除去） */}
+        <div className="overflow-x-auto rounded-2xl border border-neutral-200">
+          <table className="min-w-[900px] w-full text-sm">
+            <thead className="bg-neutral-50 text-neutral-600">
+              <tr>
+                <th className="px-3 py-3 text-left">名称</th>
+                <th className="px-3 py-3 text-left">本文</th>
+                <th className="px-3 py-3 text-left">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.id} className="border-top border-neutral-200">
+                  <td className="px-3 py-3">
+                    <input
+                      defaultValue={r.name}
+                      onBlur={(e) =>
+                        updateInline(r.id, { name: e.target.value })
+                      }
+                      className="rounded-lg border border-neutral-200 px-2 py-1 text-sm w-56"
+                    />
+                  </td>
+                  <td className="px-3 py-3">
+                    <textarea
+                      defaultValue={r.body_text}
+                      rows={3}
+                      onBlur={(e) =>
+                        updateInline(r.id, { body_text: e.target.value })
+                      }
+                      className="rounded-lg border border-neutral-200 px-2 py-1 text-sm w-full"
+                    />
+                  </td>
+                  <td className="px-3 py-3">
+                    <button
+                      className="rounded-lg px-2 py-1 border text-xs"
+                      onClick={() => remove(r.id)}
                     >
-                      テンプレートがありません
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-          {msg && (
-            <pre className="mt-2 whitespace-pre-wrap text-xs text-red-600">
-              {msg}
-            </pre>
-          )}
-        </section>
+                      削除
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {rows.length === 0 && (
+                <tr>
+                  <td
+                    colSpan={3}
+                    className="px-4 py-8 text-center text-neutral-400"
+                  >
+                    テンプレートがありません
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
 
+        {msg && (
+          <pre className="mt-2 whitespace-pre-wrap text-xs text-red-600">
+            {msg}
+          </pre>
+        )}
         {open && (
           <NewTemplateModal
             onClose={() => {

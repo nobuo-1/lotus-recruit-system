@@ -35,9 +35,9 @@ type ApiRow = {
   site_key: string;
   large_category: string;
   small_category: string;
-  age_band: string;
-  employment_type: string;
-  salary_band: string;
+  age_band: string | null;
+  employment_type: string | null;
+  salary_band: string | null;
   jobs_count: number;
   candidates_count: number;
 };
@@ -81,6 +81,15 @@ export default function JobBoardsPage() {
   const [msgChart, setMsgChart] = useState("");
   const [msgTable, setMsgTable] = useState("");
 
+  // 総小分類数（ALL表示のため）
+  const SMALL_TOTAL = useMemo(
+    () => Object.values(JOB_CATEGORIES).reduce((s, arr) => s + arr.length, 0),
+    []
+  );
+  const toAllLabel = (count: number, total: number) =>
+    count >= total ? `${total}(ALL)` : `${count || 0}`;
+
+  // ====== フェッチ（グラフ用） ======
   useEffect(() => {
     (async () => {
       try {
@@ -120,6 +129,7 @@ export default function JobBoardsPage() {
     salChart.join(","),
   ]);
 
+  // ====== フェッチ（表用） ======
   useEffect(() => {
     (async () => {
       try {
@@ -159,7 +169,7 @@ export default function JobBoardsPage() {
     salTable.join(","),
   ]);
 
-  // 折れ線グラフ化
+  // ===== 折れ線グラフ化 =====
   const dateKeyChart = modeChart === "weekly" ? "week_start" : "month_start";
   const seriesChart: SeriesPoint[] = useMemo(() => {
     const byDate: Record<string, Record<string, number>> = {};
@@ -181,7 +191,7 @@ export default function JobBoardsPage() {
     });
   }, [rowsChart, dateKeyChart, metricChart]);
 
-  // 表（サイト合計）
+  // ===== 表（サイト合計） =====
   const tableAgg = useMemo(() => {
     const metricKey =
       metricTable === "jobs" ? "jobs_count" : "candidates_count";
@@ -198,13 +208,9 @@ export default function JobBoardsPage() {
       .sort((a, b) => b.total - a.total);
   }, [rowsTable, metricTable, sitesTable]);
 
-  // 職種モーダル制御
+  // ===== 職種モーダル制御 =====
   const [openChartCat, setOpenChartCat] = useState(false);
   const [openTableCat, setOpenTableCat] = useState(false);
-
-  const selectAll = (vals: string[], setter: (v: string[]) => void) =>
-    setter(vals);
-  const clearAll = (setter: (v: string[]) => void) => setter([]);
 
   // UIチップ
   const Chip: React.FC<{
@@ -289,11 +295,20 @@ export default function JobBoardsPage() {
           </div>
         </div>
 
-        {/* KPI */}
+        {/* ===== KPI（グラフ側） ===== */}
         <div className="grid grid-cols-2 gap-4 md:grid-cols-4 mb-6">
-          <KpiCard label="対象サイト" value={sitesChart.length} />
-          <KpiCard label="職種（大）" value={largeChart.length || "すべて"} />
-          <KpiCard label="職種（小）" value={smallChart.length || "すべて"} />
+          <KpiCard
+            label="対象サイト"
+            value={toAllLabel(sitesChart.length, SITE_OPTIONS.length)}
+          />
+          <KpiCard
+            label="職種（大）"
+            value={toAllLabel(largeChart.length, JOB_LARGE.length)}
+          />
+          <KpiCard
+            label="職種（小）"
+            value={toAllLabel(smallChart.length, SMALL_TOTAL)}
+          />
           <KpiCard label="ビュー" value={labelOfMode(modeChart)} />
         </div>
 
@@ -371,8 +386,8 @@ export default function JobBoardsPage() {
                 className="px-2 py-1 text-xs rounded-lg border border-neutral-300 hover:bg-neutral-50"
                 onClick={() => setOpenChartCat(true)}
               >
-                選択（大:{largeChart.length || "すべて"} / 小:
-                {smallChart.length || "すべて"}）
+                選択（大:{toAllLabel(largeChart.length, JOB_LARGE.length)} / 小:
+                {toAllLabel(smallChart.length, SMALL_TOTAL)}）
               </button>
             </FilterRow>
 
@@ -430,6 +445,23 @@ export default function JobBoardsPage() {
 
         {/* ========== 表ブロック（独立フィルタ） ========== */}
         <section className="mt-6 rounded-2xl border border-neutral-200 p-4">
+          {/* 表側 KPI（同期表示） */}
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-4 mb-4">
+            <KpiCard
+              label="対象サイト"
+              value={toAllLabel(sitesTable.length, SITE_OPTIONS.length)}
+            />
+            <KpiCard
+              label="職種（大）"
+              value={toAllLabel(largeTable.length, JOB_LARGE.length)}
+            />
+            <KpiCard
+              label="職種（小）"
+              value={toAllLabel(smallTable.length, SMALL_TOTAL)}
+            />
+            <KpiCard label="ビュー" value={labelOfMode(modeTable)} />
+          </div>
+
           <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="text-base font-semibold text-neutral-800">
               サイト別合計（{labelOfMode(modeTable)}）
@@ -500,53 +532,29 @@ export default function JobBoardsPage() {
                 className="px-2 py-1 text-xs rounded-lg border border-neutral-300 hover:bg-neutral-50"
                 onClick={() => setOpenTableCat(true)}
               >
-                選択（大:{largeTable.length || "すべて"} / 小:
-                {smallTable.length || "すべて"}）
+                選択（大:{toAllLabel(largeTable.length, JOB_LARGE.length)} / 小:
+                {toAllLabel(smallTable.length, SMALL_TOTAL)}）
               </button>
             </FilterRow>
             <FilterRow label="年齢層">
               <TagMulti
                 values={ageTable}
                 setValues={setAgeTable}
-                options={[
-                  "20歳以下",
-                  "25歳以下",
-                  "30歳以下",
-                  "35歳以下",
-                  "40歳以下",
-                  "45歳以下",
-                  "50歳以下",
-                  "55歳以下",
-                  "60歳以下",
-                  "65歳以下",
-                ]}
+                options={AGE_BANDS}
               />
             </FilterRow>
             <FilterRow label="雇用形態">
               <TagMulti
                 values={empTable}
                 setValues={setEmpTable}
-                options={[
-                  "正社員",
-                  "契約社員",
-                  "派遣社員",
-                  "アルバイト",
-                  "業務委託",
-                ]}
+                options={EMP_TYPES}
               />
             </FilterRow>
             <FilterRow label="年収帯">
               <TagMulti
                 values={salTable}
                 setValues={setSalTable}
-                options={[
-                  "~300万",
-                  "300~400万",
-                  "400~500万",
-                  "500~600万",
-                  "600~800万",
-                  "800万~",
-                ]}
+                options={SALARY_BAND}
               />
             </FilterRow>
           </div>
@@ -710,8 +718,8 @@ function CategoryPicker({
 
   // 右ペインに出す対象の大分類
   const rightGroups = useMemo(() => {
-    if (L.length === 0) return JOB_LARGE; // 何も選んでいなければ全グループ表示
-    return L; // 大分類を選んだらその集合のみ
+    if (L.length === 0) return JOB_LARGE;
+    return L;
   }, [L]);
 
   useEffect(() => {
@@ -721,7 +729,7 @@ function CategoryPicker({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-      <div className="w-[980px] max-w-[96vw] rounded-2xl bg-white shadow-xl">
+      <div className="w-[1000px] max-w-[96vw] max-h-[92vh] overflow-hidden rounded-2xl bg-white shadow-xl">
         <div className="flex items-center justify-between px-4 py-3 border-b">
           <div className="font-semibold">職種選択</div>
           <button
@@ -732,9 +740,9 @@ function CategoryPicker({
           </button>
         </div>
 
-        <div className="p-4 grid grid-cols-12 gap-4">
-          {/* 左：大分類（ゾーン全体クリックで active 切替 ＆ チェック切替） */}
-          <div className="col-span-4">
+        <div className="p-4 grid grid-cols-12 gap-4 overflow-hidden">
+          {/* 左：大分類 */}
+          <div className="col-span-4 overflow-y-auto max-h-[70vh]">
             <div className="flex items-center justify-between mb-2">
               <label className="text-sm">
                 <input
@@ -749,13 +757,13 @@ function CategoryPicker({
             <div className="rounded-xl border divide-y">
               {JOB_LARGE.map((lg) => {
                 const checked = L.includes(lg);
-                const active = activeL === lg;
+                const on = activeL === lg;
                 return (
                   <div
                     key={lg}
                     onClick={() => setActiveL(lg)}
                     className={`flex items-center justify-between px-3 py-2 cursor-pointer ${
-                      active ? "bg-neutral-50" : ""
+                      on ? "bg-neutral-50" : ""
                     }`}
                   >
                     <div className="text-sm font-medium">{lg}</div>
@@ -771,8 +779,8 @@ function CategoryPicker({
             </div>
           </div>
 
-          {/* 右：小分類（大分類ごとに見出しを出す） */}
-          <div className="col-span-8">
+          {/* 右：小分類 */}
+          <div className="col-span-8 overflow-y-auto max-h-[70vh]">
             <div className="flex items-center justify-between mb-2">
               <div className="text-sm font-semibold text-neutral-800">
                 小分類
@@ -806,41 +814,36 @@ function CategoryPicker({
               </label>
             </div>
 
-            <div className="rounded-xl border p-3 max-h-[480px] overflow-auto">
-              {/* 1つだけのときはそのグループを、複数/未選択ならグループごとに見出し付きで展開 */}
-              {rightGroups.map((grp) => (
-                <div key={grp} id={`grp-${grp}`} className="mb-4">
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="text-sm font-semibold text-indigo-700">
-                      {grp}
-                    </div>
-                    <div className="text-xs text-neutral-500">
-                      （{(JOB_CATEGORIES[grp] || []).length}件）
-                    </div>
+            {rightGroups.map((grp) => (
+              <div key={grp} id={`grp-${grp}`} className="mb-4">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-sm font-semibold text-indigo-700">
+                    {grp}
                   </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    {(JOB_CATEGORIES[grp] || []).map((s) => (
-                      <label
-                        key={`${grp}-${s}`}
-                        className="inline-flex items-center gap-2"
-                      >
-                        <input
-                          type="checkbox"
-                          checked={S.includes(s)}
-                          onChange={() => toggleS(s)}
-                        />
-                        <span className="text-sm">{s}</span>
-                      </label>
-                    ))}
+                  <div className="text-xs text-neutral-500">
+                    （{(JOB_CATEGORIES[grp] || []).length}件）
                   </div>
                 </div>
-              ))}
-            </div>
-
-            <div className="mt-2 text-xs text-neutral-500">
-              ※
-              大分類の左ペインをクリックすると、そのゾーンにスクロール＆ハイライトされます。
-            </div>
+                <div className="grid grid-cols-2 gap-2">
+                  {(JOB_CATEGORIES[grp] || []).map((s) => (
+                    <label
+                      key={`${grp}-${s}`}
+                      className="inline-flex items-center gap-2"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={S.includes(s)}
+                        onChange={() => toggleS(s)}
+                      />
+                      <span className="text-sm">{s}</span>
+                      <span className="ml-auto text-xs text-neutral-500">
+                        ({grp})
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            ))}
           </div>
         </div>
 
