@@ -35,8 +35,9 @@ export default function NewNotifyRule() {
   const [destinations, setDestinations] = useState<Destination[]>([]);
   const [selectedDestIds, setSelectedDestIds] = useState<string[]>([]);
   const [enabled, setEnabled] = useState(true);
+  const [openDestModal, setOpenDestModal] = useState(false);
 
-  // スケジュール（最低限）
+  // スケジュール
   const [scheduleType, setScheduleType] = useState<"daily" | "weekly">(
     "weekly"
   );
@@ -64,11 +65,6 @@ export default function NewNotifyRule() {
       prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d]
     );
 
-  const toggleDest = (id: string) =>
-    setSelectedDestIds((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
-    );
-
   const save = async () => {
     const body = {
       name,
@@ -90,7 +86,7 @@ export default function NewNotifyRule() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    const j = await r.json();
+    const j = await r.json().catch(() => ({}));
     if (!r.ok) return alert(j?.error || "保存に失敗しました");
     alert("作成しました");
     location.href = "/job-boards/settings";
@@ -207,26 +203,35 @@ export default function NewNotifyRule() {
             />
           </Field>
 
+          {/* 送り先：羅列＋モーダルで選択 */}
           <Field label="送り先（複数可）">
-            <div className="rounded-xl border p-3 max-h-[220px] overflow-auto">
-              {destinations.map((d) => (
-                <label
-                  key={d.id}
-                  className="mr-4 mb-2 inline-flex items-center gap-1 text-sm"
-                >
-                  <input
-                    type="checkbox"
-                    checked={selectedDestIds.includes(d.id)}
-                    onChange={() => toggleDest(d.id)}
-                  />
-                  {d.name}（{d.type}:{d.value}）
-                </label>
-              ))}
-              {destinations.length === 0 && (
+            <div className="rounded-xl border p-3">
+              {selectedDestIds.length === 0 ? (
                 <div className="text-xs text-neutral-500">
-                  送り先がありません。「送り先一覧」で追加してください。
+                  未選択です。「送り先を選択」から選んでください。
+                </div>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {destinations
+                    .filter((d) => selectedDestIds.includes(d.id))
+                    .map((d) => (
+                      <span
+                        key={d.id}
+                        className="text-xs rounded-full border px-2 py-1 bg-indigo-50 border-indigo-300 text-indigo-700"
+                      >
+                        {d.name}（{d.type}:{d.value}）
+                      </span>
+                    ))}
                 </div>
               )}
+              <div className="mt-2">
+                <button
+                  className="text-xs rounded-lg border px-2 py-1 hover:bg-neutral-50"
+                  onClick={() => setOpenDestModal(true)}
+                >
+                  送り先を選択
+                </button>
+              </div>
             </div>
           </Field>
 
@@ -288,6 +293,7 @@ export default function NewNotifyRule() {
           </div>
         </section>
 
+        {/* 職種モーダル */}
         {openCat && (
           <JobCategoryModal
             large={large}
@@ -297,6 +303,19 @@ export default function NewNotifyRule() {
               setLarge(L);
               setSmall(S);
               setOpenCat(false);
+            }}
+          />
+        )}
+
+        {/* 送り先モーダル */}
+        {openDestModal && (
+          <DestinationModal
+            all={destinations}
+            selected={selectedDestIds}
+            onClose={() => setOpenDestModal(false)}
+            onApply={(ids) => {
+              setSelectedDestIds(ids);
+              setOpenDestModal(false);
             }}
           />
         )}
@@ -360,6 +379,82 @@ function Tags({
           {o}
         </button>
       ))}
+    </div>
+  );
+}
+
+/** 送り先選択モーダル */
+function DestinationModal({
+  all,
+  selected,
+  onClose,
+  onApply,
+}: {
+  all: Destination[];
+  selected: string[];
+  onClose: () => void;
+  onApply: (ids: string[]) => void;
+}) {
+  const [sel, setSel] = useState<string[]>(selected);
+  const toggle = (id: string) =>
+    setSel((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
+  return (
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-black/40">
+      <div className="min-h-full flex items-center justify-center p-4">
+        <div className="w-[720px] max-w-[96vw] max-h-[85vh] bg-white rounded-2xl shadow-xl flex flex-col">
+          <div className="flex items-center justify-between px-4 py-3 border-b">
+            <div className="font-semibold">送り先を選択</div>
+            <button
+              className="rounded-lg px-2 py-1 border text-sm hover:bg-neutral-50"
+              onClick={onClose}
+            >
+              閉じる
+            </button>
+          </div>
+          <div className="p-4 overflow-auto">
+            {all.length === 0 ? (
+              <div className="text-sm text-neutral-500">
+                送り先がありません。「送り先一覧」で追加してください。
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {all.map((d) => (
+                  <label
+                    key={d.id}
+                    className="rounded-xl border p-3 flex items-start gap-2"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={sel.includes(d.id)}
+                      onChange={() => toggle(d.id)}
+                      className="mt-1"
+                    />
+                    <div>
+                      <div className="font-medium text-sm">{d.name}</div>
+                      <div className="text-xs text-neutral-600">
+                        {d.type}: {d.value}
+                      </div>
+                      {!d.enabled && (
+                        <div className="text-[11px] text-amber-600 mt-1">
+                          無効化中
+                        </div>
+                      )}
+                    </div>
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="px-4 py-3 border-t flex justify-end">
+            <button
+              onClick={() => onApply(sel)}
+              className="rounded-lg px-3 py-1 border text-sm hover:bg-neutral-50"
+            >
+              適用
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
