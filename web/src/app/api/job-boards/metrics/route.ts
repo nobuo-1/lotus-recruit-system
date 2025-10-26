@@ -1,102 +1,236 @@
 // web/src/app/api/job-boards/metrics/route.ts
-export const runtime = "nodejs";
-import { NextRequest, NextResponse } from "next/server";
-import { Pool } from "pg";
+import { NextResponse } from "next/server";
 
-const pool =
-  (global as any).__pgPool ||
-  ((global as any).__pgPool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    max: 5,
-  }));
+export const runtime = "edge";
 
-type Body = {
-  mode: "weekly" | "monthly";
-  metric: "jobs" | "candidates";
-  sites?: string[];
-  large?: string[];
-  small?: string[];
-  age?: string[]; // 未使用（スキーマ上の列なし）
-  emp?: string[]; // 未使用
-  sal?: string[]; // 未使用
-  range: "12w" | "26w" | "52w" | "12m" | "36m";
+type Mode = "weekly" | "monthly";
+type RangeW = "12w" | "26w" | "52w";
+type RangeM = "12m" | "36m";
+type Metric = "jobs" | "candidates";
+
+type Req = {
+  mode: Mode;
+  metric: Metric;
+  sites: string[];
+  large: string[];
+  small: string[];
+  age: string[];
+  emp: string[];
+  sal: string[];
+  range: RangeW | RangeM;
 };
 
-export async function POST(req: NextRequest) {
-  const b = (await req.json()) as Body;
+type Row = {
+  week_start?: string | null;
+  month_start?: string | null;
+  site_key: string;
+  large_category: string | null;
+  small_category: string | null;
+  age_band?: string | null;
+  employment_type?: string | null;
+  salary_band?: string | null;
+  jobs_count: number | null;
+  candidates_count: number | null;
+};
 
-  const weeks =
-    b.range === "12w"
-      ? 12
-      : b.range === "26w"
-      ? 26
-      : b.range === "52w"
-      ? 52
-      : 26;
-  const months = b.range === "12m" ? 12 : b.range === "36m" ? 36 : 12;
+const SB_URL =
+  process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+const SB_KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+  "";
 
-  const since =
-    b.mode === "weekly"
-      ? `date_trunc('week', now()) - make_interval(weeks => ${weeks - 1})`
-      : `date_trunc('month', now()) - make_interval(months => ${months - 1})`;
+function sbHeaders() {
+  return {
+    apikey: SB_KEY,
+    Authorization: `Bearer ${SB_KEY}`,
+    "Content-Type": "application/json",
+    Prefer: "return=representation",
+  };
+}
 
-  const dateCol =
-    b.mode === "weekly"
-      ? "date_trunc('week', r.captured_at) AS bucket"
-      : "date_trunc('month', r.captured_at) AS bucket";
-
-  const where: string[] = [
-    `r.captured_at >= ${since}`,
-    // サイト（指定がある場合のみ）
-    ...(b.sites && b.sites.length
-      ? [`COALESCE(r.site_key, r.site, c.site_category_code) = ANY($1)`]
-      : ["TRUE"]),
-    // 大分類・小分類（指定がある場合のみ）
-    ...(b.large && b.large.length ? [`c.internal_large = ANY($2)`] : ["TRUE"]),
-    ...(b.small && b.small.length ? [`c.internal_small = ANY($3)`] : ["TRUE"]),
-  ];
-
-  // パラメータ
-  const params: any[] = [];
-  if (b.sites && b.sites.length) params.push(b.sites);
-  if (b.large && b.large.length) params.push(b.large);
-  if (b.small && b.small.length) params.push(b.small);
-
-  const metricCol =
-    b.metric === "jobs" ? "SUM(c.jobs_count)" : "SUM(c.candidates_count)";
-
-  const sql = `
-    SELECT
-      ${dateCol},
-      COALESCE(r.site_key, r.site, c.site_category_code) AS site_key,
-      ${metricCol} AS value,
-      SUM(c.jobs_count)    AS jobs_count,
-      SUM(c.candidates_count) AS candidates_count
-    FROM public.job_board_counts c
-    JOIN public.job_board_results r ON r.id = c.result_id
-    WHERE ${where.join(" AND ")}
-    GROUP BY bucket, site_key
-    ORDER BY bucket ASC, site_key ASC
-  `;
-
-  const client = await pool.connect();
+async function tryRpc(body: Req): Promise<Row[] | null> {
   try {
-    const { rows } = await client.query(sql, params);
-    // 返却形式をフロントと合わせる（週 or 月の列名）
-    const rowsOut = rows.map((r: any) => ({
-      week_start: b.mode === "weekly" ? r.bucket : null,
-      month_start: b.mode === "monthly" ? r.bucket : null,
-      site_key: r.site_key,
-      jobs_count: Number(r.jobs_count) || 0,
-      candidates_count: Number(r.candidates_count) || 0,
-    }));
-    return NextResponse.json({ rows: rowsOut });
-  } catch (e: any) {
+    const res = await fetch(
+      `${SB_URL}/rest/v1/rpc/job_boards_metrics_fallback`,
+      {
+        method: "POST",
+        headers: sbHeaders(),
+        body: JSON.stringify(body),
+      }
+    );
+    if (!res.ok) return null;
+    const rows = (await res.json()) as Row[];
+    return rows ?? [];
+  } catch {
+    return null;
+  }
+}
+
+function startOfWeekISO(d: Date) {
+  const dt = new Date(
+    Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())
+  );
+  const dow = dt.getUTCDay();
+  const diff = (dow + 6) % 7;
+  dt.setUTCDate(dt.getUTCDate() - diff);
+  dt.setUTCHours(0, 0, 0, 0);
+  return dt.toISOString().slice(0, 10);
+}
+function startOfMonthISO(d: Date) {
+  const dt = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
+  dt.setUTCHours(0, 0, 0, 0);
+  return dt.toISOString().slice(0, 10);
+}
+function fromDateByRange(mode: Mode, range: RangeW | RangeM) {
+  const now = new Date();
+  const dt = new Date(now);
+  if (mode === "weekly") {
+    const weeks = range === "12w" ? 12 : range === "26w" ? 26 : 52;
+    dt.setUTCDate(dt.getUTCDate() - weeks * 7);
+  } else {
+    const months = range === "12m" ? 12 : 36;
+    dt.setUTCMonth(dt.getUTCMonth() - months);
+  }
+  return dt.toISOString();
+}
+
+async function fetchJson<T = any>(path: string) {
+  const res = await fetch(`${SB_URL}/rest/v1/${path}`, {
+    headers: sbHeaders(),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || res.statusText);
+  }
+  return (await res.json()) as T;
+}
+
+export async function POST(req: Request) {
+  if (!SB_URL || !SB_KEY) {
     return NextResponse.json(
-      { error: e.message || String(e) },
+      { error: "Supabase env (URL/KEY) is missing" },
       { status: 500 }
     );
-  } finally {
-    client.release();
+  }
+
+  const body = (await req.json()) as Req;
+
+  // 1) RPC があれば最優先で使用
+  const rpc = await tryRpc(body);
+  if (rpc) return NextResponse.json({ rows: rpc });
+
+  // 2) フォールバック集計
+  try {
+    const fromISO = fromDateByRange(body.mode, body.range);
+
+    const results = await fetchJson<
+      {
+        id: string;
+        captured_at: string;
+        site?: string | null;
+        site_key?: string | null;
+      }[]
+    >(
+      `job_board_results?select=id,captured_at,site,site_key&captured_at=gte.${encodeURIComponent(
+        fromISO
+      )}&order=captured_at.asc`
+    );
+
+    if (results.length === 0) return NextResponse.json({ rows: [] });
+
+    const resMap = new Map<string, { dateKey: string; siteKey: string }>();
+    for (const r of results) {
+      const cap = new Date(r.captured_at);
+      const dateKey =
+        body.mode === "weekly" ? startOfWeekISO(cap) : startOfMonthISO(cap);
+      const siteKey = r.site_key || r.site || "unknown";
+      resMap.set(r.id, { dateKey, siteKey });
+    }
+
+    // counts 取得
+    const resIds = results.map((r) => r.id);
+    const chunk = <T>(arr: T[], n: number) =>
+      Array.from({ length: Math.ceil(arr.length / n) }, (_, i) =>
+        arr.slice(i * n, i * n + n)
+      );
+
+    type CountRow = {
+      result_id: string;
+      internal_large?: string | null;
+      internal_small?: string | null;
+      site_category_code?: string | null;
+      site_category_label?: string | null;
+      jobs_count?: number | null;
+      candidates_count?: number | null;
+      age_band?: string | null;
+      employment_type?: string | null;
+      salary_band?: string | null;
+    };
+
+    const allCounts: CountRow[] = [];
+    for (const ids of chunk(resIds, 500)) {
+      const inList = ids.map((x) => `"${x}"`).join(",");
+      const q = `job_board_counts?select=result_id,internal_large,internal_small,site_category_code,site_category_label,jobs_count,candidates_count,age_band,employment_type,salary_band&result_id=in.(${encodeURIComponent(
+        inList
+      )})`;
+      const rows = await fetchJson<CountRow[]>(q);
+      allCounts.push(...rows);
+    }
+
+    type Agg = { jobs: number; cands: number };
+    const agg = new Map<string, Agg>();
+
+    const siteSet = new Set(body.sites ?? []);
+    const largeSet = new Set(body.large ?? []);
+    const smallSet = new Set(body.small ?? []);
+    const hasLarge = largeSet.size > 0;
+    const hasSmall = smallSet.size > 0;
+
+    for (const c of allCounts) {
+      const m = resMap.get(c.result_id);
+      if (!m) continue;
+      const siteKey = m.siteKey;
+      if (siteSet.size > 0 && !siteSet.has(siteKey)) continue;
+
+      const lg = c.internal_large || "";
+      const sm = c.internal_small || "";
+      if (hasLarge && !largeSet.has(lg)) continue;
+      if (hasSmall && !smallSet.has(sm)) continue;
+
+      const key = `${m.dateKey}__${siteKey}`;
+      const cur = agg.get(key) || { jobs: 0, cands: 0 };
+      cur.jobs += Number(c.jobs_count ?? 0);
+      cur.cands += Number(c.candidates_count ?? 0);
+      agg.set(key, cur);
+    }
+
+    const out: Row[] = [];
+    for (const [key, val] of agg) {
+      const [dateKey, siteKey] = key.split("__");
+      out.push({
+        week_start: body.mode === "weekly" ? dateKey : null,
+        month_start: body.mode === "monthly" ? dateKey : null,
+        site_key: siteKey,
+        large_category: null,
+        small_category: null,
+        jobs_count: val.jobs,
+        candidates_count: val.cands,
+      });
+    }
+
+    out.sort((a, b) => {
+      const da = (a.week_start || a.month_start || "") as string;
+      const db = (b.week_start || b.month_start || "") as string;
+      if (da !== db) return da < db ? -1 : 1;
+      return a.site_key < b.site_key ? -1 : 1;
+    });
+
+    return NextResponse.json({ rows: out });
+  } catch (e: any) {
+    return NextResponse.json(
+      { error: String(e?.message || e) },
+      { status: 500 }
+    );
   }
 }

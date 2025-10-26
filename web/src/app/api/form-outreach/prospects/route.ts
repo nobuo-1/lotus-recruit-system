@@ -1,38 +1,57 @@
 // web/src/app/api/form-outreach/prospects/route.ts
-export const runtime = "nodejs";
-import { NextRequest, NextResponse } from "next/server";
-import { Pool } from "pg";
-const pool =
-  (global as any).__pgPool ||
-  ((global as any).__pgPool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    max: 5,
-  }));
-const TENANT =
-  process.env.SEED_TENANT_ID || "00000000-0000-0000-0000-000000000001";
+import { NextResponse } from "next/server";
 
-export async function GET(req: NextRequest) {
-  const url = new URL(req.url);
-  const q = url.searchParams.get("q")?.trim() || "";
-  const client = await pool.connect();
+export const runtime = "edge";
+
+const SB_URL =
+  process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+const SB_KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+  "";
+
+function sbHeaders() {
+  return {
+    apikey: SB_KEY,
+    Authorization: `Bearer ${SB_KEY}`,
+    "Content-Type": "application/json",
+    Prefer: "return=representation",
+  };
+}
+
+// GET /api/form-outreach/prospects?mode=form|email|all
+export async function GET(req: Request) {
   try {
-    const sql = `
-      SELECT id, company_name, website, contact_email, contact_form_url,
-             industry, company_size, job_site_source, status, created_at
-        FROM public.form_prospects
-       WHERE tenant_id = $1
-         AND ($2 = '' OR company_name ILIKE '%'||$2||'%' OR website ILIKE '%'||$2||'%')
-       ORDER BY created_at DESC
-       LIMIT 200
-    `;
-    const { rows } = await client.query(sql, [TENANT, q]);
+    const { searchParams } = new URL(req.url);
+    const mode = (searchParams.get("mode") || "all") as
+      | "form"
+      | "email"
+      | "all";
+
+    const base = new URL(`${SB_URL}/rest/v1/form_prospects`);
+    base.searchParams.set(
+      "select",
+      "id,tenant_id,company_name,website,contact_email,contact_form_url,industry,company_size,job_site_source,status,created_at,updated_at"
+    );
+    base.searchParams.set("order", "created_at.desc");
+    base.searchParams.set("limit", "200");
+
+    if (mode === "form") {
+      base.searchParams.set("contact_form_url", "not.is.null");
+    } else if (mode === "email") {
+      base.searchParams.set("contact_email", "not.is.null");
+    }
+    const res = await fetch(base.toString(), {
+      headers: sbHeaders(),
+      cache: "no-store",
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const rows = await res.json();
     return NextResponse.json({ rows });
   } catch (e: any) {
     return NextResponse.json(
-      { error: e.message || String(e) },
+      { error: String(e?.message || e) },
       { status: 500 }
     );
-  } finally {
-    client.release();
   }
 }

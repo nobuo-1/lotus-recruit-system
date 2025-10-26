@@ -1,57 +1,83 @@
 // web/src/app/api/form-outreach/templates/route.ts
-export const runtime = "nodejs";
-import { NextRequest, NextResponse } from "next/server";
-import { Pool } from "pg";
+import { NextResponse } from "next/server";
 
-const pool =
-  (global as any).__pgPool ||
-  ((global as any).__pgPool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    max: 5,
-  }));
-const TENANT =
-  process.env.SEED_TENANT_ID || "00000000-0000-0000-0000-000000000001";
+export const runtime = "edge";
 
+const SB_URL =
+  process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+const SB_KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+  "";
+
+function sbHeaders() {
+  return {
+    apikey: SB_KEY,
+    Authorization: `Bearer ${SB_KEY}`,
+    "Content-Type": "application/json",
+    Prefer: "return=representation",
+  };
+}
+
+// GET: prospect_id が NULL の行をテンプレートと見なす
 export async function GET() {
-  const client = await pool.connect();
   try {
-    const { rows } = await client.query(
-      `SELECT id, name, subject, body_text, body_html, created_at
-         FROM public.form_outreach_messages
-        WHERE tenant_id = $1
-          AND prospect_id IS NULL
-        ORDER BY created_at DESC`,
-      [TENANT]
-    );
+    const q =
+      "form_outreach_messages?select=*&prospect_id=is.null&order=created_at.desc";
+    const res = await fetch(`${SB_URL}/rest/v1/${q}`, {
+      headers: sbHeaders(),
+      cache: "no-store",
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const rows = await res.json();
     return NextResponse.json({ rows });
   } catch (e: any) {
     return NextResponse.json(
-      { error: e.message || String(e) },
+      { error: String(e?.message || e) },
       { status: 500 }
     );
-  } finally {
-    client.release();
   }
 }
 
-export async function POST(req: NextRequest) {
-  const { name, subject, body_text, body_html } = await req.json();
-  const client = await pool.connect();
+// POST: 新規テンプレ作成
+export async function POST(req: Request) {
   try {
-    const ins = await client.query(
-      `INSERT INTO public.form_outreach_messages
-       (id, tenant_id, name, subject, body_text, body_html, channel, step, status, created_at)
-       VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, 'email', 0, 'template', now())
-       RETURNING id`,
-      [TENANT, name, subject, body_text, body_html]
-    );
-    return NextResponse.json({ ok: true, id: ins.rows[0].id });
+    const body = await req.json();
+    const {
+      name,
+      subject,
+      body_text,
+      body_html,
+      channel = "template",
+      step = 0,
+      tenant_id,
+    } = body;
+
+    const res = await fetch(`${SB_URL}/rest/v1/form_outreach_messages`, {
+      method: "POST",
+      headers: sbHeaders(),
+      body: JSON.stringify([
+        {
+          name,
+          subject,
+          body_text,
+          body_html,
+          channel,
+          step,
+          tenant_id,
+          prospect_id: null,
+          status: null,
+          error: null,
+        },
+      ]),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const [row] = await res.json();
+    return NextResponse.json({ row });
   } catch (e: any) {
     return NextResponse.json(
-      { error: e.message || String(e) },
+      { error: String(e?.message || e) },
       { status: 500 }
     );
-  } finally {
-    client.release();
   }
 }
