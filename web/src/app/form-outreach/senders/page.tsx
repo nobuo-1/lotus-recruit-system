@@ -120,12 +120,14 @@ export default function SenderSettings() {
           <div className="mt-3">
             <button
               onClick={save}
-              className="rounded-lg px 3 py-2 border border-neutral-200 hover:bg-neutral-50"
+              className="rounded-lg px-3 py-2 border border-neutral-200 hover:bg-neutral-50 mr-2"
             >
               保存
             </button>
             {msg && (
-              <span className="ml-3 text-xs text-neutral-500">{msg}</span>
+              <span className="text-xs text-neutral-500 align-middle">
+                {msg}
+              </span>
             )}
           </div>
         </section>

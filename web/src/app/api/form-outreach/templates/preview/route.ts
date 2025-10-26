@@ -1,52 +1,35 @@
 // web/src/app/api/form-outreach/templates/preview/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { supabaseServer } from "@/lib/supabaseServer";
 
-type PreviewBody = {
-  templateId: string;
-  vars?: Record<string, string>;
-};
+function applyVars(tpl: string, vars: Record<string, string>) {
+  let out = tpl || "";
+  Object.entries(vars).forEach(([k, v]) => {
+    const re = new RegExp(`{{\\s*${k}\\s*}}`, "g");
+    out = out.replace(re, v);
+  });
+  return out;
+}
 
 export async function POST(req: NextRequest) {
-  try {
-    const sb = await supabaseServer();
-    const { data: u } = await sb.auth.getUser();
-    if (!u?.user) return NextResponse.json({ ok: true, body: "" });
+  const body = await req.json();
+  const sampleVars: Record<string, string> = {
+    company_name: "〇〇株式会社",
+    contact_name: "採用ご担当者様",
+    sender_name: "山田太郎",
+    website: "https://example.com",
+  };
 
-    const body = (await req.json()) as PreviewBody;
-    const tplId: string = String(body?.templateId || "");
-    if (!tplId) return NextResponse.json({ ok: true, body: "" });
-
-    const { data: tpl, error } = await sb
-      .from("form_outreach_messages")
-      .select("name, subject, body_text, body_html")
-      .eq("id", tplId)
-      .maybeSingle();
-
-    if (error) throw error;
-
-    const vars: Record<string, string> = body?.vars || {};
-    const src: string = (tpl?.body_html || tpl?.body_text || "") as string;
-
-    const out = src.replace(
-      /\{\{(\w+)\}\}/g,
-      (match: string, key: string): string => {
-        // マッチした {{key}} を vars[key] で置換。未定義は空文字。
-        return Object.prototype.hasOwnProperty.call(vars, key)
-          ? String(vars[key] ?? "")
-          : "";
+  // body.keys で上書きも許可（型 any を明示）
+  if (body && typeof body === "object" && body.vars) {
+    Object.entries(body.vars as Record<string, string>).forEach(
+      ([key, val]) => {
+        sampleVars[key] = String(val ?? "");
       }
     );
-
-    return NextResponse.json({
-      ok: true,
-      body: out,
-      title: (tpl?.name || tpl?.subject || "") as string,
-    });
-  } catch (e: any) {
-    return NextResponse.json(
-      { error: String(e?.message || e) },
-      { status: 500 }
-    );
   }
+
+  const text = applyVars(String(body.body_text || ""), sampleVars);
+  const html = applyVars(String(body.body_html || ""), sampleVars);
+
+  return NextResponse.json({ body_text: text, body_html: html });
 }

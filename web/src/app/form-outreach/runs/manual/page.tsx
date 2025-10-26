@@ -3,7 +3,6 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import AppHeader from "@/components/AppHeader";
-import Link from "next/link";
 
 type Prospect = {
   id: string;
@@ -13,69 +12,93 @@ type Prospect = {
   contact_form_url: string | null;
   industry: string | null;
   company_size: string | null;
-  job_site_source: string | null;
-  status: string | null;
+  created_at: string | null;
 };
-type Template = { id: string; name: string; channel: string };
+
+type Template = {
+  id: string;
+  name: string;
+  subject?: string | null;
+  body_text: string;
+  body_html?: string | null;
+};
+
+const INDUSTRIES = [
+  "IT・SaaS",
+  "製造",
+  "小売",
+  "物流・運輸",
+  "医療・ヘルスケア",
+  "建設",
+  "不動産",
+  "教育",
+  "金融・保険",
+  "広告・マーケ",
+  "飲食・観光",
+  "エネルギー",
+  "アパレル",
+  "その他",
+];
 
 export default function ManualRun() {
-  const [mode, setMode] = useState<"form" | "email" | "all">("form");
+  const [mode, setMode] = useState<"form" | "email">("form");
   const [prospects, setProspects] = useState<Prospect[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [templateId, setTemplateId] = useState<string>("");
-  const [preview, setPreview] = useState<{
-    open: boolean;
-    title: string;
-    body: string;
-  }>({
-    open: false,
-    title: "",
-    body: "",
-  });
+  const [msg, setMsg] = useState("");
 
   // フィルタ
-  const [kw, setKw] = useState("");
-  const [size, setSize] = useState<string>("");
+  const [query, setQuery] = useState("");
   const [industry, setIndustry] = useState<string>("");
+  const [size, setSize] = useState<"" | "small" | "mid" | "large">("");
+
+  // テンプレ表示/プレビュー
+  const [showTpl, setShowTpl] = useState(false);
+  const [preview, setPreview] = useState<{
+    body_text: string;
+    body_html?: string | null;
+  } | null>(null);
+  const selTpl = useMemo(
+    () => templates.find((t) => t.id === templateId) || null,
+    [templates, templateId]
+  );
+
+  // prospects 読み込み
+  const loadProspects = async () => {
+    setMsg("");
+    try {
+      const params = new URLSearchParams();
+      if (query) params.set("q", query);
+      if (industry) params.set("industry", industry);
+      if (size) params.set("size", size);
+      const r = await fetch(
+        `/api/form-outreach/prospects?${params.toString()}`,
+        { cache: "no-store" }
+      );
+      const j = await r.json();
+      if (!r.ok) throw new Error(j?.error || "fetch failed");
+      setProspects(j.rows ?? []);
+    } catch (e: any) {
+      setProspects([]);
+      setMsg(String(e?.message || e));
+    }
+  };
+
+  // templates 読み込み
+  const loadTemplates = async () => {
+    const r = await fetch("/api/form-outreach/templates", {
+      cache: "no-store",
+    });
+    const j = await r.json();
+    if (r.ok) setTemplates(j.rows ?? []);
+  };
 
   useEffect(() => {
-    (async () => {
-      const res = await fetch(`/api/form-outreach/prospects?mode=${mode}`, {
-        cache: "no-store",
-      });
-      const j = await res.json();
-      setProspects(j?.rows ?? []);
-
-      const t = await fetch(`/api/form-outreach/templates`, {
-        cache: "no-store",
-      }).then((r) => r.json());
-      setTemplates(
-        (t?.rows ?? []).map((x: any) => ({
-          id: x.id,
-          name: x.name,
-          channel: x.channel,
-        }))
-      );
-    })();
-  }, [mode]);
-
-  const filtered = useMemo(() => {
-    return prospects.filter((p) => {
-      if (kw) {
-        const q = kw.toLowerCase();
-        const hit =
-          (p.company_name || "").toLowerCase().includes(q) ||
-          (p.website || "").toLowerCase().includes(q) ||
-          (p.contact_email || "").toLowerCase().includes(q) ||
-          (p.contact_form_url || "").toLowerCase().includes(q);
-        if (!hit) return false;
-      }
-      if (size && (p.company_size || "") !== size) return false;
-      if (industry && (p.industry || "") !== industry) return false;
-      return true;
-    });
-  }, [prospects, kw, size, industry]);
+    loadProspects();
+    loadTemplates();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const canSend = useMemo(
     () => selected.length > 0 && templateId,
@@ -84,135 +107,112 @@ export default function ManualRun() {
 
   const submit = async () => {
     if (!canSend) return;
-    // 確認モーダルを開く
-    const ids = selected.slice();
-    const companies = filtered.filter((p) => ids.includes(p.id));
-    setConfirm({ open: true, companies });
-  };
-
-  // 確認モーダル
-  const [confirm, setConfirm] = useState<{
-    open: boolean;
-    companies: Prospect[];
-  }>({
-    open: false,
-    companies: [],
-  });
-  const doSend = async () => {
     await fetch(`/api/form-outreach/send`, {
       method: "POST",
       body: JSON.stringify({ mode, prospectIds: selected, templateId }),
       headers: { "Content-Type": "application/json" },
     });
-    alert("送信キューに登録しました。フロー詳細でご確認ください。");
+    alert("送信キューに登録しました。");
     setSelected([]);
-    setConfirm({ open: false, companies: [] });
   };
 
-  const previewTemplate = async (tid: string) => {
-    if (!tid) return;
-    const res = await fetch("/api/form-outreach/templates/preview", {
+  const openPreview = async () => {
+    if (!selTpl) return;
+    const r = await fetch("/api/form-outreach/templates/preview", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        templateId: tid,
-        vars: { from_name: "担当 太郎", to_company: "サンプル株式会社" },
+        body_text: selTpl.body_text,
+        body_html: selTpl.body_html,
+        vars: { company_name: "〇〇株式会社", contact_name: "ご担当者様" },
       }),
     });
-    const j = await res.json();
-    setPreview({ open: true, title: j?.title || "", body: j?.body || "" });
+    const j = await r.json();
+    setPreview(j);
+    setShowTpl(true);
   };
 
-  const modes = [
-    { k: "form", label: "フォーム入力" },
-    { k: "email", label: "メール送信" },
-    { k: "all", label: "すべて" },
-  ] as const;
+  // 規模フィルタの表示用
+  const sizeLabel = (s: typeof size) =>
+    s === "small"
+      ? "小(1-49)"
+      : s === "mid"
+      ? "中(50-249)"
+      : s === "large"
+      ? "大(250+)"
+      : "すべて";
 
   return (
     <>
       <AppHeader showBack />
       <main className="mx-auto max-w-6xl p-6">
-        <div className="mb-4 flex items-end justify-between">
-          <div>
-            <h1 className="text-2xl font-semibold text-neutral-900">
-              手動実行
-            </h1>
-            <p className="text-sm text-neutral-500">
-              対象をフィルタしてテンプレートで一括送信します。
-            </p>
-          </div>
-          <Link
-            href="/form-outreach/messages"
-            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
-          >
-            送信ログ
-          </Link>
-        </div>
-
-        <div className="mb-4 flex flex-wrap gap-2">
-          {modes.map((m) => (
-            <button
-              key={m.k}
-              onClick={() => setMode(m.k as any)}
-              className={`rounded-lg px-2 py-1 text-xs ${
-                mode === m.k
-                  ? "border border-indigo-400 text-indigo-700"
-                  : "border border-neutral-200 text-neutral-600"
-              }`}
-            >
-              {m.label}
-            </button>
-          ))}
+        <div className="mb-4">
+          <h1 className="text-2xl font-semibold text-neutral-900">手動実行</h1>
+          <p className="text-sm text-neutral-500">
+            対象企業を選んでテンプレートを送信します。
+          </p>
         </div>
 
         {/* フィルタ */}
-        <div className="mb-3 grid grid-cols-1 md:grid-cols-4 gap-2">
-          <input
-            value={kw}
-            onChange={(e) => setKw(e.target.value)}
-            placeholder="検索（社名・サイト・メール等）"
-            className="rounded-lg border px-2 py-1 text-sm"
-          />
-          <select
-            value={size}
-            onChange={(e) => setSize(e.target.value)}
-            className="rounded-lg border px-2 py-1 text-sm"
-          >
-            <option value="">規模（すべて）</option>
-            <option value="small">小規模</option>
-            <option value="mid">中規模</option>
-            <option value="large">大規模</option>
-          </select>
-          <select
-            value={industry}
-            onChange={(e) => setIndustry(e.target.value)}
-            className="rounded-lg border px-2 py-1 text-sm"
-          >
-            <option value="">業種（すべて）</option>
-            <option value="it">IT</option>
-            <option value="mfg">製造</option>
-            <option value="other">その他</option>
-          </select>
-        </div>
+        <section className="rounded-2xl border border-neutral-200 p-3 mb-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              placeholder="会社名/URL 検索"
+              className="rounded-lg border border-neutral-200 px-3 py-2 text-sm w-64"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            <select
+              className="rounded-lg border border-neutral-200 px-2 py-2 text-sm"
+              value={industry}
+              onChange={(e) => setIndustry(e.target.value)}
+            >
+              <option value="">業種: すべて</option>
+              {INDUSTRIES.map((x) => (
+                <option key={x} value={x}>
+                  {x}
+                </option>
+              ))}
+            </select>
+            <select
+              className="rounded-lg border border-neutral-200 px-2 py-2 text-sm"
+              value={size}
+              onChange={(e) => setSize(e.target.value as any)}
+            >
+              <option value="">規模: すべて</option>
+              <option value="small">小(1-49)</option>
+              <option value="mid">中(50-249)</option>
+              <option value="large">大(250+)</option>
+            </select>
+            <button
+              onClick={loadProspects}
+              className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
+            >
+              絞り込みを適用
+            </button>
+            <span className="text-xs text-neutral-500">
+              業種: {industry || "すべて"} / 規模: {sizeLabel(size)}
+            </span>
+          </div>
+        </section>
 
+        {/* 一覧 */}
         <div className="rounded-2xl border border-neutral-200">
-          <table className="min-w-[1100px] w-full text-sm">
+          <table className="min-w-[980px] w-full text-sm">
             <thead className="bg-neutral-50 text-neutral-600">
               <tr>
                 <th className="px-3 py-3 text-left w-10">選択</th>
                 <th className="px-3 py-3 text-left">企業名</th>
                 <th className="px-3 py-3 text-left">サイト</th>
-                <th className="px-3 py-3 text-left">公式サイト</th>
-                <th className="px-3 py-3 text-left">フォーム</th>
-                <th className="px-3 py-3 text-left">メール</th>
-                <th className="px-3 py-3 text-left">規模</th>
+                <th className="px-3 py-3 text-left">
+                  {mode === "form" ? "フォームURL" : "メール"}
+                </th>
                 <th className="px-3 py-3 text-left">業種</th>
-                <th className="px-3 py-3 text-left">ステータス</th>
+                <th className="px-3 py-3 text-left">規模</th>
               </tr>
             </thead>
             <tbody>
-              {filtered.map((p) => (
+              {prospects.map((p) => (
                 <tr key={p.id} className="border-t border-neutral-200">
                   <td className="px-3 py-2">
                     <input
@@ -228,21 +228,20 @@ export default function ManualRun() {
                     />
                   </td>
                   <td className="px-3 py-2">{p.company_name}</td>
-                  <td className="px-3 py-2 text-neutral-600">
-                    {p.job_site_source || "-"}
+                  <td className="px-3 py-2 text-neutral-600">{p.website}</td>
+                  <td className="px-3 py-2">
+                    {mode === "form"
+                      ? p.contact_form_url || "-"
+                      : p.contact_email || "-"}
                   </td>
-                  <td className="px-3 py-2">{p.website || "-"}</td>
-                  <td className="px-3 py-2">{p.contact_form_url || "-"}</td>
-                  <td className="px-3 py-2">{p.contact_email || "-"}</td>
-                  <td className="px-3 py-2">{p.company_size || "-"}</td>
                   <td className="px-3 py-2">{p.industry || "-"}</td>
-                  <td className="px-3 py-2">{p.status || "-"}</td>
+                  <td className="px-3 py-2">{p.company_size || "-"}</td>
                 </tr>
               ))}
-              {filtered.length === 0 && (
+              {prospects.length === 0 && (
                 <tr>
                   <td
-                    colSpan={9}
+                    colSpan={6}
                     className="px-4 py-8 text-center text-neutral-400"
                   >
                     対象がありません
@@ -253,32 +252,49 @@ export default function ManualRun() {
           </table>
         </div>
 
-        {/* テンプレート選択 + プレビュー */}
-        <div className="mt-4 flex items-center gap-2">
-          <select
-            className="rounded-lg border border-neutral-200 px-2 py-1 text-sm"
-            value={templateId}
-            onChange={(e) => setTemplateId(e.target.value)}
-          >
-            <option value="">テンプレートを選択</option>
-            {templates.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.name}（{t.channel}）
-              </option>
-            ))}
-          </select>
+        {/* テンプレート選択・送信 */}
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-2">
+            <select
+              className="rounded-lg border border-neutral-200 px-2 py-1 text-sm"
+              value={templateId}
+              onChange={(e) => setTemplateId(e.target.value)}
+            >
+              <option value="">テンプレートを選択</option>
+              {templates.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={openPreview}
+              disabled={!templateId}
+              className={`rounded-lg px-3 py-1 text-sm ${
+                templateId
+                  ? "border border-neutral-200 hover:bg-neutral-50"
+                  : "border border-neutral-100 text-neutral-400"
+              }`}
+            >
+              プレビュー
+            </button>
+          </div>
 
-          <button
-            onClick={() => previewTemplate(templateId)}
-            disabled={!templateId}
-            className={`rounded-lg px-3 py-1 text-sm border ${
-              templateId
-                ? "hover:bg-neutral-50"
-                : "text-neutral-400 border-neutral-200"
-            }`}
-          >
-            プレビュー
-          </button>
+          <div className="flex items-center gap-2">
+            {(["form", "email"] as const).map((m) => (
+              <button
+                key={m}
+                onClick={() => setMode(m)}
+                className={`rounded-lg px-2 py-1 text-xs ${
+                  mode === m
+                    ? "border border-indigo-400 text-indigo-700"
+                    : "border border-neutral-200 text-neutral-600"
+                }`}
+              >
+                {m === "form" ? "フォーム入力" : "メール送信"}
+              </button>
+            ))}
+          </div>
 
           <button
             onClick={submit}
@@ -291,67 +307,28 @@ export default function ManualRun() {
           >
             送信
           </button>
+          {msg && <span className="text-xs text-red-600 ml-2">{msg}</span>}
         </div>
 
         {/* プレビューモーダル */}
-        {preview.open && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-3">
-            <div className="w-[860px] max-w-[96vw] rounded-2xl bg-white shadow-xl">
+        {showTpl && preview && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+            <div className="w-[720px] max-w-[96vw] rounded-2xl bg-white shadow-xl">
               <div className="flex items-center justify-between px-4 py-3 border-b">
                 <div className="font-semibold">
-                  {preview.title || "プレビュー"}
+                  テンプレートプレビュー：{selTpl?.name}
                 </div>
                 <button
-                  onClick={() =>
-                    setPreview({ open: false, title: "", body: "" })
-                  }
-                  className="rounded-lg px-2 py-1 border hover:bg-neutral-50 text-sm"
+                  onClick={() => setShowTpl(false)}
+                  className="rounded-lg px-2 py-1 border text-sm hover:bg-neutral-50"
                 >
                   閉じる
                 </button>
               </div>
               <div className="p-4">
-                <pre className="whitespace-pre-wrap text-sm text-neutral-800">
-                  {preview.body}
-                </pre>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* 確認モーダル */}
-        {confirm.open && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-3">
-            <div className="w-[860px] max-w-[96vw] rounded-2xl bg-white shadow-xl">
-              <div className="flex items-center justify-between px-4 py-3 border-b">
-                <div className="font-semibold">以下の企業へ送信します</div>
-                <button
-                  onClick={() => setConfirm({ open: false, companies: [] })}
-                  className="rounded-lg px-2 py-1 border hover:bg-neutral-50 text-sm"
-                >
-                  キャンセル
-                </button>
-              </div>
-              <div className="p-4">
-                <ul className="list-disc pl-5 text-sm">
-                  {confirm.companies.map((c) => (
-                    <li key={c.id}>
-                      {c.company_name}（
-                      {mode === "email"
-                        ? c.contact_email || "-"
-                        : c.contact_form_url || "-"}
-                      ）
-                    </li>
-                  ))}
-                </ul>
-              </div>
-              <div className="px-4 py-3 border-t">
-                <button
-                  onClick={doSend}
-                  className="rounded-lg border px-3 py-1 text-sm hover:bg-neutral-50"
-                >
-                  実行
-                </button>
+                <div className="text-sm whitespace-pre-wrap">
+                  {preview.body_text}
+                </div>
               </div>
             </div>
           </div>
