@@ -10,6 +10,8 @@ const SB_KEY =
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
   "";
 
+const DEFAULT_TENANT_ID = "175b1a9d-3f85-482d-9323-68a44d214424";
+
 function sbHeaders() {
   return {
     apikey: SB_KEY,
@@ -30,6 +32,7 @@ export async function GET() {
     );
     if (!res.ok) throw new Error(await res.text());
     const rows = await res.json();
+    // title を参照している既存 UI 互換
     const shaped = rows.map((r: any) => ({ ...r, title: r.name ?? r.title }));
     return NextResponse.json({ rows: shaped });
   } catch (e: any) {
@@ -42,48 +45,22 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json();
-    const {
-      name,
-      email,
-      sites,
-      age_bands,
-      employment_types,
-      salary_bands,
-      enabled,
-      schedule_type,
-      schedule_time,
-      schedule_days,
-      timezone,
-      destination_ids,
-      tenant_id,
-    } = body;
+    const src = await req.json();
+    const tenant_id =
+      src.tenant_id ?? req.headers.get("x-tenant-id") ?? DEFAULT_TENANT_ID;
 
-    const insertRule = await fetch(`${SB_URL}/rest/v1/job_board_notify_rules`, {
+    // 本体
+    const ins = await fetch(`${SB_URL}/rest/v1/job_board_notify_rules`, {
       method: "POST",
       headers: sbHeaders(),
-      body: JSON.stringify([
-        {
-          name,
-          email,
-          sites,
-          age_bands,
-          employment_types,
-          salary_bands,
-          enabled,
-          schedule_type,
-          schedule_time,
-          schedule_days,
-          timezone,
-          tenant_id,
-        },
-      ]),
+      body: JSON.stringify([{ ...src, tenant_id }]),
     });
-    if (!insertRule.ok) throw new Error(await insertRule.text());
-    const [rule] = await insertRule.json();
+    if (!ins.ok) throw new Error(await ins.text());
+    const [rule] = await ins.json();
 
-    if (Array.isArray(destination_ids) && destination_ids.length > 0) {
-      const linkRows = destination_ids.map((d: string) => ({
+    // 中間テーブル（送り先リンク）
+    if (Array.isArray(src.destination_ids) && src.destination_ids.length > 0) {
+      const linkRows = src.destination_ids.map((d: string) => ({
         rule_id: rule.id,
         destination_id: d,
         tenant_id,

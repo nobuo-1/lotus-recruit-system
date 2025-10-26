@@ -49,24 +49,7 @@ function sbHeaders() {
   };
 }
 
-async function tryRpc(body: Req): Promise<Row[] | null> {
-  try {
-    const res = await fetch(
-      `${SB_URL}/rest/v1/rpc/job_boards_metrics_fallback`,
-      {
-        method: "POST",
-        headers: sbHeaders(),
-        body: JSON.stringify(body),
-      }
-    );
-    if (!res.ok) return null;
-    const rows = (await res.json()) as Row[];
-    return rows ?? [];
-  } catch {
-    return null;
-  }
-}
-
+// ---- util ----
 function startOfWeekISO(d: Date) {
   const dt = new Date(
     Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())
@@ -95,50 +78,75 @@ function fromDateByRange(mode: Mode, range: RangeW | RangeM) {
   return dt.toISOString();
 }
 
-async function fetchJson<T = any>(path: string) {
-  const res = await fetch(`${SB_URL}/rest/v1/${path}`, {
-    headers: sbHeaders(),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || res.statusText);
+// RPC があれば使う（任意）
+async function tryRpc(body: Req): Promise<Row[] | null> {
+  try {
+    const r = await fetch(`${SB_URL}/rest/v1/rpc/job_boards_metrics_fallback`, {
+      method: "POST",
+      headers: sbHeaders(),
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) return null;
+    const rows = (await r.json()) as Row[];
+    return rows ?? [];
+  } catch {
+    return null;
   }
-  return (await res.json()) as T;
 }
 
+// ---- main ----
 export async function POST(req: Request) {
-  if (!SB_URL || !SB_KEY) {
-    return NextResponse.json(
-      { error: "Supabase env (URL/KEY) is missing" },
-      { status: 500 }
-    );
-  }
-
-  const body = (await req.json()) as Req;
-
-  // 1) RPC があれば最優先で使用
-  const rpc = await tryRpc(body);
-  if (rpc) return NextResponse.json({ rows: rpc });
-
-  // 2) フォールバック集計
   try {
+    if (!SB_URL || !SB_KEY) {
+      return NextResponse.json(
+        { error: "Supabase env (URL/KEY) is missing" },
+        { status: 500 }
+      );
+    }
+
+    const body = (await req.json()) as Req;
+
+    // 1) RPC 優先
+    const rpc = await tryRpc(body);
+    if (rpc) return NextResponse.json({ rows: rpc });
+
+    // 2) フォールバック（site_key が無い環境に対応）
     const fromISO = fromDateByRange(body.mode, body.range);
 
-    const results = await fetchJson<
-      {
-        id: string;
-        captured_at: string;
-        site?: string | null;
-        site_key?: string | null;
-      }[]
-    >(
-      `job_board_results?select=id,captured_at,site,site_key&captured_at=gte.${encodeURIComponent(
-        fromISO
-      )}&order=captured_at.asc`
+    // 2-1) results 取得：まず site_key を試し、失敗したら site のみで再取得
+    let results:
+      | {
+          id: string;
+          captured_at: string;
+          site_key?: string | null;
+          site?: string | null;
+        }[] = [];
+    let selectCols = "id,captured_at,site_key";
+    let res = await fetch(
+      `${SB_URL}/rest/v1/job_board_results?select=${encodeURIComponent(
+        selectCols
+      )}&captured_at=gte.${encodeURIComponent(fromISO)}&order=captured_at.asc`,
+      { headers: sbHeaders() }
     );
+
+    if (!res.ok) {
+      // site_key が無い場合の 42703 などで落ちたら site だけで再トライ
+      selectCols = "id,captured_at,site";
+      res = await fetch(
+        `${SB_URL}/rest/v1/job_board_results?select=${encodeURIComponent(
+          selectCols
+        )}&captured_at=gte.${encodeURIComponent(
+          fromISO
+        )}&order=captured_at.asc`,
+        { headers: sbHeaders() }
+      );
+    }
+    if (!res.ok) throw new Error(await res.text());
+    results = (await res.json()) as any[];
 
     if (results.length === 0) return NextResponse.json({ rows: [] });
 
+    // 2-2) 集計用のキー化
     const resMap = new Map<string, { dateKey: string; siteKey: string }>();
     for (const r of results) {
       const cap = new Date(r.captured_at);
@@ -148,8 +156,7 @@ export async function POST(req: Request) {
       resMap.set(r.id, { dateKey, siteKey });
     }
 
-    // counts 取得
-    const resIds = results.map((r) => r.id);
+    const ids = results.map((x) => x.id);
     const chunk = <T>(arr: T[], n: number) =>
       Array.from({ length: Math.ceil(arr.length / n) }, (_, i) =>
         arr.slice(i * n, i * n + n)
@@ -169,27 +176,32 @@ export async function POST(req: Request) {
     };
 
     const allCounts: CountRow[] = [];
-    for (const ids of chunk(resIds, 500)) {
-      const inList = ids.map((x) => `"${x}"`).join(",");
+    for (const group of chunk(ids, 500)) {
+      const inList = group.map((x) => `"${x}"`).join(",");
       const q = `job_board_counts?select=result_id,internal_large,internal_small,site_category_code,site_category_label,jobs_count,candidates_count,age_band,employment_type,salary_band&result_id=in.(${encodeURIComponent(
         inList
       )})`;
-      const rows = await fetchJson<CountRow[]>(q);
-      allCounts.push(...rows);
+      const cRes = await fetch(`${SB_URL}/rest/v1/${q}`, {
+        headers: sbHeaders(),
+      });
+      if (!cRes.ok) throw new Error(await cRes.text());
+      allCounts.push(...((await cRes.json()) as CountRow[]));
     }
 
-    type Agg = { jobs: number; cands: number };
-    const agg = new Map<string, Agg>();
-
+    // フィルタ
     const siteSet = new Set(body.sites ?? []);
     const largeSet = new Set(body.large ?? []);
     const smallSet = new Set(body.small ?? []);
     const hasLarge = largeSet.size > 0;
     const hasSmall = smallSet.size > 0;
 
+    type Agg = { jobs: number; cands: number };
+    const agg = new Map<string, Agg>();
+
     for (const c of allCounts) {
       const m = resMap.get(c.result_id);
       if (!m) continue;
+
       const siteKey = m.siteKey;
       if (siteSet.size > 0 && !siteSet.has(siteKey)) continue;
 
@@ -218,7 +230,6 @@ export async function POST(req: Request) {
         candidates_count: val.cands,
       });
     }
-
     out.sort((a, b) => {
       const da = (a.week_start || a.month_start || "") as string;
       const db = (b.week_start || b.month_start || "") as string;

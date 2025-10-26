@@ -4,103 +4,127 @@
 import React, { useEffect, useState } from "react";
 import AppHeader from "@/components/AppHeader";
 
-type Row = {
+type Prospect = {
   id: string;
-  source_site: string | null;
-  company_name: string | null;
-  site_company_url: string | null;
-  official_website_url: string | null;
+  company_name: string;
+  website: string | null;
   contact_form_url: string | null;
   contact_email: string | null;
-  created_at: string | null;
-  contacted: boolean;
+  industry: string | null;
+  company_size: string | null;
+  job_site_source: string | null;
+  created_at: string;
 };
 
 export default function CompaniesPage() {
-  const [rows, setRows] = useState<Row[]>([]);
-  const [q, setQ] = useState("");
-  const [contacted, setContacted] = useState<"" | "true" | "false">("");
+  const [rows, setRows] = useState<Prospect[]>([]);
   const [msg, setMsg] = useState("");
+  const [q, setQ] = useState("");
 
   const load = async () => {
-    const params = new URLSearchParams();
-    if (q) params.set("q", q);
-    if (contacted) params.set("contacted", contacted);
-    const r = await fetch(`/api/form-outreach/companies?${params}`, {
+    const r = await fetch("/api/form-outreach/prospects?mode=all", {
       cache: "no-store",
     });
     const j = await r.json();
-    if (!r.ok) return setMsg(j?.error || "fetch failed");
-    setRows(j.rows || []);
+    if (!r.ok) return setMsg(j?.error || "load failed");
+    setRows(j.rows ?? []);
+    setMsg("");
   };
-
   useEffect(() => {
     load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const filtered = rows.filter((r) =>
+    [r.company_name, r.website, r.contact_email]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase()
+      .includes(q.toLowerCase())
+  );
 
   return (
     <>
       <AppHeader showBack />
       <main className="mx-auto max-w-6xl p-6">
-        <h1 className="text-2xl font-semibold mb-3">企業一覧</h1>
-
-        <div className="rounded-2xl border border-neutral-200 p-3 mb-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <input
-              placeholder="会社名/サイトURL"
-              className="rounded-lg border border-neutral-200 px-3 py-2 text-sm w-64"
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-            />
-            <select
-              className="rounded-lg border border-neutral-200 px-2 py-2 text-sm"
-              value={contacted}
-              onChange={(e) => setContacted(e.target.value as any)}
-            >
-              <option value="">コンタクト: すべて</option>
-              <option value="true">済み</option>
-              <option value="false">未</option>
-            </select>
-            <button
-              onClick={load}
-              className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
-            >
-              検索
-            </button>
+        <div className="mb-4 flex items-end justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold text-neutral-900">
+              企業一覧
+            </h1>
+            <p className="text-sm text-neutral-500">
+              form_prospects から表示（専用テーブルは不要）
+            </p>
           </div>
+          <input
+            className="rounded-lg border px-3 py-2 text-sm w-72"
+            placeholder="検索（社名/URL/メール）"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
         </div>
 
-        <div className="overflow-x-auto rounded-2xl border border-neutral-200">
+        <div className="overflow-x-auto rounded-2xl border">
           <table className="min-w-[980px] w-full text-sm">
             <thead className="bg-neutral-50 text-neutral-600">
               <tr>
                 <th className="px-3 py-3 text-left">会社名</th>
-                <th className="px-3 py-3 text-left">公式サイト</th>
-                <th className="px-3 py-3 text-left">フォーム/メール</th>
+                <th className="px-3 py-3 text-left">Web</th>
+                <th className="px-3 py-3 text-left">フォーム</th>
+                <th className="px-3 py-3 text-left">メール</th>
+                <th className="px-3 py-3 text-left">業種</th>
+                <th className="px-3 py-3 text-left">規模</th>
                 <th className="px-3 py-3 text-left">取得元</th>
-                <th className="px-3 py-3 text-left">コンタクト</th>
+                <th className="px-3 py-3 text-left">作成日時</th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => (
-                <tr key={r.id} className="border-t border-neutral-200">
+              {filtered.map((r) => (
+                <tr key={r.id} className="border-t">
                   <td className="px-3 py-2">{r.company_name}</td>
-                  <td className="px-3 py-2">{r.official_website_url || "-"}</td>
                   <td className="px-3 py-2">
-                    {r.contact_form_url || r.contact_email || "-"}
+                    {r.website ? (
+                      <a
+                        className="text-sky-700 underline underline-offset-2"
+                        href={r.website}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        {r.website}
+                      </a>
+                    ) : (
+                      "-"
+                    )}
                   </td>
-                  <td className="px-3 py-2">{r.source_site || "-"}</td>
-                  <td className="px-3 py-2">{r.contacted ? "済み" : "未"}</td>
+                  <td className="px-3 py-2">
+                    {r.contact_form_url ? (
+                      <a
+                        className="text-sky-700 underline underline-offset-2"
+                        href={r.contact_form_url}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        開く
+                      </a>
+                    ) : (
+                      "-"
+                    )}
+                  </td>
+                  <td className="px-3 py-2">{r.contact_email ?? "-"}</td>
+                  <td className="px-3 py-2">{r.industry ?? "-"}</td>
+                  <td className="px-3 py-2">{r.company_size ?? "-"}</td>
+                  <td className="px-3 py-2">{r.job_site_source ?? "-"}</td>
+                  <td className="px-3 py-2">
+                    {new Date(r.created_at).toLocaleString("ja-JP")}
+                  </td>
                 </tr>
               ))}
-              {rows.length === 0 && (
+              {filtered.length === 0 && (
                 <tr>
                   <td
-                    colSpan={5}
-                    className="px-4 py-8 text-center text-neutral-400"
+                    className="px-4 py-10 text-center text-neutral-400"
+                    colSpan={8}
                   >
-                    企業がありません
+                    対象がありません
                   </td>
                 </tr>
               )}
@@ -109,7 +133,7 @@ export default function CompaniesPage() {
         </div>
 
         {msg && (
-          <pre className="mt-2 text-xs text-red-600 whitespace-pre-wrap">
+          <pre className="mt-3 whitespace-pre-wrap text-xs text-red-600">
             {msg}
           </pre>
         )}
