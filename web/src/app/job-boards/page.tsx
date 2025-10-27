@@ -32,7 +32,6 @@ const CartesianGrid = dynamic(
   async () => (await import("recharts")).CartesianGrid,
   { ssr: false }
 );
-// Legend はキャストで型エラー回避
 const Legend = dynamic(
   () =>
     import("recharts").then(
@@ -59,10 +58,18 @@ const SITE_OPTIONS: { value: string; label: string }[] = [
   { value: "womantype", label: "女の転職type" },
 ];
 
+// ✅ サイトごとの固定カラー
+const SITE_COLOR: Record<string, string> = {
+  doda: "#3B82F6", // blue-500
+  mynavi: "#10B981", // emerald-500
+  type: "#F59E0B", // amber-500
+  womantype: "#8B5CF6", // violet-500
+};
+
 type ApiRow = {
   week_start?: string | null;
   month_start?: string | null;
-  site_key: string; // "mynavi" 等
+  site_key: string;
   large_category: string | null;
   small_category: string | null;
   age_band: string | null;
@@ -80,9 +87,10 @@ function labelOfMode(mode: Mode) {
 function allLabel(count: number, total: number) {
   return count === total ? `${total}(ALL)` : String(count);
 }
+const parseISO = (s?: string | null) => (s ? new Date(s) : null);
 
 export default function JobBoardsPage() {
-  // ===== グラフ側フィルタ =====
+  // ===== グラフ側フィルタ（表とは独立） =====
   const [modeChart, setModeChart] = useState<Mode>("weekly");
   const [rangeChart, setRangeChart] = useState<RangeW | RangeM>("26w");
   const [metricChart, setMetricChart] = useState<Metric>("jobs");
@@ -96,7 +104,7 @@ export default function JobBoardsPage() {
   const [salChart, setSalChart] = useState<string[]>([]);
   const [showChartFilters, setShowChartFilters] = useState(true);
 
-  // ===== 表側フィルタ =====
+  // ===== 表側フィルタ（独立） =====
   const [modeTable, setModeTable] = useState<Mode>("weekly");
   const [rangeTable, setRangeTable] = useState<RangeW | RangeM>("26w");
   const [metricTable, setMetricTable] = useState<Metric>("jobs");
@@ -109,6 +117,10 @@ export default function JobBoardsPage() {
   const [empTable, setEmpTable] = useState<string[]>([]);
   const [salTable, setSalTable] = useState<string[]>([]);
   const [showTableFilters, setShowTableFilters] = useState(true);
+
+  // ✅ 表だけの「任意期間」フィルタ（From/To）
+  const [tableFrom, setTableFrom] = useState<string>("");
+  const [tableTo, setTableTo] = useState<string>("");
 
   // ===== データ =====
   const [rowsChart, setRowsChart] = useState<ApiRow[]>([]);
@@ -196,7 +208,7 @@ export default function JobBoardsPage() {
     salTable.join(","),
   ]);
 
-  // 折れ線グラフデータ
+  // 折れ線グラフ用シリーズ
   const dateKeyChart = modeChart === "weekly" ? "week_start" : "month_start";
   const seriesChart: SeriesPoint[] = useMemo(() => {
     const byDate: Record<string, Record<string, number>> = {};
@@ -213,19 +225,30 @@ export default function JobBoardsPage() {
     const dates = Object.keys(byDate).sort();
     return dates.map((d) => {
       const row: SeriesPoint = { date: d };
-      for (const s of SITE_OPTIONS.map((x) => x.value)) {
+      for (const s of SITE_OPTIONS.map((x) => x.value))
         row[s] = byDate[d][s] ?? 0;
-      }
       return row;
     });
   }, [rowsChart, dateKeyChart, metricChart]);
 
-  // 表（サイト合計）
+  // 表（サイト合計）— 任意期間でクライアント絞り込み
+  const dateKeyTable = modeTable === "weekly" ? "week_start" : "month_start";
   const tableAgg = useMemo(() => {
     const metricKey =
       metricTable === "jobs" ? "jobs_count" : "candidates_count";
+
+    const fromD = tableFrom ? new Date(tableFrom) : null;
+    const toD = tableTo ? new Date(tableTo) : null;
+
     const bySite: Record<string, number> = {};
     for (const r of rowsTable) {
+      // 期間フィルタ（任意）
+      const dStr = (r as any)[dateKeyTable] as string | null | undefined;
+      if (dStr) {
+        const d = new Date(dStr);
+        if (fromD && d < fromD) continue;
+        if (toD && d > toD) continue;
+      }
       const key = r.site_key;
       const val = Number((r as any)[metricKey] ?? 0);
       bySite[key] = (bySite[key] ?? 0) + (Number.isFinite(val) ? val : 0);
@@ -237,13 +260,13 @@ export default function JobBoardsPage() {
         total: bySite[s.value] ?? 0,
       }))
       .sort((a, b) => b.total - a.total);
-  }, [rowsTable, metricTable, sitesTable]);
+  }, [rowsTable, metricTable, sitesTable, tableFrom, tableTo, dateKeyTable]);
 
-  // 職種モーダル
+  // 職種モーダル制御
   const [openChartCat, setOpenChartCat] = useState(false);
   const [openTableCat, setOpenTableCat] = useState(false);
 
-  // UI: Chip
+  // UIパーツ：Chip
   const Chip: React.FC<{
     active: boolean;
     onClick: () => void;
@@ -254,13 +277,14 @@ export default function JobBoardsPage() {
       className={`px-2 py-1 text-xs rounded-full border ${
         active
           ? "bg-indigo-50 border-indigo-400 text-indigo-700"
-          : "border-neutral-300 text-neutral-600 hover:bg-neutral-50"
+          : "border-neutral-300 text-neutral-700 hover:bg-neutral-50"
       } mr-2 mb-2`}
     >
       {label}
     </button>
   );
 
+  // 共通タグ選択
   function TagMulti({
     values,
     setValues,
@@ -533,6 +557,8 @@ export default function JobBoardsPage() {
                       dataKey={s.value}
                       dot={false}
                       strokeWidth={2}
+                      stroke={SITE_COLOR[s.value] || "#64748B" /* slate-500 */}
+                      connectNulls
                     />
                   )
                 )}
@@ -548,7 +574,7 @@ export default function JobBoardsPage() {
 
         {/* ====== サイト別合計（表） ====== */}
         <section className="mt-6 rounded-2xl border border-neutral-200 p-4">
-          {/* 表用 KPI */}
+          {/* 表用 KPI（表の選択状態を反映） */}
           <div className="grid grid-cols-2 gap-4 md:grid-cols-4 mb-3">
             <KpiCard
               label="対象サイト（表）"
@@ -566,13 +592,42 @@ export default function JobBoardsPage() {
           </div>
 
           {/* フィルタのトグル */}
-          <div className="mb-2">
+          <div className="mb-2 flex flex-wrap items-center gap-2">
             <button
               className="text-xs rounded-lg border border-neutral-300 px-2 py-1 hover:bg-neutral-50"
               onClick={() => setShowTableFilters((v) => !v)}
             >
               {showTableFilters ? "フィルタを隠す" : "フィルタを表示"}
             </button>
+
+            {/* ✅ 任意期間（From/To） */}
+            <div className="flex items-center gap-2 text-xs">
+              <span className="text-neutral-600">期間:</span>
+              <input
+                type="date"
+                value={tableFrom}
+                onChange={(e) => setTableFrom(e.target.value)}
+                className="rounded-md border border-neutral-300 px-2 py-1"
+              />
+              <span>〜</span>
+              <input
+                type="date"
+                value={tableTo}
+                onChange={(e) => setTableTo(e.target.value)}
+                className="rounded-md border border-neutral-300 px-2 py-1"
+              />
+              {tableFrom || tableTo ? (
+                <button
+                  className="rounded-md border border-neutral-300 px-2 py-1"
+                  onClick={() => {
+                    setTableFrom("");
+                    setTableTo("");
+                  }}
+                >
+                  クリア
+                </button>
+              ) : null}
+            </div>
           </div>
 
           {showTableFilters && (
