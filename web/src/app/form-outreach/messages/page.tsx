@@ -4,77 +4,99 @@
 import React, { useEffect, useState } from "react";
 import AppHeader from "@/components/AppHeader";
 
-type Row = {
+const TENANT_ID = "175b1a9d-3f85-482d-9323-68a44d214424";
+
+type Run = {
   id: string;
-  name: string | null; // ← テンプレ名（channel='template' の name を転記しておく or 同名保持）
-  subject: string | null;
-  email: string | null;
-  form_url: string | null;
+  flow: string | null;
   status: string | null;
   error: string | null;
-  sent_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
 };
 
-export default function MessagesPage() {
-  const [rows, setRows] = useState<Row[]>([]);
+export default function MessageLogsPage() {
+  const [rows, setRows] = useState<Run[]>([]);
   const [msg, setMsg] = useState("");
 
+  const load = async () => {
+    setMsg("");
+    try {
+      const r = await fetch("/api/form-outreach/runs", {
+        headers: { "x-tenant-id": TENANT_ID },
+        cache: "no-store",
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j?.error || "fetch failed");
+      setRows(j.rows ?? []);
+    } catch (e: any) {
+      setMsg(String(e?.message || e));
+      setRows([]);
+    }
+  };
+
   useEffect(() => {
-    (async () => {
-      try {
-        const r = await fetch("/api/form-outreach/messages", {
-          cache: "no-store",
-        });
-        const j = await r.json();
-        if (!r.ok) throw new Error(j?.error || "fetch failed");
-        setRows(j.rows || []);
-      } catch (e: any) {
-        setMsg(String(e?.message || e));
-      }
-    })();
+    load();
   }, []);
 
   return (
     <>
       <AppHeader showBack />
-      <main className="mx-auto max-w-6xl p-6">
-        <h1 className="text-2xl font-semibold mb-3">送信ログ</h1>
-        <div className="overflow-x-auto rounded-2xl border border-neutral-200">
-          <table className="min-w-[980px] w-full text-sm">
+      <main className="mx-auto max-w-5xl p-6">
+        <div className="mb-4">
+          <h1 className="text-2xl font-semibold text-neutral-900">送信ログ</h1>
+          <p className="text-sm text-neutral-500">
+            form_outreach_runs を表示します。
+          </p>
+        </div>
+
+        <section className="rounded-2xl border border-neutral-200 overflow-hidden">
+          <table className="min-w-[880px] w-full text-sm">
             <thead className="bg-neutral-50 text-neutral-600">
               <tr>
-                <th className="px-3 py-3 text-left">テンプレート名</th>
-                <th className="px-3 py-3 text-left">宛先/フォーム</th>
-                <th className="px-3 py-3 text-left">状態</th>
+                <th className="px-3 py-3 text-left">ID</th>
+                <th className="px-3 py-3 text-left">フロー</th>
+                <th className="px-3 py-3 text-left">ステータス</th>
+                <th className="px-3 py-3 text-left">開始</th>
+                <th className="px-3 py-3 text-left">終了</th>
                 <th className="px-3 py-3 text-left">エラー</th>
-                <th className="px-3 py-3 text-left">送信日時</th>
               </tr>
             </thead>
-            <tbody>
+            <tbody className="divide-y divide-neutral-200">
               {rows.map((r) => (
-                <tr key={r.id} className="border-t border-neutral-200">
-                  <td className="px-3 py-2">{r.name || "-"}</td>
-                  <td className="px-3 py-2">{r.email || r.form_url || "-"}</td>
+                <tr key={r.id} className="hover:bg-neutral-50/40">
+                  <td className="px-3 py-2">{r.id}</td>
+                  <td className="px-3 py-2">{r.flow || "-"}</td>
                   <td className="px-3 py-2">{r.status || "-"}</td>
-                  <td className="px-3 py-2 text-red-600">{r.error || ""}</td>
-                  <td className="px-3 py-2">{r.sent_at || "-"}</td>
+                  <td className="px-3 py-2">
+                    {r.started_at?.replace("T", " ").replace("Z", "") || "-"}
+                  </td>
+                  <td className="px-3 py-2">
+                    {r.finished_at?.replace("T", " ").replace("Z", "") || "-"}
+                  </td>
+                  <td className="px-3 py-2">
+                    <pre className="whitespace-pre-wrap text-xs text-red-600">
+                      {r.error || ""}
+                    </pre>
+                  </td>
                 </tr>
               ))}
               {rows.length === 0 && (
                 <tr>
                   <td
-                    colSpan={5}
-                    className="px-4 py-8 text-center text-neutral-400"
+                    colSpan={6}
+                    className="px-4 py-10 text-center text-neutral-400"
                   >
-                    ログはありません
+                    ログがありません
                   </td>
                 </tr>
               )}
             </tbody>
           </table>
-        </div>
+        </section>
+
         {msg && (
-          <pre className="mt-2 text-xs text-red-600 whitespace-pre-wrap">
+          <pre className="mt-3 whitespace-pre-wrap text-xs text-red-600">
             {msg}
           </pre>
         )}
