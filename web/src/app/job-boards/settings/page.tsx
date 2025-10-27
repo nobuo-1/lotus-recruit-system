@@ -1,22 +1,25 @@
 // web/src/app/job-boards/settings/page.tsx
 "use client";
+
 import React, { useEffect, useState } from "react";
 import AppHeader from "@/components/AppHeader";
 import Link from "next/link";
+import Toggle from "@/components/Toggle";
 
 type Rule = {
   id: string;
-  name: string;
+  name: string | null;
   email: string | null;
   sites: string[] | null;
   age_bands: string[] | null;
   employment_types: string[] | null;
   salary_bands: string[] | null;
-  enabled: boolean | null;
+  enabled: boolean;
   schedule_type: string | null;
-  schedule_time: string | null; // HH:MM:SS+TZ
+  schedule_time: string | null;
   schedule_days: number[] | null;
   timezone: string | null;
+  created_at: string | null;
 };
 
 export default function NotifySettings() {
@@ -24,22 +27,37 @@ export default function NotifySettings() {
   const [msg, setMsg] = useState("");
 
   const load = async () => {
-    try {
-      const r = await fetch("/api/job-boards/notify-rules", {
-        cache: "no-store",
-      });
-      const j = await r.json();
-      if (!r.ok) throw new Error(j?.error || "fetch failed");
-      setRows(j.rows ?? []);
-      setMsg("");
-    } catch (e: any) {
-      setRows([]);
-      setMsg(String(e?.message || e));
-    }
+    const r = await fetch("/api/job-boards/notify-rules", {
+      cache: "no-store",
+    });
+    const j = await r.json();
+    if (!r.ok) return setMsg(j?.error || "fetch error");
+    setRows(j.rows || []);
   };
   useEffect(() => {
     load();
   }, []);
+
+  const toggle = async (id: string, next: boolean) => {
+    const r = await fetch("/api/job-boards/notify-rules", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, enabled: next }),
+    });
+    if (!r.ok) return alert("更新に失敗しました");
+    setRows((prev) =>
+      prev.map((x) => (x.id === id ? { ...x, enabled: next } : x))
+    );
+  };
+
+  const remove = async (id: string) => {
+    if (!confirm("削除しますか？")) return;
+    const r = await fetch(`/api/job-boards/notify-rules?id=${id}`, {
+      method: "DELETE",
+    });
+    if (!r.ok) return alert("削除に失敗しました");
+    setRows((prev) => prev.filter((x) => x.id !== id));
+  };
 
   return (
     <>
@@ -51,63 +69,77 @@ export default function NotifySettings() {
               通知設定
             </h1>
             <p className="text-sm text-neutral-500">
-              ルールの一覧／有効化・スケジュール確認
+              サイト/条件での定期通知ルール
             </p>
           </div>
-          <div className="flex gap-2">
-            <Link
-              href="/job-boards/destinations"
-              className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
-            >
-              送り先一覧
-            </Link>
-            <Link
-              href="/job-boards/settings/new"
-              className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
-            >
-              新規通知ルール
-            </Link>
-          </div>
+          <Link
+            href="/job-boards/settings/new"
+            className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
+          >
+            新規通知ルール
+          </Link>
         </div>
 
-        {/* ネスト無しのシンプルテーブル */}
         <div className="overflow-x-auto rounded-2xl border border-neutral-200">
-          <table className="min-w-[980px] w-full text-sm">
+          <table className="min-w-[900px] w-full text-sm">
             <thead className="bg-neutral-50 text-neutral-600">
               <tr>
                 <th className="px-3 py-3 text-left">名称</th>
-                <th className="px-3 py-3 text-left">送り先</th>
+                <th className="px-3 py-3 text-left">宛先</th>
                 <th className="px-3 py-3 text-left">サイト</th>
-                <th className="px-3 py-3 text-left">年齢/形態/年収</th>
                 <th className="px-3 py-3 text-left">スケジュール</th>
                 <th className="px-3 py-3 text-left">有効</th>
+                <th className="px-3 py-3 text-left">操作</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((r) => (
                 <tr key={r.id} className="border-t border-neutral-200">
-                  <td className="px-3 py-3">{r.name}</td>
+                  <td className="px-3 py-3">{r.name || "-"}</td>
                   <td className="px-3 py-3">{r.email || "-"}</td>
                   <td className="px-3 py-3">
-                    {(r.sites || []).join(", ") || "すべて"}
+                    {(r.sites || []).join(", ") || "-"}
                   </td>
                   <td className="px-3 py-3">
-                    {(r.age_bands || []).join("/") || "すべて"} /
-                    {(r.employment_types || []).join("/") || "すべて"} /
-                    {(r.salary_bands || []).join("/") || "すべて"}
+                    {r.schedule_type === "weekly"
+                      ? `毎週 ${
+                          (r.schedule_days || [])
+                            .map((d) => "日月火水木金土"[d])
+                            .join("・") || "-"
+                        } ${r.schedule_time || ""}`
+                      : r.schedule_type === "daily"
+                      ? `毎日 ${r.schedule_time || ""}`
+                      : "-"}
                   </td>
                   <td className="px-3 py-3">
-                    {r.schedule_type || "-"} {r.schedule_time || ""}{" "}
-                    {(r.schedule_days || []).join(",")}
+                    <Toggle
+                      checked={!!r.enabled}
+                      onChange={(n) => toggle(r.id, n)}
+                    />
                   </td>
-                  <td className="px-3 py-3">{r.enabled ? "ON" : "OFF"}</td>
+                  <td className="px-3 py-3">
+                    <div className="flex items-center gap-2">
+                      <Link
+                        href={`/job-boards/settings/new?id=${r.id}`}
+                        className="rounded-lg border border-neutral-200 px-2 py-1 text-xs hover:bg-neutral-50"
+                      >
+                        編集
+                      </Link>
+                      <button
+                        onClick={() => remove(r.id)}
+                        className="rounded-lg border border-neutral-200 px-2 py-1 text-xs hover:bg-neutral-50"
+                      >
+                        削除
+                      </button>
+                    </div>
+                  </td>
                 </tr>
               ))}
               {rows.length === 0 && (
                 <tr>
                   <td
-                    colSpan={6}
                     className="px-4 py-8 text-center text-neutral-400"
+                    colSpan={6}
                   >
                     通知ルールはありません
                   </td>

@@ -17,188 +17,180 @@ export default function JobCategoryModal({
   onApplyAction,
   onCloseAction,
 }: Props) {
-  const [L, setL] = useState<string[]>(large ?? []);
-  const [S, setS] = useState<string[]>(small ?? []);
+  const [L, setL] = useState<string[]>(large);
+  const [S, setS] = useState<string[]>(small);
   const [activeL, setActiveL] = useState<string>(large[0] || JOB_LARGE[0]);
 
+  // 表示対象の大分類（未選択なら全表示）
+  const visibleLarge = useMemo(() => (L.length ? L : JOB_LARGE), [L]);
+
   useEffect(() => {
-    if (!JOB_LARGE.includes(activeL)) setActiveL(JOB_LARGE[0]);
-  }, [activeL]);
+    if (!visibleLarge.includes(activeL)) setActiveL(visibleLarge[0]);
+  }, [visibleLarge]); // eslint-disable-line
 
-  const toggleLarge = (lg: string) => {
-    const next = L.includes(lg) ? L.filter((x) => x !== lg) : [...L, lg];
-    setL(next);
-    if (!next.includes(lg)) {
-      const rest = new Set(S);
-      (JOB_CATEGORIES[lg] || []).forEach((sm) => rest.delete(sm));
-      setS(Array.from(rest));
-    }
+  const toggleLarge = (v: string) =>
+    setL((prev) =>
+      prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v]
+    );
+
+  const toggleSmall = (v: string, parent: string) => {
+    setS((prev) =>
+      prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v]
+    );
+    // 小分類を選んだら親も選択状態に
+    setL((prev) => (prev.includes(parent) ? prev : [...prev, parent]));
   };
 
-  const toggleSmall = (lg: string, sm: string) => {
-    const has = S.includes(sm);
-    setS(has ? S.filter((x) => x !== sm) : [...S, sm]);
-    if (!L.includes(lg)) setL([...L, lg]);
+  const selectAllLarge = () => {
+    setL([...JOB_LARGE]);
+    // 大分類全選択 → 小分類も全選択
+    const allSm = new Set<string>();
+    JOB_LARGE.forEach((lg) =>
+      (JOB_CATEGORIES[lg] || []).forEach((sm) => allSm.add(sm))
+    );
+    setS(Array.from(allSm));
   };
 
-  const allSmallSelectedForActive = useMemo<boolean>(() => {
-    const targets = JOB_CATEGORIES[activeL] || [];
-    if (targets.length === 0) return false;
-    return targets.every((x) => S.includes(x));
-  }, [activeL, S]);
-
-  const setAllSmallForActive = (checked: boolean) => {
-    const targets = JOB_CATEGORIES[activeL] || [];
-    if (targets.length === 0) return;
-    if (checked) {
-      const union = new Set([...S, ...targets]);
-      setS(Array.from(union));
-      if (!L.includes(activeL)) setL([...L, activeL]);
-    } else {
-      setS(S.filter((x) => !targets.includes(x)));
-    }
+  const clearAll = () => {
+    setL([]);
+    setS([]);
   };
 
-  const setAllLarge = (checked: boolean) => {
-    if (checked) {
-      setL([...JOB_LARGE]);
-      const union = new Set<string>();
-      JOB_LARGE.forEach((lg) =>
-        (JOB_CATEGORIES[lg] || []).forEach((sm) => union.add(sm))
-      );
-      setS(Array.from(union));
-    } else {
-      setL([]);
-      setS([]);
-    }
-  };
-
-  const SmallChip: React.FC<{
-    active: boolean;
-    label: string;
-    onClick: () => void;
-  }> = ({ active, label, onClick }) => (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`px-2 py-1 text-xs rounded-full border mr-2 mb-2 ${
-        active
-          ? "bg-indigo-50 border-indigo-400 text-indigo-700"
-          : "border-neutral-300 text-neutral-700 hover:bg-neutral-50"
-      }`}
-    >
-      {label}
-    </button>
-  );
+  // 右ペインに見出しグループで出す
+  const rightGroups = visibleLarge;
 
   return (
-    // 画面サイズで見切れないように：外側を scroll 可、内側を最大 90vh に固定
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-black/40">
-      <div className="min-h-full flex items-center justify-center p-4">
-        <div className="w-[980px] max-w-[96vw] max-h-[90vh] rounded-2xl bg-white shadow-xl flex flex-col">
-          {/* ヘッダ */}
-          <div className="flex items-center justify-between px-4 py-3 border-b">
-            <div className="font-semibold">職種選択</div>
-            <button
-              onClick={onCloseAction}
-              className="rounded-lg px-2 py-1 border hover:bg-neutral-50 text-sm"
-            >
-              閉じる
-            </button>
-          </div>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="w-[980px] max-w-[96vw] rounded-2xl bg-white shadow-xl border border-neutral-200">
+        {/* ヘッダ */}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200">
+          <div className="font-semibold">職種選択</div>
+          <button
+            onClick={onCloseAction}
+            className="rounded-lg px-2 py-1 border border-neutral-200 hover:bg-neutral-50 text-sm"
+          >
+            閉じる
+          </button>
+        </div>
 
-          {/* 本体：内部のみスクロール */}
-          <div className="p-4 grid grid-cols-12 gap-4 overflow-y-auto">
-            {/* 左：大分類（選択中の行をやや濃いグレーに） */}
-            <div className="col-span-12 md:col-span-4">
-              <div className="flex items-center justify-between mb-2">
-                <label className="text-sm">
-                  <input
-                    type="checkbox"
-                    className="mr-2"
-                    checked={L.length === JOB_LARGE.length}
-                    onChange={(e) => setAllLarge(e.target.checked)}
-                  />
-                  大分類 すべて選択
-                </label>
-              </div>
-              <div className="rounded-xl border divide-y">
-                {JOB_LARGE.map((lg) => {
-                  const checked = L.includes(lg);
-                  const isActive = activeL === lg;
-                  return (
-                    <div
-                      key={lg}
-                      onClick={() => setActiveL(lg)}
-                      className={`flex items-center justify-between px-3 py-2 cursor-pointer ${
-                        isActive ? "bg-neutral-200" : ""
-                      }`}
-                    >
-                      <div className="text-sm font-medium">{lg}</div>
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={() => toggleLarge(lg)}
-                        onClick={(e) => e.stopPropagation()}
-                      />
+        {/* 本体：固定高 → 内部スクロール */}
+        <div className="p-4 grid grid-cols-12 gap-4" style={{ height: "70vh" }}>
+          {/* 左：大分類 */}
+          <div className="col-span-4 flex flex-col overflow-hidden">
+            <div className="mb-2 flex items-center justify-between">
+              <label className="text-sm">
+                <input
+                  type="checkbox"
+                  className="mr-2 align-middle"
+                  checked={L.length === JOB_LARGE.length}
+                  onChange={(e) =>
+                    e.target.checked ? selectAllLarge() : clearAll()
+                  }
+                />
+                大分類 すべて選択 / 解除
+              </label>
+            </div>
+
+            {/* 独立スクロール */}
+            <div className="rounded-xl border border-neutral-200 divide-y overflow-auto flex-1">
+              {JOB_LARGE.map((lg) => {
+                const checked = L.includes(lg);
+                const isActive = activeL === lg;
+                return (
+                  <div
+                    key={lg}
+                    onClick={() => setActiveL(lg)}
+                    className={`flex items-center justify-between px-3 py-2 cursor-pointer ${
+                      isActive ? "bg-neutral-100" : "bg-white"
+                    }`}
+                    style={{
+                      // 一番上/下で枠が欠けて見えないように角をわずかに丸める
+                      borderTopLeftRadius:
+                        lg === JOB_LARGE[0] ? "10px" : undefined,
+                      borderTopRightRadius:
+                        lg === JOB_LARGE[0] ? "10px" : undefined,
+                      borderBottomLeftRadius:
+                        lg === JOB_LARGE[JOB_LARGE.length - 1]
+                          ? "10px"
+                          : undefined,
+                      borderBottomRightRadius:
+                        lg === JOB_LARGE[JOB_LARGE.length - 1]
+                          ? "10px"
+                          : undefined,
+                    }}
+                  >
+                    <div className="text-sm font-medium text-neutral-800">
+                      {lg}
                     </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* 右：アクティブ大分類の小分類だけを表示（チップ選択式） */}
-            <div className="col-span-12 md:col-span-8">
-              <div className="flex items-center justify-between mb-2">
-                <div className="text-sm font-semibold text-neutral-800">
-                  小分類（{activeL}）
-                </div>
-                <label className="text-sm">
-                  <input
-                    type="checkbox"
-                    className="mr-2"
-                    checked={!!activeL && allSmallSelectedForActive}
-                    onChange={(e) => setAllSmallForActive(e.target.checked)}
-                  />
-                  表示中の小分類をすべて選択/解除
-                </label>
-              </div>
-              <div className="rounded-xl border p-3 max-h-[60vh] overflow-auto">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  {(JOB_CATEGORIES[activeL] || []).map((sm) => (
-                    <SmallChip
-                      key={`${activeL}-${sm}`}
-                      active={S.includes(sm)}
-                      label={sm}
-                      onClick={() => toggleSmall(activeL, sm)}
+                    <input
+                      type="checkbox"
+                      checked={!!checked}
+                      onChange={() => toggleLarge(lg)}
+                      onClick={(e) => e.stopPropagation()}
                     />
-                  ))}
-                </div>
-              </div>
-              <div className="mt-2 text-xs text-neutral-500">
-                ※ 小分類を選択すると、その配下の大分類も自動的に選択されます。
-              </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
 
-          {/* フッタ */}
-          <div className="flex items-center justify-end gap-2 px-4 py-3 border-t">
-            <button
-              onClick={() => {
-                setL([]);
-                setS([]);
-              }}
-              className="rounded-lg px-3 py-1 border text-sm"
-            >
-              クリア
-            </button>
-            <button
-              onClick={() => onApplyAction(L, S)}
-              className="rounded-lg px-3 py-1 border text-sm hover:bg-neutral-50"
-            >
-              適用して閉じる
-            </button>
+          {/* 右：小分類 */}
+          <div className="col-span-8 flex flex-col overflow-hidden">
+            <div className="mb-2 text-sm font-semibold text-neutral-800">
+              小分類
+            </div>
+
+            {/* 独立スクロール */}
+            <div className="rounded-xl border border-neutral-200 p-3 overflow-auto flex-1">
+              {rightGroups.map((grp) => (
+                <div key={grp} className="mb-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-sm font-semibold text-indigo-700">
+                      {grp}
+                    </div>
+                    <div className="text-xs text-neutral-500">
+                      （{(JOB_CATEGORIES[grp] || []).length}件）
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {(JOB_CATEGORIES[grp] || []).map((sm) => (
+                      <label
+                        key={`${grp}-${sm}`}
+                        className="inline-flex items-center gap-2"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={S.includes(sm)}
+                          onChange={() => toggleSmall(sm, grp)}
+                        />
+                        <span className="text-sm">{sm}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-2 text-xs text-neutral-500">
+              ※ 小分類を選ぶと親の大分類も自動的に選択されます。
+            </div>
           </div>
+        </div>
+
+        {/* フッタ */}
+        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-neutral-200">
+          <button
+            onClick={clearAll}
+            className="rounded-lg px-3 py-1 border border-neutral-200 text-sm hover:bg-neutral-50"
+          >
+            解除
+          </button>
+          <button
+            onClick={() => onApplyAction(L, S)}
+            className="rounded-lg px-3 py-1 border border-neutral-200 text-sm hover:bg-neutral-50"
+          >
+            適用して閉じる
+          </button>
         </div>
       </div>
     </div>
