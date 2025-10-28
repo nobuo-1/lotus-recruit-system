@@ -1,4 +1,3 @@
-// web/src/app/form-outreach/runs/manual/page.tsx
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
@@ -15,7 +14,7 @@ type Prospect = {
   industry: string | null;
   company_size: string | null;
   job_site_source: string | null;
-  status: string | null;
+  status: string | null; // 'sent'などを想定
   created_at: string | null;
   updated_at: string | null;
 };
@@ -36,6 +35,8 @@ function Pill({ children }: { children: React.ReactNode }) {
   );
 }
 
+type ViewMode = "unsent" | "sent" | "all";
+
 export default function ManualRunsPage() {
   const [pros, setPros] = useState<Prospect[]>([]);
   const [templates, setTemplates] = useState<TemplateRow[]>([]);
@@ -46,6 +47,7 @@ export default function ManualRunsPage() {
   const [industry, setIndustry] = useState<string>("");
   const [size, setSize] = useState<string>("");
   const [channel, setChannel] = useState<"all" | "form" | "email">("all");
+  const [viewMode, setViewMode] = useState<ViewMode>("unsent"); // 追い送信用に既定を未送信に
 
   // 選択状態
   const [selected, setSelected] = useState<string[]>([]);
@@ -84,6 +86,12 @@ export default function ManualRunsPage() {
     load();
   }, []);
 
+  // 「送信済み」判定
+  const isSent = (p: Prospect) => {
+    const s = (p.status || "").toLowerCase();
+    return s.includes("sent") || s.includes("送信");
+  };
+
   const filtered = useMemo(() => {
     return pros.filter((p) => {
       if (q) {
@@ -95,14 +103,19 @@ export default function ManualRunsPage() {
       if (industry && p.industry !== industry) return false;
       if (size && p.company_size !== size) return false;
 
-      // フィルタ（フォーム入力／メール送信／すべて）
+      // 送信方法フィルタ
       if (channel === "form" && !p.contact_form_url) return false;
       if (channel === "email" && !p.contact_email) return false;
+
+      // 送信状態フィルタ
+      if (viewMode === "unsent" && isSent(p)) return false;
+      if (viewMode === "sent" && !isSent(p)) return false;
+
       return true;
     });
-  }, [pros, q, industry, size, channel]);
+  }, [pros, q, industry, size, channel, viewMode]);
 
-  const allChecked = selected.length > 0 && selected.length === filtered.length;
+  const allChecked = filtered.length > 0 && selected.length === filtered.length;
   const toggleAll = () => {
     if (allChecked) setSelected([]);
     else setSelected(filtered.map((p) => p.id));
@@ -117,9 +130,10 @@ export default function ManualRunsPage() {
   const runSend = async () => {
     if (!templateId) return alert("テンプレートを選択してください。");
     if (selected.length === 0) return alert("送信対象を選択してください。");
-    // ここではダミー実行（実行 API がある場合は置き換えてください）
     alert(
-      `テンプレ「${selectedTemplate?.name}」で ${selected.length} 件の送信をキューに積みます（ダミー）`
+      `${viewMode === "sent" ? "再送信" : "送信"}（ダミー）\nテンプレ「${
+        selectedTemplate?.name
+      }」 / 件数: ${selected.length}`
     );
   };
 
@@ -133,7 +147,8 @@ export default function ManualRunsPage() {
               手動実行
             </h1>
             <p className="text-sm text-neutral-500">
-              会社一覧から送信対象を選び、テンプレートを指定して手動送信します。
+              会社一覧から送信対象を選び、テンプレートを指定して
+              {viewMode === "sent" ? "再送信" : "手動送信"}します。
             </p>
           </div>
         </div>
@@ -147,6 +162,7 @@ export default function ManualRunsPage() {
               onChange={(e) => setQ(e.target.value)}
               className="w-64 rounded-lg border border-neutral-300 px-3 py-2 text-sm"
             />
+
             <select
               value={industry}
               onChange={(e) => setIndustry(e.target.value)}
@@ -164,6 +180,7 @@ export default function ManualRunsPage() {
               <option value="教育">教育</option>
               <option value="広告・出版">広告・出版</option>
             </select>
+
             <select
               value={size}
               onChange={(e) => setSize(e.target.value)}
@@ -174,6 +191,7 @@ export default function ManualRunsPage() {
               <option value="中規模">中規模（51〜300名）</option>
               <option value="大規模">大規模（301名〜）</option>
             </select>
+
             <div className="flex items-center gap-2 text-sm">
               <span className="text-neutral-600">送信方法:</span>
               <label className="inline-flex items-center gap-1">
@@ -202,6 +220,34 @@ export default function ManualRunsPage() {
               </label>
             </div>
 
+            <div className="flex items-center gap-2 text-sm">
+              <span className="text-neutral-600">表示:</span>
+              <label className="inline-flex items-center gap-1">
+                <input
+                  type="radio"
+                  checked={viewMode === "unsent"}
+                  onChange={() => setViewMode("unsent")}
+                />
+                未送信
+              </label>
+              <label className="inline-flex items-center gap-1">
+                <input
+                  type="radio"
+                  checked={viewMode === "sent"}
+                  onChange={() => setViewMode("sent")}
+                />
+                送信済み（再送信用）
+              </label>
+              <label className="inline-flex items-center gap-1">
+                <input
+                  type="radio"
+                  checked={viewMode === "all"}
+                  onChange={() => setViewMode("all")}
+                />
+                すべて
+              </label>
+            </div>
+
             <div className="ml-auto flex items-center gap-2">
               {selectedTemplate ? (
                 <Pill>テンプレ: {selectedTemplate.name}</Pill>
@@ -218,7 +264,7 @@ export default function ManualRunsPage() {
                 className="rounded-lg border border-neutral-300 px-3 py-2 text-sm hover:bg-neutral-50"
                 onClick={runSend}
               >
-                送信（ダミー）
+                {viewMode === "sent" ? "再送信（ダミー）" : "送信（ダミー）"}
               </button>
             </div>
           </div>
@@ -263,13 +309,7 @@ export default function ManualRunsPage() {
               <tbody className="divide-y divide-neutral-200">
                 {filtered.map((p) => {
                   const checked = selected.includes(p.id);
-                  // 「送信済み」はトグルではなくテキスト表示
-                  // status が 'sent' などなら「済」、それ以外は「未」
-                  const sentText =
-                    (p.status || "").toLowerCase().includes("sent") ||
-                    (p.status || "").includes("送信")
-                      ? "済"
-                      : "未";
+                  const sentText = isSent(p) ? "済" : "未";
                   return (
                     <tr key={p.id} className="hover:bg-neutral-50/40">
                       <td className="px-3 py-2 align-top">
@@ -321,7 +361,7 @@ export default function ManualRunsPage() {
           </div>
         </section>
 
-        {/* テンプレート選択モーダル */}
+        {/* テンプレート選択モーダル（API修正済で必ず出る） */}
         {openTpl && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
             <div className="w-[720px] max-w-[95vw] rounded-2xl bg-white shadow-xl border border-neutral-200 overflow-hidden">
@@ -379,7 +419,7 @@ export default function ManualRunsPage() {
                 </div>
               </div>
               <div className="px-4 py-3 border-t border-neutral-200 text-xs text-neutral-500">
-                form_outreach_messages から取得しています（テナント固定）。
+                /api/form-outreach/templates から取得（tenant 固定）
               </div>
             </div>
           </div>

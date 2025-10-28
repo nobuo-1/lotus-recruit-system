@@ -47,7 +47,8 @@ export default function TemplatesPage() {
             メッセージテンプレート
           </h1>
           <p className="text-sm text-neutral-500">
-            form_outreach_messages テーブルの内容を表示します。
+            form_outreach_messages（channel='template'
+            優先、無ければ全件）を表示します。
           </p>
         </div>
 

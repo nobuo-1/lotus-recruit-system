@@ -1,75 +1,69 @@
 // web/src/app/api/form-outreach/templates/route.ts
+import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 
 export const runtime = "edge";
 
-const SB_URL =
-  process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
-const SB_KEY =
-  process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-  "";
-const DEFAULT_TENANT_ID = "175b1a9d-3f85-482d-9323-68a44d214424";
+// テナント固定（本番チェック用）
+const TENANT_ID_FALLBACK = "175b1a9d-3f85-482d-9323-68a44d214424";
+const REST_URL = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/rest/v1`;
+const ANON = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+const SERVICE = process.env.SUPABASE_SERVICE_ROLE_KEY; // あれば優先（RLS回避）
 
-function sbHeaders() {
+function authHeaders() {
+  const token = SERVICE || ANON;
   return {
-    apikey: SB_KEY,
-    Authorization: `Bearer ${SB_KEY}`,
+    apikey: ANON,
+    Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
-    Prefer: "return=representation",
   };
 }
 
-// GET: prospect_id IS NULL をテンプレートとみなして取得
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
-    const q =
-      "form_outreach_messages?select=id,name,subject,body_text,body_html,created_at&prospect_id=is.null&order=created_at.desc";
-    const res = await fetch(`${SB_URL}/rest/v1/${q}`, {
-      headers: sbHeaders(),
+    const tenant = req.headers.get("x-tenant-id")?.trim() || TENANT_ID_FALLBACK;
+
+    // テンプレ用途：channel='template' を優先して取得、なければ全件も拾えるように OR 条件を許容
+    // まず template を取得、0件なら全件 fallback
+    const base = `${REST_URL}/form_outreach_messages`;
+    const select = "id,name,subject,channel,created_at";
+    const urlTemplateOnly =
+      `${base}?select=${select}&tenant_id=eq.${tenant}` +
+      `&channel=eq.template&order=created_at.desc&limit=500`;
+
+    let r = await fetch(urlTemplateOnly, {
+      headers: authHeaders(),
       cache: "no-store",
     });
-    if (!res.ok) throw new Error(await res.text());
-    const rows = await res.json();
+    if (!r.ok) {
+      const t = await r.text().catch(() => "");
+      return NextResponse.json(
+        { error: `db error ${r.status}: ${t}` },
+        { status: 500 }
+      );
+    }
+    let rows = (await r.json()) as any[];
+
+    if (!rows || rows.length === 0) {
+      // Fallback: 全件（過去に channel='email' などでテンプレを持っているケースを救う）
+      const urlAll =
+        `${base}?select=${select}&tenant_id=eq.${tenant}` +
+        `&order=created_at.desc&limit=500`;
+      const r2 = await fetch(urlAll, {
+        headers: authHeaders(),
+        cache: "no-store",
+      });
+      if (!r2.ok) {
+        const t = await r2.text().catch(() => "");
+        return NextResponse.json(
+          { error: `db error ${r2.status}: ${t}` },
+          { status: 500 }
+        );
+      }
+      rows = (await r2.json()) as any[];
+    }
+
     return NextResponse.json({ rows });
-  } catch (e: any) {
-    return NextResponse.json(
-      { error: String(e?.message || e) },
-      { status: 500 }
-    );
-  }
-}
-
-// POST: 新規テンプレート（tenant_id 自動）
-export async function POST(req: Request) {
-  try {
-    const body = await req.json();
-    const tenant_id =
-      body.tenant_id ?? req.headers.get("x-tenant-id") ?? DEFAULT_TENANT_ID;
-
-    const payload = [
-      {
-        name: body.name,
-        subject: body.subject,
-        body_text: body.body_text,
-        body_html: body.body_html,
-        channel: "template",
-        step: 0,
-        tenant_id,
-        prospect_id: null, // テンプレート識別
-        status: null,
-        error: null,
-      },
-    ];
-
-    const res = await fetch(`${SB_URL}/rest/v1/form_outreach_messages`, {
-      method: "POST",
-      headers: sbHeaders(),
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) throw new Error(await res.text());
-    const [row] = await res.json();
-    return NextResponse.json({ row });
   } catch (e: any) {
     return NextResponse.json(
       { error: String(e?.message || e) },
