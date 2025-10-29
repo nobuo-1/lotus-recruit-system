@@ -2,428 +2,289 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import AppHeader from "@/components/AppHeader";
+import Link from "next/link";
 
 const TENANT_ID = "175b1a9d-3f85-482d-9323-68a44d214424";
 
 type Prospect = {
   id: string;
-  company_name: string;
+  tenant_id: string | null;
+  company_name: string | null;
   website: string | null;
   contact_form_url: string | null;
   contact_email: string | null;
   industry: string | null;
   company_size: string | null;
   job_site_source: string | null;
-  status: string | null; // 'sent'などを想定
+  status: string | null; // 送信済み等の状態が入る想定
   created_at: string | null;
-  updated_at: string | null;
 };
 
 type TemplateRow = {
   id: string;
-  name: string;
+  name: string | null;
   subject: string | null;
   channel: string | null;
   created_at: string | null;
 };
 
-function Pill({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="inline-flex items-center rounded-full border border-neutral-300 px-2 py-0.5 text-xs text-neutral-700">
-      {children}
-    </span>
-  );
-}
-
-type ViewMode = "unsent" | "sent" | "all";
-
-export default function ManualRunsPage() {
-  const [pros, setPros] = useState<Prospect[]>([]);
+export default function ManualRuns() {
+  const [prospects, setProspects] = useState<Prospect[]>([]);
   const [templates, setTemplates] = useState<TemplateRow[]>([]);
   const [msg, setMsg] = useState("");
 
   // フィルタ
   const [q, setQ] = useState("");
-  const [industry, setIndustry] = useState<string>("");
-  const [size, setSize] = useState<string>("");
-  const [channel, setChannel] = useState<"all" | "form" | "email">("all");
-  const [viewMode, setViewMode] = useState<ViewMode>("unsent"); // 追い送信用に既定を未送信に
-
-  // 選択状態
-  const [selected, setSelected] = useState<string[]>([]);
-  const [templateId, setTemplateId] = useState<string>("");
-
-  // テンプレ選択モーダル
-  const [openTpl, setOpenTpl] = useState(false);
-
-  const load = async () => {
-    setMsg("");
-    try {
-      const [r1, r2] = await Promise.all([
-        fetch("/api/form-outreach/prospects", {
-          headers: { "x-tenant-id": TENANT_ID },
-          cache: "no-store",
-        }),
-        fetch("/api/form-outreach/templates", {
-          headers: { "x-tenant-id": TENANT_ID },
-          cache: "no-store",
-        }),
-      ]);
-      const j1 = await r1.json();
-      const j2 = await r2.json();
-      if (!r1.ok) throw new Error(j1?.error || "prospects fetch failed");
-      if (!r2.ok) throw new Error(j2?.error || "templates fetch failed");
-      setPros(j1.rows ?? []);
-      setTemplates(j2.rows ?? []);
-    } catch (e: any) {
-      setMsg(String(e?.message || e));
-      setPros([]);
-      setTemplates([]);
-    }
-  };
+  const [industry, setIndustry] = useState("");
+  const [size, setSize] = useState("");
+  const [channel, setChannel] = useState<"all" | "form" | "email">("all"); // 「すべて」を追加
+  const [showSent, setShowSent] = useState(false); // false=未送信のみ、true=送信済みのみ
 
   useEffect(() => {
+    const load = async () => {
+      setMsg("");
+      try {
+        const [rp, rt] = await Promise.all([
+          fetch("/api/form-outreach/prospects", {
+            headers: { "x-tenant-id": TENANT_ID },
+            cache: "no-store",
+          }),
+          fetch("/api/form-outreach/templates", {
+            headers: { "x-tenant-id": TENANT_ID },
+            cache: "no-store",
+          }),
+        ]);
+        const jp = await rp.json();
+        const jt = await rt.json();
+        if (!rp.ok) throw new Error(jp?.error || "prospects fetch failed");
+        if (!rt.ok) throw new Error(jt?.error || "templates fetch failed");
+        setProspects(jp.rows ?? []);
+        setTemplates(jt.rows ?? []);
+      } catch (e: any) {
+        setMsg(String(e?.message || e));
+        setProspects([]);
+        setTemplates([]);
+      }
+    };
     load();
   }, []);
 
-  // 「送信済み」判定
-  const isSent = (p: Prospect) => {
-    const s = (p.status || "").toLowerCase();
-    return s.includes("sent") || s.includes("送信");
-  };
-
+  // 表と連動したフィルタ
   const filtered = useMemo(() => {
-    return pros.filter((p) => {
-      if (q) {
-        const s = `${p.company_name} ${p.website ?? ""} ${
-          p.contact_email ?? ""
-        } ${p.industry ?? ""}`.toLowerCase();
-        if (!s.includes(q.toLowerCase())) return false;
+    const qq = q.trim().toLowerCase();
+    return prospects.filter((p) => {
+      if (qq) {
+        const hit =
+          (p.company_name || "").toLowerCase().includes(qq) ||
+          (p.website || "").toLowerCase().includes(qq) ||
+          (p.contact_email || "").toLowerCase().includes(qq);
+        if (!hit) return false;
       }
-      if (industry && p.industry !== industry) return false;
-      if (size && p.company_size !== size) return false;
+      if (industry && (p.industry || "") !== industry) return false;
+      if (size && (p.company_size || "") !== size) return false;
 
-      // 送信方法フィルタ
-      if (channel === "form" && !p.contact_form_url) return false;
-      if (channel === "email" && !p.contact_email) return false;
+      // チャンネル条件
+      if (channel === "form" && !(p.contact_form_url || "").trim())
+        return false;
+      if (channel === "email" && !(p.contact_email || "").trim()) return false;
 
-      // 送信状態フィルタ
-      if (viewMode === "unsent" && isSent(p)) return false;
-      if (viewMode === "sent" && !isSent(p)) return false;
-
+      // 送信済み/未送信の切り替え（status に "sent" 等が入る想定）
+      if (!showSent) {
+        // 未送信のみ表示
+        if ((p.status || "").toLowerCase().includes("sent")) return false;
+      } else {
+        // 送信済みのみ表示
+        if (!(p.status || "").toLowerCase().includes("sent")) return false;
+      }
       return true;
     });
-  }, [pros, q, industry, size, channel, viewMode]);
+  }, [prospects, q, industry, size, channel, showSent]);
 
-  const allChecked = filtered.length > 0 && selected.length === filtered.length;
+  // 一括選択（必要であれば拡張）
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const allChecked =
+    filtered.length > 0 && filtered.every((p) => selected.has(p.id));
   const toggleAll = () => {
-    if (allChecked) setSelected([]);
-    else setSelected(filtered.map((p) => p.id));
+    if (allChecked) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(filtered.map((p) => p.id)));
+    }
   };
-  const toggleOne = (id: string) =>
-    setSelected((s) =>
-      s.includes(id) ? s.filter((x) => x !== id) : [...s, id]
-    );
-
-  const selectedTemplate = templates.find((t) => t.id === templateId) || null;
-
-  const runSend = async () => {
-    if (!templateId) return alert("テンプレートを選択してください。");
-    if (selected.length === 0) return alert("送信対象を選択してください。");
-    alert(
-      `${viewMode === "sent" ? "再送信" : "送信"}（ダミー）\nテンプレ「${
-        selectedTemplate?.name
-      }」 / 件数: ${selected.length}`
-    );
+  const toggleOne = (id: string) => {
+    setSelected((prev) => {
+      const n = new Set(prev);
+      n.has(id) ? n.delete(id) : n.add(id);
+      return n;
+    });
   };
 
   return (
     <>
       <AppHeader showBack />
       <main className="mx-auto max-w-6xl p-6">
-        <div className="mb-4 flex items-end justify-between">
+        <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h1 className="text-2xl font-semibold text-neutral-900">
               手動実行
             </h1>
             <p className="text-sm text-neutral-500">
-              会社一覧から送信対象を選び、テンプレートを指定して
-              {viewMode === "sent" ? "再送信" : "手動送信"}します。
+              フィルタは表と完全連動。「すべて/フォーム/メール」切替に対応
             </p>
           </div>
+          <Link
+            href="/form-outreach/templates"
+            className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
+          >
+            テンプレート管理へ
+          </Link>
         </div>
 
-        {/* 操作パネル */}
-        <section className="rounded-2xl border border-neutral-200 p-4 mb-6">
-          <div className="flex flex-wrap items-center gap-3">
-            <input
-              placeholder="検索（社名・URL・メール）"
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              className="w-64 rounded-lg border border-neutral-300 px-3 py-2 text-sm"
-            />
-
-            <select
-              value={industry}
-              onChange={(e) => setIndustry(e.target.value)}
-              className="rounded-lg border border-neutral-300 px-3 py-2 text-sm"
-            >
-              <option value="">業種（すべて）</option>
-              <option value="IT・ソフトウェア">IT・ソフトウェア</option>
-              <option value="製造">製造</option>
-              <option value="小売">小売</option>
-              <option value="物流">物流</option>
-              <option value="金融">金融</option>
-              <option value="建設">建設</option>
-              <option value="不動産">不動産</option>
-              <option value="医療">医療</option>
-              <option value="教育">教育</option>
-              <option value="広告・出版">広告・出版</option>
-            </select>
-
-            <select
-              value={size}
-              onChange={(e) => setSize(e.target.value)}
-              className="rounded-lg border border-neutral-300 px-3 py-2 text-sm"
-            >
-              <option value="">規模（すべて）</option>
-              <option value="小規模">小規模（〜50名）</option>
-              <option value="中規模">中規模（51〜300名）</option>
-              <option value="大規模">大規模（301名〜）</option>
-            </select>
-
-            <div className="flex items-center gap-2 text-sm">
-              <span className="text-neutral-600">送信方法:</span>
-              <label className="inline-flex items-center gap-1">
-                <input
-                  type="radio"
-                  checked={channel === "all"}
-                  onChange={() => setChannel("all")}
-                />
-                すべて
-              </label>
-              <label className="inline-flex items-center gap-1">
-                <input
-                  type="radio"
-                  checked={channel === "form"}
-                  onChange={() => setChannel("form")}
-                />
-                フォーム入力
-              </label>
-              <label className="inline-flex items-center gap-1">
-                <input
-                  type="radio"
-                  checked={channel === "email"}
-                  onChange={() => setChannel("email")}
-                />
-                メール送信
-              </label>
+        {/* フィルタ（薄い枠線） */}
+        <section className="rounded-2xl border border-neutral-200 p-4 mb-4">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
+            <div className="md:col-span-2">
+              <div className="mb-1 text-xs text-neutral-600">キーワード</div>
+              <input
+                className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
+                placeholder="社名・URL・メール"
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+              />
             </div>
-
-            <div className="flex items-center gap-2 text-sm">
-              <span className="text-neutral-600">表示:</span>
-              <label className="inline-flex items-center gap-1">
-                <input
-                  type="radio"
-                  checked={viewMode === "unsent"}
-                  onChange={() => setViewMode("unsent")}
-                />
-                未送信
-              </label>
-              <label className="inline-flex items-center gap-1">
-                <input
-                  type="radio"
-                  checked={viewMode === "sent"}
-                  onChange={() => setViewMode("sent")}
-                />
-                送信済み（再送信用）
-              </label>
-              <label className="inline-flex items-center gap-1">
-                <input
-                  type="radio"
-                  checked={viewMode === "all"}
-                  onChange={() => setViewMode("all")}
-                />
-                すべて
-              </label>
+            <div>
+              <div className="mb-1 text-xs text-neutral-600">業種</div>
+              <input
+                className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
+                placeholder="例: IT・小売 など（完全一致）"
+                value={industry}
+                onChange={(e) => setIndustry(e.target.value)}
+              />
             </div>
-
-            <div className="ml-auto flex items-center gap-2">
-              {selectedTemplate ? (
-                <Pill>テンプレ: {selectedTemplate.name}</Pill>
-              ) : (
-                <Pill>テンプレ未選択</Pill>
-              )}
-              <button
-                className="rounded-lg border border-neutral-300 px-3 py-2 text-sm hover:bg-neutral-50"
-                onClick={() => setOpenTpl(true)}
+            <div>
+              <div className="mb-1 text-xs text-neutral-600">企業規模</div>
+              <input
+                className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
+                placeholder="例: 小規模/中規模/大規模"
+                value={size}
+                onChange={(e) => setSize(e.target.value)}
+              />
+            </div>
+            <div>
+              <div className="mb-1 text-xs text-neutral-600">チャンネル</div>
+              <select
+                className="w-full rounded-lg border border-neutral-300 px-2 py-2 text-sm"
+                value={channel}
+                onChange={(e) => setChannel(e.target.value as any)}
               >
-                テンプレートを選択
-              </button>
-              <button
-                className="rounded-lg border border-neutral-300 px-3 py-2 text-sm hover:bg-neutral-50"
-                onClick={runSend}
+                <option value="all">すべて</option>
+                <option value="form">フォーム入力</option>
+                <option value="email">メール送信</option>
+              </select>
+            </div>
+            <div>
+              <div className="mb-1 text-xs text-neutral-600">表示対象</div>
+              <select
+                className="w-full rounded-lg border border-neutral-300 px-2 py-2 text-sm"
+                value={showSent ? "sent" : "unsent"}
+                onChange={(e) => setShowSent(e.target.value === "sent")}
               >
-                {viewMode === "sent" ? "再送信（ダミー）" : "送信（ダミー）"}
-              </button>
+                <option value="unsent">未送信のみ</option>
+                <option value="sent">送信済みのみ</option>
+              </select>
             </div>
           </div>
         </section>
 
-        {/* 一覧 */}
-        <section className="rounded-2xl border border-neutral-200 overflow-hidden">
-          <div className="flex items-center justify-between px-3 py-2 bg-neutral-50 border-b border-neutral-200">
-            <div className="text-sm text-neutral-700">
-              ヒット件数: {filtered.length}
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                className="rounded-lg border border-neutral-300 px-3 py-1.5 text-sm hover:bg-neutral-50"
-                onClick={toggleAll}
+        {/* テンプレ選択（モーダルにしない軽量版の例。既存モーダルがある場合はそちらのデータ供給に合わせてください） */}
+        <section className="rounded-2xl border border-neutral-200 p-4 mb-3">
+          <div className="mb-2 text-sm text-neutral-700">テンプレート選択</div>
+          <div className="flex flex-wrap gap-2">
+            {templates.map((t) => (
+              <span
+                key={t.id}
+                className="inline-flex items-center rounded-full border border-neutral-300 px-3 py-1 text-xs text-neutral-700"
+                title={`${t.name || "-"} / ${t.channel || "-"}`}
               >
-                {allChecked ? "全解除" : "全選択"}
-              </button>
-            </div>
+                {t.name || "-"}
+              </span>
+            ))}
+            {templates.length === 0 && (
+              <div className="text-xs text-neutral-500">
+                テンプレートがありません
+              </div>
+            )}
           </div>
+        </section>
 
-          <div className="overflow-x-auto">
-            <table className="min-w-[980px] w-full text-sm">
-              <thead className="bg-neutral-50 text-neutral-600">
-                <tr className="border-b border-neutral-200">
-                  <th className="px-3 py-3 text-left w-10">
-                    <input
-                      type="checkbox"
-                      checked={allChecked}
-                      onChange={toggleAll}
-                    />
-                  </th>
-                  <th className="px-3 py-3 text-left">会社名</th>
-                  <th className="px-3 py-3 text-left">業種</th>
-                  <th className="px-3 py-3 text-left">規模</th>
-                  <th className="px-3 py-3 text-left">サイト由来</th>
-                  <th className="px-3 py-3 text-left">フォーム</th>
-                  <th className="px-3 py-3 text-left">メール</th>
-                  <th className="px-3 py-3 text-left">送信済み</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-neutral-200">
-                {filtered.map((p) => {
-                  const checked = selected.includes(p.id);
-                  const sentText = isSent(p) ? "済" : "未";
-                  return (
-                    <tr key={p.id} className="hover:bg-neutral-50/40">
-                      <td className="px-3 py-2 align-top">
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => toggleOne(p.id)}
-                        />
-                      </td>
-                      <td className="px-3 py-2 align-top">
-                        <div className="font-medium text-neutral-900">
-                          {p.company_name}
-                        </div>
-                        <div className="text-xs text-neutral-500">
-                          {p.website || "-"}
-                        </div>
-                      </td>
-                      <td className="px-3 py-2 align-top">
-                        {p.industry || "-"}
-                      </td>
-                      <td className="px-3 py-2 align-top">
-                        {p.company_size || "-"}
-                      </td>
-                      <td className="px-3 py-2 align-top">
-                        {p.job_site_source || "-"}
-                      </td>
-                      <td className="px-3 py-2 align-top">
-                        {p.contact_form_url ? "あり" : "なし"}
-                      </td>
-                      <td className="px-3 py-2 align-top">
-                        {p.contact_email || "なし"}
-                      </td>
-                      <td className="px-3 py-2 align-top">{sentText}</td>
-                    </tr>
-                  );
-                })}
-                {filtered.length === 0 && (
-                  <tr>
-                    <td
-                      colSpan={8}
-                      className="px-4 py-10 text-center text-neutral-400"
-                    >
-                      対象がありません
+        {/* 表（送信済み列は文字表示） */}
+        <section className="rounded-2xl border border-neutral-200 overflow-hidden">
+          <table className="min-w-[900px] w-full text-sm">
+            <thead className="bg-neutral-50 text-neutral-600">
+              <tr>
+                <th className="px-3 py-3">
+                  <input
+                    type="checkbox"
+                    checked={allChecked}
+                    onChange={toggleAll}
+                  />
+                </th>
+                <th className="px-3 py-3 text-left">社名</th>
+                <th className="px-3 py-3 text-left">サイトURL</th>
+                <th className="px-3 py-3 text-left">メール</th>
+                <th className="px-3 py-3 text-left">業種</th>
+                <th className="px-3 py-3 text-left">企業規模</th>
+                <th className="px-3 py-3 text-left">送信状態</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-neutral-200">
+              {filtered.map((p) => {
+                const sent = (p.status || "").toLowerCase().includes("sent");
+                return (
+                  <tr key={p.id}>
+                    <td className="px-3 py-2">
+                      <input
+                        type="checkbox"
+                        checked={selected.has(p.id)}
+                        onChange={() => toggleOne(p.id)}
+                      />
+                    </td>
+                    <td className="px-3 py-2">{p.company_name || "-"}</td>
+                    <td className="px-3 py-2">
+                      {p.website ? (
+                        <a
+                          href={p.website}
+                          target="_blank"
+                          className="text-indigo-700 hover:underline break-all"
+                        >
+                          {p.website}
+                        </a>
+                      ) : (
+                        "-"
+                      )}
+                    </td>
+                    <td className="px-3 py-2">{p.contact_email || "-"}</td>
+                    <td className="px-3 py-2">{p.industry || "-"}</td>
+                    <td className="px-3 py-2">{p.company_size || "-"}</td>
+                    <td className="px-3 py-2">
+                      {sent ? "送信済み" : "未送信"}
                     </td>
                   </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
+                );
+              })}
+              {filtered.length === 0 && (
+                <tr>
+                  <td
+                    colSpan={7}
+                    className="px-4 py-10 text-center text-neutral-400"
+                  >
+                    対象がありません
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </section>
-
-        {/* テンプレート選択モーダル（API修正済で必ず出る） */}
-        {openTpl && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-            <div className="w-[720px] max-w-[95vw] rounded-2xl bg-white shadow-xl border border-neutral-200 overflow-hidden">
-              <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200">
-                <div className="font-semibold">テンプレート選択</div>
-                <button
-                  onClick={() => setOpenTpl(false)}
-                  className="rounded-lg px-2 py-1 border border-neutral-300 hover:bg-neutral-50 text-sm"
-                >
-                  閉じる
-                </button>
-              </div>
-              <div className="p-3">
-                <div className="rounded-xl border border-neutral-200 overflow-hidden">
-                  <table className="w-full text-sm">
-                    <thead className="bg-neutral-50 text-neutral-600">
-                      <tr>
-                        <th className="px-3 py-2 text-left">名称</th>
-                        <th className="px-3 py-2 text-left">件名</th>
-                        <th className="px-3 py-2 text-left">チャンネル</th>
-                        <th className="px-3 py-2 text-left w-24"></th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-neutral-200">
-                      {templates.map((t) => (
-                        <tr key={t.id}>
-                          <td className="px-3 py-2">{t.name}</td>
-                          <td className="px-3 py-2">{t.subject || "-"}</td>
-                          <td className="px-3 py-2">{t.channel || "-"}</td>
-                          <td className="px-3 py-2">
-                            <button
-                              className="rounded-lg border border-neutral-300 px-2 py-1 text-xs hover:bg-neutral-50"
-                              onClick={() => {
-                                setTemplateId(t.id);
-                                setOpenTpl(false);
-                              }}
-                            >
-                              選択
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                      {templates.length === 0 && (
-                        <tr>
-                          <td
-                            colSpan={4}
-                            className="px-4 py-8 text-center text-neutral-400"
-                          >
-                            テンプレートがありません
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-              <div className="px-4 py-3 border-t border-neutral-200 text-xs text-neutral-500">
-                /api/form-outreach/templates から取得（tenant 固定）
-              </div>
-            </div>
-          </div>
-        )}
 
         {msg && (
           <pre className="mt-3 whitespace-pre-wrap text-xs text-red-600">

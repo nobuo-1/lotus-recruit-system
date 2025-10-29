@@ -10,26 +10,39 @@ type Company = {
   tenant_id: string | null;
   source_site: string | null;
   company_name: string | null;
-  site_company_url: string | null;
-  official_website_url: string | null;
+  site_company_url: string | null; // ← このURLを「サイトURL」としてそのまま表示
+  official_website_url: string | null; // ← 使わない（列削除）
   contact_form_url: string | null;
   contact_email: string | null;
-  is_blocked: boolean | null;
-  last_checked_at: string | null;
-  created_at: string | null;
+  is_blocked: boolean | null; // ← 列から削除
+  last_checked_at: string | null; // ← 列から削除
+  created_at: string | null; // ← 取得日時として扱う
 };
+
+function ellipsizeUrl(u: string, max = 54) {
+  if (!u) return "";
+  if (u.length <= max) return u;
+  const head = Math.max(0, Math.floor((max - 1) * 0.65));
+  const tail = Math.max(0, max - 1 - head);
+  return `${u.slice(0, head)}…${u.slice(-tail)}`;
+}
 
 export default function CompaniesPage() {
   const [rows, setRows] = useState<Company[]>([]);
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(false);
 
-  // フィルタ（表とは独立）
+  // 独立フィルタ
   const [showFilters, setShowFilters] = useState(true);
   const [q, setQ] = useState("");
   const [site, setSite] = useState<string>("");
   const [emailFilter, setEmailFilter] = useState<"" | "has" | "none">("");
-  const [blocked, setBlocked] = useState<"" | "true" | "false">("");
+  const [dateFrom, setDateFrom] = useState<string>("");
+  const [dateTo, setDateTo] = useState<string>("");
+  const [sortKey, setSortKey] = useState<"created_at" | "company_name">(
+    "created_at"
+  );
+  const [sortDir, setSortDir] = useState<"desc" | "asc">("desc");
 
   const load = async () => {
     setMsg("");
@@ -53,11 +66,14 @@ export default function CompaniesPage() {
 
   const filtered = useMemo(() => {
     const qq = q.trim().toLowerCase();
-    return rows.filter((r) => {
+    const df = dateFrom ? new Date(dateFrom) : null;
+    const dt = dateTo ? new Date(dateTo) : null;
+
+    let arr = rows.filter((r) => {
       if (qq) {
         const hit =
           (r.company_name || "").toLowerCase().includes(qq) ||
-          (r.official_website_url || "").toLowerCase().includes(qq) ||
+          (r.site_company_url || "").toLowerCase().includes(qq) ||
           (r.contact_email || "").toLowerCase().includes(qq);
         if (!hit) return false;
       }
@@ -66,11 +82,38 @@ export default function CompaniesPage() {
         return false;
       if (emailFilter === "none" && (r.contact_email || "").trim())
         return false;
-      if (blocked === "true" && !r.is_blocked) return false;
-      if (blocked === "false" && r.is_blocked) return false;
+
+      // 取得日時フィルタ（created_at を採用）
+      if (df || dt) {
+        const created = r.created_at ? new Date(r.created_at) : null;
+        if (!created) return false;
+        if (df && created < df) return false;
+        if (dt) {
+          // 終了日の終端を含める
+          const end = new Date(dt);
+          end.setHours(23, 59, 59, 999);
+          if (created > end) return false;
+        }
+      }
       return true;
     });
-  }, [rows, q, site, emailFilter, blocked]);
+
+    arr.sort((a, b) => {
+      let av: string | number = "";
+      let bv: string | number = "";
+      if (sortKey === "created_at") {
+        av = a.created_at || "";
+        bv = b.created_at || "";
+      } else {
+        av = (a.company_name || "").toLowerCase();
+        bv = (b.company_name || "").toLowerCase();
+      }
+      if (av < bv) return sortDir === "asc" ? -1 : 1;
+      if (av > bv) return sortDir === "asc" ? 1 : -1;
+      return 0;
+    });
+    return arr;
+  }, [rows, q, site, emailFilter, dateFrom, dateTo, sortKey, sortDir]);
 
   const fetchNow = async () => {
     if (loading) return;
@@ -84,11 +127,7 @@ export default function CompaniesPage() {
       const j = await r.json();
       if (!r.ok) throw new Error(j?.error || "fetch-now failed");
       await load();
-      setMsg(
-        `取り込み完了: 追加 ${j.inserted ?? 0} 件 / スキップ ${
-          j.skipped ?? 0
-        } 件`
-      );
+      setMsg(`取り込み: 追加 ${j.inserted ?? 0} / スキップ ${j.skipped ?? 0}`);
     } catch (e: any) {
       setMsg(String(e?.message || e));
     } finally {
@@ -106,7 +145,7 @@ export default function CompaniesPage() {
               企業一覧
             </h1>
             <p className="text-sm text-neutral-500">
-              form_outreach_companies を表示。フィルタは表とは独立して配置。
+              表の列を整理（ブロック/最終チェック削除、サイトURLはリンク文字そのまま表示、取得日時列を追加）
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -127,11 +166,11 @@ export default function CompaniesPage() {
           </div>
         </div>
 
-        {/* 独立フィルタパネル */}
+        {/* 独立フィルタ */}
         {showFilters && (
           <section className="rounded-2xl border border-neutral-200 p-4 mb-4">
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
-              <div>
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-6">
+              <div className="md:col-span-2">
                 <div className="mb-1 text-xs text-neutral-600">キーワード</div>
                 <input
                   className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
@@ -169,34 +208,62 @@ export default function CompaniesPage() {
                 </select>
               </div>
               <div>
-                <div className="mb-1 text-xs text-neutral-600">ブロック</div>
-                <select
+                <div className="mb-1 text-xs text-neutral-600">
+                  取得日時(From)
+                </div>
+                <input
+                  type="date"
                   className="w-full rounded-lg border border-neutral-300 px-2 py-2 text-sm"
-                  value={blocked}
-                  onChange={(e) => setBlocked(e.target.value as any)}
-                >
-                  <option value="">（指定なし）</option>
-                  <option value="false">ブロック解除のみ</option>
-                  <option value="true">ブロックのみ</option>
-                </select>
+                  value={dateFrom}
+                  onChange={(e) => setDateFrom(e.target.value)}
+                />
+              </div>
+              <div>
+                <div className="mb-1 text-xs text-neutral-600">
+                  取得日時(To)
+                </div>
+                <input
+                  type="date"
+                  className="w-full rounded-lg border border-neutral-300 px-2 py-2 text-sm"
+                  value={dateTo}
+                  onChange={(e) => setDateTo(e.target.value)}
+                />
+              </div>
+              <div className="md:col-span-2">
+                <div className="mb-1 text-xs text-neutral-600">並び替え</div>
+                <div className="flex gap-2">
+                  <select
+                    className="rounded-lg border border-neutral-300 px-2 py-2 text-sm"
+                    value={sortKey}
+                    onChange={(e) => setSortKey(e.target.value as any)}
+                  >
+                    <option value="created_at">取得日時</option>
+                    <option value="company_name">社名</option>
+                  </select>
+                  <select
+                    className="rounded-lg border border-neutral-300 px-2 py-2 text-sm"
+                    value={sortDir}
+                    onChange={(e) => setSortDir(e.target.value as any)}
+                  >
+                    <option value="desc">降順</option>
+                    <option value="asc">昇順</option>
+                  </select>
+                </div>
               </div>
             </div>
           </section>
         )}
 
-        {/* 表本体（薄い枠線で統一） */}
+        {/* 表本体（ブロック/最終チェック列は削除） */}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden">
           <table className="min-w-[900px] w-full text-sm">
             <thead className="bg-neutral-50 text-neutral-600">
               <tr>
                 <th className="px-3 py-3 text-left">社名</th>
                 <th className="px-3 py-3 text-left">サイトURL</th>
-                <th className="px-3 py-3 text-left">公式サイト</th>
-                <th className="px-3 py-3 text-left">フォーム</th>
                 <th className="px-3 py-3 text-left">メール</th>
                 <th className="px-3 py-3 text-left">取得元</th>
-                <th className="px-3 py-3 text-left">ブロック</th>
-                <th className="px-3 py-3 text-left">最終チェック</th>
+                <th className="px-3 py-3 text-left">取得日時</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-neutral-200">
@@ -208,35 +275,9 @@ export default function CompaniesPage() {
                       <a
                         href={c.site_company_url}
                         target="_blank"
-                        className="text-indigo-700 hover:underline"
+                        className="text-indigo-700 hover:underline break-all"
                       >
-                        開く
-                      </a>
-                    ) : (
-                      "-"
-                    )}
-                  </td>
-                  <td className="px-3 py-2">
-                    {c.official_website_url ? (
-                      <a
-                        href={c.official_website_url}
-                        target="_blank"
-                        className="text-indigo-700 hover:underline"
-                      >
-                        開く
-                      </a>
-                    ) : (
-                      "-"
-                    )}
-                  </td>
-                  <td className="px-3 py-2">
-                    {c.contact_form_url ? (
-                      <a
-                        href={c.contact_form_url}
-                        target="_blank"
-                        className="text-indigo-700 hover:underline"
-                      >
-                        開く
+                        {ellipsizeUrl(c.site_company_url)}
                       </a>
                     ) : (
                       "-"
@@ -245,11 +286,8 @@ export default function CompaniesPage() {
                   <td className="px-3 py-2">{c.contact_email || "-"}</td>
                   <td className="px-3 py-2">{c.source_site || "-"}</td>
                   <td className="px-3 py-2">
-                    {c.is_blocked ? "ブロック中" : "-"}
-                  </td>
-                  <td className="px-3 py-2">
-                    {c.last_checked_at
-                      ? c.last_checked_at.replace("T", " ").replace("Z", "")
+                    {c.created_at
+                      ? c.created_at.replace("T", " ").replace("Z", "")
                       : "-"}
                   </td>
                 </tr>
@@ -257,7 +295,7 @@ export default function CompaniesPage() {
               {filtered.length === 0 && (
                 <tr>
                   <td
-                    colSpan={8}
+                    colSpan={5}
                     className="px-4 py-10 text-center text-neutral-400"
                   >
                     対象がありません

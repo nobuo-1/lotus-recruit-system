@@ -5,10 +5,9 @@ import Link from "next/link";
 import AppHeader from "@/components/AppHeader";
 import dynamic from "next/dynamic";
 
-// ——— 設定 ———
 const TENANT_ID = "175b1a9d-3f85-482d-9323-68a44d214424";
 
-// Recharts は CSR のみ
+// Recharts (CSRのみ)
 const ResponsiveContainer = dynamic(
   async () => (await import("recharts")).ResponsiveContainer,
   { ssr: false }
@@ -56,73 +55,72 @@ export default function FormOutreachTop() {
   const [runs, setRuns] = useState<RunRow[]>([]);
   const [msg, setMsg] = useState("");
 
-  const load = async () => {
-    setMsg("");
-    try {
-      const [rTpl, rCom, rRun] = await Promise.all([
-        fetch("/api/form-outreach/templates", {
-          headers: { "x-tenant-id": TENANT_ID },
-          cache: "no-store",
-        }),
-        fetch("/api/form-outreach/companies", {
-          headers: { "x-tenant-id": TENANT_ID },
-          cache: "no-store",
-        }),
-        fetch("/api/form-outreach/runs", {
-          headers: { "x-tenant-id": TENANT_ID },
-          cache: "no-store",
-        }),
-      ]);
-      const jTpl = await rTpl.json();
-      const jCom = await rCom.json();
-      const jRun = await rRun.json();
-
-      if (!rTpl.ok) throw new Error(jTpl?.error || "templates fetch failed");
-      if (!rCom.ok) throw new Error(jCom?.error || "companies fetch failed");
-      if (!rRun.ok) throw new Error(jRun?.error || "runs fetch failed");
-
-      const rowsRun: RunRow[] = jRun.rows ?? [];
-
-      // 30日内の実行数・成功率
-      const now = new Date();
-      const thirtyAgo = new Date(now.getTime() - 30 * 24 * 3600 * 1000);
-      const last30 = rowsRun.filter((r) => {
-        const d = r.started_at ? new Date(r.started_at) : null;
-        return d && d >= thirtyAgo;
-      });
-      const success = last30.filter((r) =>
-        (r.status || "").toLowerCase().includes("success")
-      ).length;
-
-      setKpi({
-        templates: (jTpl.rows ?? []).length,
-        companies: (jCom.rows ?? []).length,
-        runs30d: last30.length,
-        successRate: last30.length
-          ? Math.round((success / last30.length) * 100)
-          : 0,
-      });
-
-      setRuns(rowsRun);
-    } catch (e: any) {
-      setMsg(String(e?.message || e));
-      setRuns([]);
-    }
-  };
-
   useEffect(() => {
+    const load = async () => {
+      setMsg("");
+      try {
+        const [rTpl, rCom, rRun] = await Promise.all([
+          fetch("/api/form-outreach/templates", {
+            headers: { "x-tenant-id": TENANT_ID },
+            cache: "no-store",
+          }),
+          fetch("/api/form-outreach/companies", {
+            headers: { "x-tenant-id": TENANT_ID },
+            cache: "no-store",
+          }),
+          fetch("/api/form-outreach/runs", {
+            headers: { "x-tenant-id": TENANT_ID },
+            cache: "no-store",
+          }),
+        ]);
+        const jTpl = await rTpl.json();
+        const jCom = await rCom.json();
+        const jRun = await rRun.json();
+
+        if (!rTpl.ok) throw new Error(jTpl?.error || "templates fetch failed");
+        if (!rCom.ok) throw new Error(jCom?.error || "companies fetch failed");
+        if (!rRun.ok) throw new Error(jRun?.error || "runs fetch failed");
+
+        const rowsRun: RunRow[] = jRun.rows ?? [];
+
+        // 30日内の実行数/成功率
+        const now = new Date();
+        const thirtyAgo = new Date(now.getTime() - 30 * 24 * 3600 * 1000);
+        const last30 = rowsRun.filter((r) => {
+          const d = r.started_at ? new Date(r.started_at) : null;
+          return d && d >= thirtyAgo;
+        });
+        const success = last30.filter((r) =>
+          (r.status || "").toLowerCase().includes("success")
+        ).length;
+
+        setKpi({
+          templates: (jTpl.rows ?? []).length,
+          companies: (jCom.rows ?? []).length,
+          runs30d: last30.length,
+          successRate: last30.length
+            ? Math.round((success / last30.length) * 100)
+            : 0,
+        });
+
+        setRuns(rowsRun);
+      } catch (e: any) {
+        setMsg(String(e?.message || e));
+        setRuns([]);
+      }
+    };
     load();
   }, []);
 
-  // 直近8週間の週次集計（週初=月曜）
+  // 直近8週間の週初ごと集計
   const series = useMemo(() => {
     const map: Record<string, number> = {};
     function mondayKey(d: Date) {
       const copy = new Date(
         Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())
       );
-      const wd = copy.getUTCDay(); // 0=Sun...6=Sat
-      const diff = (wd + 6) % 7; // 月曜を0に
+      const wd = copy.getUTCDay(); // 0..6
+      const diff = (wd + 6) % 7; // 月曜=0
       copy.setUTCDate(copy.getUTCDate() - diff);
       return copy.toISOString().slice(0, 10);
     }
@@ -131,7 +129,6 @@ export default function FormOutreachTop() {
       const key = mondayKey(new Date(r.started_at));
       map[key] = (map[key] ?? 0) + 1;
     }
-    // 直近8週のキー
     const out: { week: string; count: number }[] = [];
     const today = new Date();
     for (let i = 7; i >= 0; i--) {
@@ -170,57 +167,43 @@ export default function FormOutreachTop() {
     <>
       <AppHeader showBack />
       <main className="mx-auto max-w-6xl p-6">
-        {/* タイトル＆ナビ（送信元設定・自動実行 を復活） */}
-        <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <h1 className="text-2xl font-semibold text-neutral-900">
-              フォーム営業
-            </h1>
-            <p className="text-sm text-neutral-500">
-              企業管理・テンプレ・実行・ログ・送信元設定・自動実行
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Link
-              href="/form-outreach/companies"
-              className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
-            >
-              企業一覧
-            </Link>
-            <Link
-              href="/form-outreach/runs/manual"
-              className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
-            >
-              手動実行
-            </Link>
-            <Link
-              href="/form-outreach/messages"
-              className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
-            >
-              送信ログ
-            </Link>
-            <Link
-              href="/form-outreach/templates"
-              className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
-            >
-              メッセージテンプレート
-            </Link>
-            <Link
-              href="/form-outreach/senders"
-              className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
-            >
-              送信元設定
-            </Link>
-            <Link
-              href="/form-outreach/automation"
-              className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
-            >
-              自動実行設定
-            </Link>
-          </div>
+        <div className="mb-3">
+          <h1 className="text-2xl font-semibold text-neutral-900">
+            フォーム営業
+          </h1>
+          <p className="text-sm text-neutral-500">
+            企業管理・テンプレ・実行・ログ・送信元設定・自動実行
+          </p>
         </div>
 
-        {/* KPI（グラフとは分離・元の構成に戻す） */}
+        {/* リスト型ナビ（以前の“リスト感”に戻す） */}
+        <nav className="mb-6 rounded-2xl border border-neutral-200 divide-y divide-neutral-200 overflow-hidden">
+          {[
+            { href: "/form-outreach/companies", label: "企業一覧" },
+            { href: "/form-outreach/runs/manual", label: "手動実行" },
+            {
+              href: "/form-outreach/schedules",
+              label: "送信ログ / スケジュール",
+            },
+            {
+              href: "/form-outreach/templates",
+              label: "メッセージテンプレート",
+            },
+            { href: "/form-outreach/senders", label: "送信元設定" },
+            { href: "/form-outreach/automation", label: "自動実行設定" },
+          ].map((i) => (
+            <Link
+              key={i.href}
+              href={i.href}
+              className="flex items-center justify-between px-4 py-3 hover:bg-neutral-50"
+            >
+              <span className="text-sm text-neutral-800">{i.label}</span>
+              <span className="text-neutral-400">›</span>
+            </Link>
+          ))}
+        </nav>
+
+        {/* KPI（入れ子にせず単独セクションのまま） */}
         <section className="rounded-2xl border border-neutral-200 p-4 mb-6">
           <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
             <KpiCard label="テンプレ数" value={kpi.templates} />
