@@ -31,6 +31,41 @@ type Summary = {
 type RangeKey = "7d" | "14d" | "1m" | "3m" | "6m" | "1y";
 type Mode = "total" | "form" | "email";
 
+// API応答をどの形でも受け取れるように正規化
+function normalizeSummary(raw: any): Summary | null {
+  if (!raw) return null;
+  const root = raw.metrics ?? raw.data ?? raw;
+
+  const n = (v: any, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
+  const arr = (v: any) => (Array.isArray(v) ? v : []);
+
+  const series = root.series ?? {};
+  const total = arr(series.total);
+  const form = arr(series.form);
+  const email = arr(series.email);
+
+  // date/count の最低限ガード
+  const fix = (xs: any[]): SeriesPoint[] =>
+    xs
+      .map((x) => ({
+        date: String(x?.date ?? x?.d ?? ""),
+        count: n(x?.count ?? x?.value ?? 0),
+      }))
+      .filter((x) => x.date);
+
+  return {
+    templates: n(root.templates),
+    companies: n(root.companies),
+    allTimeRuns: n(root.allTimeRuns),
+    successRate: n(root.successRate),
+    series: {
+      total: fix(total),
+      form: fix(form),
+      email: fix(email),
+    },
+  };
+}
+
 export default function FormOutreachLanding() {
   const [data, setData] = useState<Summary | null>(null);
   const [range, setRange] = useState<RangeKey>("14d");
@@ -43,8 +78,10 @@ export default function FormOutreachLanding() {
         const res = await fetch(`/api/form-outreach/summary?range=${range}`, {
           cache: "no-store",
         });
-        const j = await res.json();
-        setData(j?.metrics ?? null);
+        const j = await res.json().catch(() => null);
+        const normalized = normalizeSummary(j);
+        if (!normalized) throw new Error("summary is empty");
+        setData(normalized);
       } catch (e: any) {
         setMsg(String(e?.message || e));
         setData(null);
@@ -67,6 +104,7 @@ export default function FormOutreachLanding() {
   const fmtPct = (n: unknown) => {
     const x = Number(n);
     return Number.isFinite(x) ? x.toFixed(2) : "0.00";
+    // 小数点第2位まで
   };
 
   return (
@@ -79,11 +117,11 @@ export default function FormOutreachLanding() {
             フォーム営業
           </h1>
           <p className="mt-2 text-sm text-neutral-500">
-            企業リスト管理・テンプレ・送信（手動/自動）とKPIの確認
+            実行・リスト・設定の操作とKPI確認
           </p>
         </div>
 
-        {/* 機能メニュー（メール配信トップに寄せる） */}
+        {/* 機能メニュー（実行 / リスト / 設定） */}
         <header className="mb-3">
           <h2 className="text-2xl md:text-[24px] font-semibold text-neutral-900">
             機能メニュー
@@ -92,19 +130,12 @@ export default function FormOutreachLanding() {
 
         <div className="mb-6 rounded-2xl border border-neutral-200 p-5">
           <div className="grid grid-cols-1 gap-7 md:grid-cols-3">
+            {/* 実行 */}
             <section>
               <h3 className="mb-2 text-lg font-semibold tracking-tight text-neutral-900 sm:text-xl">
-                リスト / 実行
+                実行
               </h3>
               <ul className="mt-1.5 space-y-1.5">
-                <li>
-                  <Link
-                    href="/form-outreach/companies"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    企業一覧
-                  </Link>
-                </li>
                 <li>
                   <Link
                     href="/form-outreach/runs/manual"
@@ -124,33 +155,35 @@ export default function FormOutreachLanding() {
               </ul>
             </section>
 
+            {/* リスト */}
             <section>
               <h3 className="mb-2 text-lg font-semibold tracking-tight text-neutral-900 sm:text-xl">
-                テンプレ / 送信元
+                リスト
               </h3>
               <ul className="mt-1.5 space-y-1.5">
+                <li>
+                  <Link
+                    href="/form-outreach/companies"
+                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
+                  >
+                    企業リスト
+                  </Link>
+                </li>
                 <li>
                   <Link
                     href="/form-outreach/templates"
                     className="text-base text-neutral-800 underline-offset-2 hover:underline"
                   >
-                    メッセージテンプレート
-                  </Link>
-                </li>
-                <li>
-                  <Link
-                    href="/form-outreach/senders"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    送信元設定
+                    テンプレートリスト
                   </Link>
                 </li>
               </ul>
             </section>
 
+            {/* 設定 */}
             <section>
               <h3 className="mb-2 text-lg font-semibold tracking-tight text-neutral-900 sm:text-xl">
-                自動化
+                設定
               </h3>
               <ul className="mt-1.5 space-y-1.5">
                 <li>
@@ -159,6 +192,14 @@ export default function FormOutreachLanding() {
                     className="text-base text-neutral-800 underline-offset-2 hover:underline"
                   >
                     自動実行設定
+                  </Link>
+                </li>
+                <li>
+                  <Link
+                    href="/form-outreach/senders"
+                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
+                  >
+                    送信元設定
                   </Link>
                 </li>
               </ul>
@@ -194,6 +235,7 @@ export default function FormOutreachLanding() {
               直近{labelOf(range)}の実行数
             </div>
             <div className="flex flex-wrap gap-2">
+              {/* 期間 */}
               <div className="inline-flex items-center gap-1">
                 {(["7d", "14d", "1m", "3m", "6m", "1y"] as RangeKey[]).map(
                   (r) => (
@@ -211,6 +253,7 @@ export default function FormOutreachLanding() {
                   )
                 )}
               </div>
+              {/* 対象 */}
               <div className="inline-flex items-center gap-1">
                 {(["total", "form", "email"] as const).map((m) => (
                   <button
