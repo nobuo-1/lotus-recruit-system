@@ -1,3 +1,4 @@
+//web/src/app/form-outreach/schedules/page.tsx
 "use client";
 
 import React, { useEffect, useState } from "react";
@@ -8,7 +9,7 @@ const TENANT_ID = "175b1a9d-3f85-482d-9323-68a44d214424";
 
 type RunRow = {
   id: string;
-  flow: string | null;
+  flow: string | null; // "manual-send" / "auto-send" など想定
   status: string | null;
   error: string | null;
   started_at: string | null;
@@ -38,6 +39,13 @@ export default function SchedulesPage() {
     load();
   }, []);
 
+  const runType = (flow: string | null | undefined) => {
+    const f = (flow || "").toLowerCase();
+    if (f.includes("manual")) return "手動";
+    if (f.includes("auto") || f.includes("schedule")) return "自動";
+    return "-";
+  };
+
   return (
     <>
       <AppHeader showBack />
@@ -48,7 +56,7 @@ export default function SchedulesPage() {
               送信ログ / スケジュール
             </h1>
             <p className="text-sm text-neutral-500">
-              直近の実行履歴を一覧。定期実行の設定は「自動実行設定」から管理します。
+              実行履歴を一覧。定期実行の設定は「自動実行設定」から管理します。
             </p>
           </div>
           <div className="flex gap-2">
@@ -68,9 +76,10 @@ export default function SchedulesPage() {
         </div>
 
         <section className="rounded-2xl border border-neutral-200 overflow-hidden">
-          <table className="min-w-[900px] w-full text-sm">
+          <table className="min-w-[1000px] w-full text-sm">
             <thead className="bg-neutral-50 text-neutral-600">
               <tr>
+                <th className="px-3 py-3 text-left">実行種別</th>
                 <th className="px-3 py-3 text-left">フロー</th>
                 <th className="px-3 py-3 text-left">状態</th>
                 <th className="px-3 py-3 text-left">開始</th>
@@ -81,6 +90,7 @@ export default function SchedulesPage() {
             <tbody className="divide-y divide-neutral-200">
               {rows.map((r) => (
                 <tr key={r.id}>
+                  <td className="px-3 py-2">{runType(r.flow)}</td>
                   <td className="px-3 py-2">{r.flow || "-"}</td>
                   <td className="px-3 py-2">{r.status || "-"}</td>
                   <td className="px-3 py-2">
@@ -99,7 +109,7 @@ export default function SchedulesPage() {
               {rows.length === 0 && (
                 <tr>
                   <td
-                    colSpan={5}
+                    colSpan={6}
                     className="px-4 py-10 text-center text-neutral-400"
                   >
                     直近のログがありません
