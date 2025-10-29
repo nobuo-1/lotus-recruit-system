@@ -2,199 +2,244 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
-import AppHeader from "@/components/AppHeader";
-import KpiCard from "@/components/KpiCard";
 import Link from "next/link";
-import {
-  ResponsiveContainer,
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  Tooltip,
-  CartesianGrid,
-} from "recharts";
+import AppHeader from "@/components/AppHeader";
+import dynamic from "next/dynamic";
 
-type Summary = {
-  tplCount: number;
-  prospectCount: number;
-  sentThisMonth: number;
-  allSent: number;
+const TENANT_ID = "175b1a9d-3f85-482d-9323-68a44d214424";
+
+// Recharts（CSRでのみ読込）
+const ResponsiveContainer = dynamic(
+  async () => (await import("recharts")).ResponsiveContainer,
+  { ssr: false }
+);
+const LineChart = dynamic(async () => (await import("recharts")).LineChart, {
+  ssr: false,
+});
+const Line = dynamic(async () => (await import("recharts")).Line, {
+  ssr: false,
+});
+const XAxis = dynamic(async () => (await import("recharts")).XAxis, {
+  ssr: false,
+});
+const YAxis = dynamic(async () => (await import("recharts")).YAxis, {
+  ssr: false,
+});
+const Tooltip = dynamic(async () => (await import("recharts")).Tooltip, {
+  ssr: false,
+});
+const CartesianGrid = dynamic(
+  async () => (await import("recharts")).CartesianGrid,
+  { ssr: false }
+);
+
+type RunRow = {
+  id: string;
+  status: string | null;
+  started_at: string | null;
 };
-type SeriesPoint = { date: string; count: number };
+
+type Kpi = {
+  templates: number;
+  companies: number;
+  runs30d: number;
+  successRate: number;
+};
 
 export default function FormOutreachTop() {
-  const [kpi, setKpi] = useState<Summary | null>(null);
-  const [series, setSeries] = useState<SeriesPoint[]>([]);
+  const [kpi, setKpi] = useState<Kpi>({
+    templates: 0,
+    companies: 0,
+    runs30d: 0,
+    successRate: 0,
+  });
+  const [runs, setRuns] = useState<RunRow[]>([]);
   const [msg, setMsg] = useState("");
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await fetch("/api/form-outreach/summary", {
+  const load = async () => {
+    setMsg("");
+    try {
+      const [rTpl, rCom, rRun] = await Promise.all([
+        fetch("/api/form-outreach/templates", {
+          headers: { "x-tenant-id": TENANT_ID },
           cache: "no-store",
-        });
-        const j = await res.json();
-        if (!res.ok) throw new Error(j?.error || "fetch error");
-        setKpi(j);
-        setMsg("");
-      } catch (e: any) {
-        setMsg(String(e?.message || e));
-      }
-    })();
-  }, []);
+        }),
+        fetch("/api/form-outreach/companies", {
+          headers: { "x-tenant-id": TENANT_ID },
+          cache: "no-store",
+        }),
+        fetch("/api/form-outreach/runs", {
+          headers: { "x-tenant-id": TENANT_ID },
+          cache: "no-store",
+        }),
+      ]);
+      const jTpl = await rTpl.json();
+      const jCom = await rCom.json();
+      const jRun = await rRun.json();
+
+      if (!rTpl.ok) throw new Error(jTpl?.error || "templates fetch failed");
+      if (!rCom.ok) throw new Error(jCom?.error || "companies fetch failed");
+      if (!rRun.ok) throw new Error(jRun?.error || "runs fetch failed");
+
+      const rowsRun: RunRow[] = jRun.rows ?? [];
+
+      // 30日内の実行数・成功率
+      const now = new Date();
+      const thirtyAgo = new Date(now.getTime() - 30 * 24 * 3600 * 1000);
+      const last30 = rowsRun.filter((r) => {
+        const d = r.started_at ? new Date(r.started_at) : null;
+        return d && d >= thirtyAgo;
+      });
+      const success = last30.filter((r) =>
+        (r.status || "").toLowerCase().includes("success")
+      ).length;
+
+      setKpi({
+        templates: (jTpl.rows ?? []).length,
+        companies: (jCom.rows ?? []).length,
+        runs30d: last30.length,
+        successRate: last30.length
+          ? Math.round((success / last30.length) * 100)
+          : 0,
+      });
+
+      setRuns(rowsRun);
+    } catch (e: any) {
+      setMsg(String(e?.message || e));
+      setRuns([]);
+    }
+  };
 
   useEffect(() => {
-    (async () => {
-      try {
-        const res = await fetch("/api/form-outreach/series?range=30d", {
-          cache: "no-store",
-        });
-        const j = await res.json();
-        if (!res.ok) throw new Error(j?.error || "fetch error");
-        setSeries(j?.rows ?? []);
-      } catch (e) {}
-    })();
+    load();
   }, []);
 
-  const periodTotal = useMemo(
-    () => series.reduce((s, p) => s + (p.count || 0), 0),
-    [series]
+  // 直近8週間の週次集計（週初=月曜）
+  const series = useMemo(() => {
+    const map: Record<string, number> = {};
+    function mondayKey(d: Date) {
+      const copy = new Date(
+        Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())
+      );
+      const wd = copy.getUTCDay(); // 0=Sun...6=Sat
+      const diff = (wd + 6) % 7; // 月曜を0に
+      copy.setUTCDate(copy.getUTCDate() - diff);
+      return copy.toISOString().slice(0, 10);
+    }
+    for (const r of runs) {
+      if (!r.started_at) continue;
+      const key = mondayKey(new Date(r.started_at));
+      map[key] = (map[key] ?? 0) + 1;
+    }
+    // 直近8週のキーを作る
+    const out: { week: string; count: number }[] = [];
+    const today = new Date();
+    for (let i = 7; i >= 0; i--) {
+      const dt = new Date(
+        Date.UTC(
+          today.getUTCFullYear(),
+          today.getUTCMonth(),
+          today.getUTCDate()
+        )
+      );
+      dt.setUTCDate(dt.getUTCDate() - i * 7);
+      const k = (function monday(d: Date) {
+        const wd = d.getUTCDay();
+        const diff = (wd + 6) % 7;
+        const m = new Date(d);
+        m.setUTCDate(m.getUTCDate() - diff);
+        return m.toISOString().slice(0, 10);
+      })(dt);
+      out.push({ week: k, count: map[k] ?? 0 });
+    }
+    return out;
+  }, [runs]);
+
+  const KpiCard = ({
+    label,
+    value,
+  }: {
+    label: string;
+    value: string | number;
+  }) => (
+    <div className="rounded-xl border border-neutral-200 p-3">
+      <div className="text-xs text-neutral-500">{label}</div>
+      <div className="mt-1 text-xl font-semibold text-neutral-900">{value}</div>
+    </div>
   );
 
   return (
     <>
-      <AppHeader />
+      <AppHeader showBack />
       <main className="mx-auto max-w-6xl p-6">
-        <div className="mb-4">
-          <h1 className="text-[26px] md:text-[24px] font-extrabold tracking-tight text-indigo-900">
-            フォーム営業
-          </h1>
-          <p className="mt-2 text-sm text-neutral-500">
-            見込み企業の抽出・メッセージ送信とKPI
-          </p>
-        </div>
-
-        <div className="mb-6 rounded-2xl border border-neutral-200 p-5">
-          <div className="grid grid-cols-1 gap-7 md:grid-cols-3">
-            <section>
-              <div className="mb-2 text-lg font-semibold text-neutral-900">
-                運用
-              </div>
-              <ul className="space-y-1.5">
-                <li>
-                  <Link
-                    href="/form-outreach/runs/manual"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    手動実行
-                  </Link>
-                </li>
-                <li>
-                  <Link
-                    href="/form-outreach/messages"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    送信ログ
-                  </Link>
-                </li>
-                <li>
-                  <Link
-                    href="/form-outreach/templates"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    メッセージテンプレート
-                  </Link>
-                </li>
-                <li>
-                  <Link
-                    href="/form-outreach/companies"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    企業一覧
-                  </Link>
-                </li>
-              </ul>
-            </section>
-            <section>
-              <div className="mb-2 text-lg font-semibold text-neutral-900">
-                設定
-              </div>
-              <ul className="space-y-1.5">
-                <li>
-                  <Link
-                    href="/form-outreach/senders"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    送信元設定
-                  </Link>
-                </li>
-                <li>
-                  <Link
-                    href="/form-outreach/automation"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    自動実行設定
-                  </Link>
-                </li>
-              </ul>
-            </section>
+        {/* タイトル＆ナビ（送信ログリンクを修正） */}
+        <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold text-neutral-900">
+              フォーム営業
+            </h1>
+            <p className="text-sm text-neutral-500">
+              企業管理・テンプレ・実行・ログ
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Link
+              href="/form-outreach/companies"
+              className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
+            >
+              企業一覧
+            </Link>
+            <Link
+              href="/form-outreach/runs/manual"
+              className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
+            >
+              手動実行
+            </Link>
+            <Link
+              href="/form-outreach/messages" // ← 修正：送信ログへ
+              className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
+            >
+              送信ログ
+            </Link>
+            <Link
+              href="/form-outreach/templates"
+              className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
+            >
+              メッセージテンプレート
+            </Link>
           </div>
         </div>
 
-        <header className="mb-2">
-          <h2 className="text-2xl md:text-[24px] font-semibold text-neutral-900">
-            各KPI
-          </h2>
-        </header>
-        <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-          <KpiCard
-            label="テンプレ数"
-            value={kpi?.tplCount ?? "-"}
-            className="ring-1 ring-indigo-100 shadow-sm"
-          />
-          <KpiCard
-            label="見込み企業数"
-            value={kpi?.prospectCount ?? "-"}
-            className="ring-1 ring-sky-100 shadow-sm"
-          />
-          <KpiCard
-            label="当月送信数"
-            value={kpi?.sentThisMonth ?? "-"}
-            className="ring-1 ring-emerald-100 shadow-sm"
-          />
-          <KpiCard
-            label="累計送信数"
-            value={kpi?.allSent ?? "-"}
-            className="ring-1 ring-neutral-100 shadow-sm"
-          />
-        </div>
-
-        {/* 送信数折れ線（メール配信ページと同デザイン） */}
-        <div className="mt-6 rounded-2xl border border-neutral-200 p-4">
-          <div className="mb-2 text-base font-semibold text-neutral-800">
-            直近30日の送信数（合計：{periodTotal}）
+        {/* KPI */}
+        <section className="rounded-2xl border border-neutral-200 p-4 mb-6">
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+            <KpiCard label="テンプレ数" value={kpi.templates} />
+            <KpiCard label="企業数" value={kpi.companies} />
+            <KpiCard label="直近30日 実行" value={kpi.runs30d} />
+            <KpiCard label="成功率(30日)" value={`${kpi.successRate}%`} />
           </div>
-          <div className="h-56">
+
+          {/* 直近8週間の実行推移（復活） */}
+          <div className="mt-4 h-56">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={series}>
                 <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="date" tick={{ fontSize: 13 }} />
-                <YAxis allowDecimals={false} tick={{ fontSize: 13 }} />
+                <XAxis dataKey="week" tick={{ fontSize: 12 }} />
+                <YAxis allowDecimals={false} tick={{ fontSize: 12 }} />
                 <Tooltip />
                 <Line
                   type="monotone"
                   dataKey="count"
-                  dot={false}
                   strokeWidth={2}
+                  dot={false}
                 />
               </LineChart>
             </ResponsiveContainer>
           </div>
-        </div>
+        </section>
 
         {msg && (
-          <pre className="mt-3 whitespace-pre-wrap text-xs text-neutral-500">
+          <pre className="mt-2 whitespace-pre-wrap text-xs text-red-600">
             {msg}
           </pre>
         )}

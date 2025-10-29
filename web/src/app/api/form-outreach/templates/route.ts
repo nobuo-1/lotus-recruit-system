@@ -16,6 +16,7 @@ function authHeaders() {
     apikey: ANON,
     Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
+    Prefer: "return=representation",
   };
 }
 
@@ -23,8 +24,6 @@ export async function GET(req: NextRequest) {
   try {
     const tenant = req.headers.get("x-tenant-id")?.trim() || TENANT_ID_FALLBACK;
 
-    // テンプレ用途：channel='template' を優先して取得、なければ全件も拾えるように OR 条件を許容
-    // まず template を取得、0件なら全件 fallback
     const base = `${REST_URL}/form_outreach_messages`;
     const select = "id,name,subject,channel,created_at";
     const urlTemplateOnly =
@@ -45,7 +44,6 @@ export async function GET(req: NextRequest) {
     let rows = (await r.json()) as any[];
 
     if (!rows || rows.length === 0) {
-      // Fallback: 全件（過去に channel='email' などでテンプレを持っているケースを救う）
       const urlAll =
         `${base}?select=${select}&tenant_id=eq.${tenant}` +
         `&order=created_at.desc&limit=500`;
@@ -64,6 +62,50 @@ export async function GET(req: NextRequest) {
     }
 
     return NextResponse.json({ rows });
+  } catch (e: any) {
+    return NextResponse.json(
+      { error: String(e?.message || e) },
+      { status: 500 }
+    );
+  }
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    const tenant = req.headers.get("x-tenant-id")?.trim() || TENANT_ID_FALLBACK;
+    const body = await req.json().catch(() => ({}));
+    const { name, subject, body_text, body_html } = body;
+
+    if (!name) {
+      return NextResponse.json({ error: "name is required" }, { status: 400 });
+    }
+
+    const payload = {
+      tenant_id: tenant,
+      name,
+      subject: subject ?? null,
+      body_text: body_text ?? null,
+      body_html: body_html ?? null,
+      step: 0,
+      channel: "template", // テンプレ識別
+      status: "draft",
+    };
+
+    const url = `${REST_URL}/form_outreach_messages`;
+    const r = await fetch(url, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      const t = await r.text().catch(() => "");
+      return NextResponse.json(
+        { error: `insert error ${r.status}: ${t}` },
+        { status: 500 }
+      );
+    }
+    const rows = await r.json();
+    return NextResponse.json({ row: rows?.[0] ?? null });
   } catch (e: any) {
     return NextResponse.json(
       { error: String(e?.message || e) },
