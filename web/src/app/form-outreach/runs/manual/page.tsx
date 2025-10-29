@@ -1,4 +1,4 @@
-//web/src/app/form-outreach/runs/manual/page.tsx
+// web/src/app/form-outreach/runs/manual/page.tsx
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
@@ -18,7 +18,7 @@ type Prospect = {
   industry: string | null;
   company_size: string | null;
   job_site_source: string | null;
-  status: string | null; // "sent" 等が入る想定
+  status: string | null;
   created_at: string | null;
 };
 
@@ -26,13 +26,12 @@ type TemplateRow = {
   id: string;
   name: string | null;
   subject: string | null;
-  channel: string | null; // "email" | "form" | "both" など
+  channel: string | null;
   created_at: string | null;
 };
 
 export default function ManualRuns() {
   const router = useRouter();
-
   const [prospects, setProspects] = useState<Prospect[]>([]);
   const [templates, setTemplates] = useState<TemplateRow[]>([]);
   const [msg, setMsg] = useState("");
@@ -43,14 +42,13 @@ export default function ManualRuns() {
   const [size, setSize] = useState<string>("");
   const [channel, setChannel] = useState<"all" | "form" | "email" | "both">(
     "all"
-  ); // すべて/フォーム/メール/両方
-  const [showSent, setShowSent] = useState(false); // false=未送信のみ、true=送信済みのみ
+  );
+  const [showSent, setShowSent] = useState(false);
 
-  // テンプレ選択モーダル
+  // テンプレ選択
   const [showTplModal, setShowTplModal] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
 
-  // 実行状態
   const [executing, setExecuting] = useState(false);
 
   useEffect(() => {
@@ -82,7 +80,6 @@ export default function ManualRuns() {
     load();
   }, []);
 
-  // 業種・規模の選択肢（重複除去して昇順）
   const industryOptions = useMemo(() => {
     const s = new Set(
       prospects
@@ -101,7 +98,6 @@ export default function ManualRuns() {
     return Array.from(s).sort((a, b) => a.localeCompare(b));
   }, [prospects]);
 
-  // チャンネル可否の判定
   const channelOf = (p: Prospect): "form" | "email" | "both" | "-" => {
     const hasForm = !!(p.contact_form_url || "").trim();
     const hasMail = !!(p.contact_email || "").trim();
@@ -111,7 +107,6 @@ export default function ManualRuns() {
     return "-";
   };
 
-  // 表と連動したフィルタ
   const filtered = useMemo(() => {
     const qq = q.trim().toLowerCase();
     return prospects.filter((p) => {
@@ -125,7 +120,6 @@ export default function ManualRuns() {
       if (industry && (p.industry || "") !== industry) return false;
       if (size && (p.company_size || "") !== size) return false;
 
-      // チャンネル条件
       const ch = channelOf(p);
       if (channel !== "all") {
         if (channel === "both" && ch !== "both") return false;
@@ -133,27 +127,22 @@ export default function ManualRuns() {
         if (channel === "email" && ch !== "email") return false;
       }
 
-      // 送信済み/未送信の切り替え
       const sent = (p.status || "").toLowerCase().includes("sent");
       if (!showSent) {
-        if (sent) return false; // 未送信のみ
+        if (sent) return false;
       } else {
-        if (!sent) return false; // 送信済みのみ
+        if (!sent) return false;
       }
       return true;
     });
   }, [prospects, q, industry, size, channel, showSent]);
 
-  // 一括選択
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const allChecked =
     filtered.length > 0 && filtered.every((p) => selected.has(p.id));
   const toggleAll = () => {
-    if (allChecked) {
-      setSelected(new Set());
-    } else {
-      setSelected(new Set(filtered.map((p) => p.id)));
-    }
+    if (allChecked) setSelected(new Set());
+    else setSelected(new Set(filtered.map((p) => p.id)));
   };
   const toggleOne = (id: string) => {
     setSelected((prev) => {
@@ -163,20 +152,12 @@ export default function ManualRuns() {
     });
   };
 
-  // 実行処理 → ログページへ遷移
   const handleExecute = async () => {
     setMsg("");
-    if (selected.size === 0) {
-      setMsg("対象の企業を選択してください。");
-      return;
-    }
-    if (!selectedTemplateId) {
-      setMsg("テンプレートを選択してください。");
-      return;
-    }
+    if (selected.size === 0) return setMsg("対象の企業を選択してください。");
+    if (!selectedTemplateId) return setMsg("テンプレートを選択してください。");
     setExecuting(true);
     try {
-      // 優先：/execute エンドポイント（あれば）
       let r = await fetch("/api/form-outreach/runs/execute", {
         method: "POST",
         headers: {
@@ -187,11 +168,9 @@ export default function ManualRuns() {
           tenant_id: TENANT_ID,
           template_id: selectedTemplateId,
           prospect_ids: Array.from(selected),
-          trigger: "manual", // 明示
+          trigger: "manual",
         }),
       });
-
-      // フォールバック：/runs に POST（なければ UI でログ化だけ）
       if (r.status === 404) {
         r = await fetch("/api/form-outreach/runs", {
           method: "POST",
@@ -211,11 +190,9 @@ export default function ManualRuns() {
           }),
         });
       }
-
-      const j = await r.json().catch(() => ({} as any));
+      const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j?.error || "execute failed");
-
-      // 送信ログへ自動遷移
+      // 送信ログへ
       router.push("/form-outreach/schedules");
     } catch (e: any) {
       setMsg(String(e?.message || e));
@@ -228,33 +205,25 @@ export default function ManualRuns() {
     <>
       <AppHeader showBack />
       <main className="mx-auto max-w-6xl p-6">
-        <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+        <div className="mb-4 flex items-start justify-between gap-2">
           <div>
             <h1 className="text-2xl font-semibold text-neutral-900">
-              手動実行
+              メッセージ手動送信
             </h1>
             <p className="text-sm text-neutral-500">
-              テンプレはモーダルで選択。業種/規模はプルダウン。チャンネル列を追加し、実行後はログへ遷移。
+              テンプレはモーダルで選択。業種/規模はプルダウン。実行後は送信ログへ遷移。
             </p>
           </div>
-          <div className="flex gap-2">
-            <button
-              onClick={() => setShowTplModal(true)}
-              className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
-            >
-              テンプレートを選択
-            </button>
-            <Link
-              href="/form-outreach/templates"
-              className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
-            >
-              テンプレート管理へ
-            </Link>
-          </div>
+          <Link
+            href="/form-outreach/templates"
+            className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
+          >
+            テンプレート管理へ
+          </Link>
         </div>
 
-        {/* フィルタ（薄い枠線） */}
-        <section className="rounded-2xl border border-neutral-200 p-4 mb-4">
+        {/* フィルタ */}
+        <section className="rounded-2xl border border-neutral-200 p-4 mb-3">
           <div className="grid grid-cols-1 gap-3 md:grid-cols-6">
             <div className="md:col-span-2">
               <div className="mb-1 text-xs text-neutral-600">キーワード</div>
@@ -266,7 +235,6 @@ export default function ManualRuns() {
               />
             </div>
 
-            {/* 業種：選択式 */}
             <div>
               <div className="mb-1 text-xs text-neutral-600">業種</div>
               <select
@@ -283,7 +251,6 @@ export default function ManualRuns() {
               </select>
             </div>
 
-            {/* 企業規模：選択式 */}
             <div>
               <div className="mb-1 text-xs text-neutral-600">企業規模</div>
               <select
@@ -300,7 +267,6 @@ export default function ManualRuns() {
               </select>
             </div>
 
-            {/* チャンネル */}
             <div>
               <div className="mb-1 text-xs text-neutral-600">チャンネル</div>
               <select
@@ -315,7 +281,6 @@ export default function ManualRuns() {
               </select>
             </div>
 
-            {/* 表示対象 */}
             <div>
               <div className="mb-1 text-xs text-neutral-600">表示対象</div>
               <select
@@ -330,28 +295,39 @@ export default function ManualRuns() {
           </div>
         </section>
 
-        {/* 実行アクション */}
-        <div className="mb-3 flex items-center gap-2">
+        {/* ▼ テンプレ選択（フィルタと実行の間に配置） */}
+        <div className="mb-3 flex items-center justify-between">
           <button
-            onClick={handleExecute}
-            disabled={executing}
-            className="rounded-lg border border-neutral-200 px-4 py-2 text-sm hover:bg-neutral-50 disabled:opacity-50"
-            title="選択企業に対して実行"
+            onClick={() => setShowTplModal(true)}
+            className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
           >
-            {executing ? "実行中…" : "実行"}
+            テンプレートを選択
           </button>
-          <div className="text-xs text-neutral-500">
-            選択件数: <span className="font-medium">{selected.size}</span> /
-            テンプレ:
-            <span className="font-medium">
-              {" "}
-              {templates.find((t) => t.id === selectedTemplateId)?.name ||
-                "未選択"}
+
+          {/* 実行＆バッジ */}
+          <div className="flex items-center gap-3">
+            <span className="inline-flex items-center rounded-full border border-neutral-300 bg-white px-3 py-1 text-xs font-medium text-neutral-700 shadow-sm">
+              選択件数: {selected.size}
             </span>
+            <span className="inline-flex items-center rounded-full border border-indigo-300 bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-800 shadow-sm">
+              テンプレ:
+              <span className="ml-1">
+                {templates.find((t) => t.id === selectedTemplateId)?.name ||
+                  "未選択"}
+              </span>
+            </span>
+            <button
+              onClick={handleExecute}
+              disabled={executing}
+              className="rounded-lg border border-neutral-200 px-4 py-2 text-sm hover:bg-neutral-50 disabled:opacity-50"
+              title="選択企業に対して実行"
+            >
+              {executing ? "実行中…" : "実行"}
+            </button>
           </div>
         </div>
 
-        {/* 表（送信済み列は文字表示／チャンネル列を追加） */}
+        {/* 表（チャンネル列・送信状態は文字） */}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden">
           <table className="min-w-[1000px] w-full text-sm">
             <thead className="bg-neutral-50 text-neutral-600">
@@ -361,7 +337,6 @@ export default function ManualRuns() {
                     type="checkbox"
                     checked={allChecked}
                     onChange={toggleAll}
-                    aria-label="全選択"
                   />
                 </th>
                 <th className="px-3 py-3 text-left">社名</th>
@@ -392,7 +367,6 @@ export default function ManualRuns() {
                         type="checkbox"
                         checked={selected.has(p.id)}
                         onChange={() => toggleOne(p.id)}
-                        aria-label={`${p.company_name || p.id} を選択`}
                       />
                     </td>
                     <td className="px-3 py-2">{p.company_name || "-"}</td>
@@ -469,7 +443,7 @@ export default function ManualRuns() {
                     <th className="px-3 py-2 text-left">名前</th>
                     <th className="px-3 py-2 text-left">チャンネル</th>
                     <th className="px-3 py-2 text-left">件名</th>
-                    <th className="px-3 py-2"></th>
+                    <th className="px-3 py-2" />
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-neutral-200">
@@ -508,8 +482,8 @@ export default function ManualRuns() {
             </div>
 
             <div className="mt-3 text-xs text-neutral-600">
-              現在の選択：{" "}
-              <span className="font-medium">
+              現在の選択：
+              <span className="ml-1 font-medium">
                 {templates.find((t) => t.id === selectedTemplateId)?.name ||
                   "未選択"}
               </span>

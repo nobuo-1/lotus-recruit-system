@@ -7,22 +7,24 @@ import AppHeader from "@/components/AppHeader";
 const TENANT_ID = "175b1a9d-3f85-482d-9323-68a44d214424";
 
 type Settings = {
-  // 既存
+  // 自動化フラグ
   auto_company_list: boolean;
   auto_send_messages: boolean;
+
+  // 両方可能時の優先チャンネル
   dual_channel_priority: "form" | "email";
 
-  // 追加（法人リスト自動化）
+  // 法人リスト自動化
   company_schedule: "weekly" | "monthly";
   company_weekday?: number; // 1(月)〜7(日)
   company_month_day?: number; // 1-31
   company_limit?: number; // 取得件数
 
-  // 追加（送信自動化）
+  // 送信自動化（承認フロー）
   confirm_by_email?: boolean;
   confirm_email_address?: string;
 
-  // サーバーが返す想定
+  // サーバーから返る想定
   updated_at?: string | null;
 };
 
@@ -54,6 +56,7 @@ export default function AutomationPage() {
 
   const [conflicts, setConflicts] = useState<ConflictRow[]>([]);
 
+  // 初期ロード
   useEffect(() => {
     const load = async () => {
       setMsg("");
@@ -75,7 +78,7 @@ export default function AutomationPage() {
           }));
         }
 
-        // 競合(被り)候補
+        // クライアント被り候補
         const rc = await fetch("/api/form-outreach/conflicts", {
           headers: { "x-tenant-id": TENANT_ID },
           cache: "no-store",
@@ -93,6 +96,7 @@ export default function AutomationPage() {
     load();
   }, []);
 
+  // 保存
   const save = async () => {
     if (loading) return;
     setLoading(true);
@@ -121,8 +125,8 @@ export default function AutomationPage() {
     }
   };
 
+  // 取消（再読込）
   const cancel = () => {
-    // 編集キャンセル → 最新の設定をリロード
     setEditing(false);
     (async () => {
       try {
@@ -138,95 +142,204 @@ export default function AutomationPage() {
     })();
   };
 
-  const summaryText = useMemo(() => {
-    const lines: string[] = [];
+  // 現在設定の要約（チップに分割）
+  const summaryChips = useMemo(() => {
+    const chips: string[] = [];
 
     // 法人リストの自動作成
     if (settings.auto_company_list) {
       if (settings.company_schedule === "weekly") {
-        lines.push(
-          `法人リスト: 週次（${weekdayLabel(settings.company_weekday)} 取得）`
+        chips.push(
+          `法人リスト: 週次（${weekdayLabel(settings.company_weekday)}）`
         );
       } else {
-        lines.push(
-          `法人リスト: 月次（毎月${settings.company_month_day}日 取得）`
-        );
+        chips.push(`法人リスト: 月次（毎月${settings.company_month_day}日）`);
       }
-      lines.push(`取得件数: ${settings.company_limit ?? "-"} 件`);
+      chips.push(`取得件数: ${settings.company_limit ?? "-"}件`);
     } else {
-      lines.push("法人リスト: 自動化しない");
+      chips.push("法人リスト: 自動化しない");
     }
 
     // メッセージ送信の自動化
     if (settings.auto_send_messages) {
-      lines.push(
-        `メッセ送信: 自動（優先=${
+      chips.push(
+        `送信: 自動（優先=${
           settings.dual_channel_priority === "form" ? "フォーム" : "メール"
         })`
       );
       if (settings.confirm_by_email) {
-        lines.push(
-          `送信前確認: メールで承認 (${settings.confirm_email_address || "-"})`
+        chips.push(
+          `承認: メール確認（${settings.confirm_email_address || "-"}）`
         );
       } else {
-        lines.push("送信前確認: なし（即時実行）");
+        chips.push("承認: なし（即時実行）");
       }
     } else {
-      lines.push("メッセ送信: 自動化しない");
+      chips.push("送信: 自動化しない");
     }
 
-    return lines.join(" / ");
+    return chips;
+  }, [settings]);
+
+  // 右側薄文字の一文サマリ
+  const summaryInline = useMemo(() => {
+    const parts: string[] = [];
+    if (settings.auto_company_list) {
+      parts.push(
+        settings.company_schedule === "weekly"
+          ? `法人リスト=週次(${weekdayLabel(settings.company_weekday)})`
+          : `法人リスト=月次(毎${settings.company_month_day}日)`
+      );
+      parts.push(`件数=${settings.company_limit ?? "-"}`);
+    } else {
+      parts.push("法人リスト=自動化なし");
+    }
+    if (settings.auto_send_messages) {
+      parts.push(
+        `送信=自動(優先=${
+          settings.dual_channel_priority === "form" ? "フォーム" : "メール"
+        })`
+      );
+      parts.push(
+        settings.confirm_by_email
+          ? `承認=メール(${settings.confirm_email_address || "-"})`
+          : "承認=なし"
+      );
+    } else {
+      parts.push("送信=自動化なし");
+    }
+    return parts.join(" / ");
   }, [settings]);
 
   return (
     <>
       <AppHeader showBack />
       <main className="mx-auto max-w-6xl p-6">
-        <div className="mb-4 flex items-start justify-between gap-3">
-          <div>
-            <h1 className="text-2xl font-semibold text-neutral-900">
-              自動実行設定
-            </h1>
-            <p className="text-sm text-neutral-500">
-              現在の設定：<span className="opacity-70">{summaryText}</span>
-            </p>
-            <p className="text-xs text-neutral-400 mt-1">
-              最終更新：
-              {settings.updated_at ? formatTs(settings.updated_at) : "-"}
-            </p>
-          </div>
-          <div className="shrink-0">
-            {!editing ? (
-              <button
-                onClick={() => setEditing(true)}
-                className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
-              >
-                設定変更
-              </button>
-            ) : (
-              <div className="flex gap-2">
+        {/* ヘッダー + 現在設定の強調カード */}
+        <div className="mb-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h1 className="text-2xl font-semibold text-neutral-900">
+                自動実行設定
+              </h1>
+              <p className="mt-1 text-xs text-neutral-500">
+                最終更新：
+                {settings.updated_at ? formatTs(settings.updated_at) : "-"}
+              </p>
+            </div>
+
+            <div className="shrink-0">
+              {!editing ? (
                 <button
-                  onClick={cancel}
+                  onClick={() => setEditing(true)}
                   className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
                 >
-                  キャンセル
+                  設定変更
                 </button>
-                <button
-                  onClick={save}
-                  disabled={loading}
-                  className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50 disabled:opacity-50"
+              ) : (
+                <div className="flex gap-2">
+                  <button
+                    onClick={cancel}
+                    className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
+                  >
+                    キャンセル
+                  </button>
+                  <button
+                    onClick={save}
+                    disabled={loading}
+                    className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50 disabled:opacity-50"
+                  >
+                    {loading ? "保存中…" : "保存する"}
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* 強調された現在設定カード */}
+          <div className="mt-3 rounded-2xl border border-neutral-200 bg-neutral-50/60 p-4">
+            <div className="mb-2 text-sm font-medium text-neutral-800">
+              現在の設定
+            </div>
+
+            {/* チップ群 */}
+            <div className="flex flex-wrap gap-2">
+              {summaryChips.map((chip, i) => (
+                <span
+                  key={i}
+                  className="inline-flex items-center rounded-full border border-neutral-200 bg-white px-2.5 py-1 text-xs font-medium text-neutral-700 shadow-sm"
                 >
-                  {loading ? "保存中…" : "保存する"}
-                </button>
+                  {chip}
+                </span>
+              ))}
+            </div>
+
+            {/* 薄文字のインライン要約（常時表示） */}
+            <div className="mt-2 text-[11px] text-neutral-500">
+              {summaryInline}
+            </div>
+
+            {/* 2カラムの概要グリッド */}
+            <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+              {/* 法人リスト自動化 概要 */}
+              <div className="rounded-xl border border-neutral-200 bg-white p-3 shadow-sm">
+                <div className="mb-1 text-sm font-semibold text-neutral-800">
+                  法人リスト自動化
+                </div>
+                <dl className="grid grid-cols-3 gap-x-3 gap-y-1 text-xs text-neutral-700">
+                  <dt className="col-span-1 text-neutral-500">状態</dt>
+                  <dd className="col-span-2">
+                    {settings.auto_company_list ? "自動化オン" : "自動化なし"}
+                  </dd>
+
+                  <dt className="col-span-1 text-neutral-500">スケジュール</dt>
+                  <dd className="col-span-2">
+                    {settings.company_schedule === "weekly"
+                      ? `週次（${weekdayLabel(settings.company_weekday)}）`
+                      : `月次（毎月${settings.company_month_day}日）`}
+                  </dd>
+
+                  <dt className="col-span-1 text-neutral-500">取得件数</dt>
+                  <dd className="col-span-2">
+                    {settings.company_limit ?? "-"}
+                  </dd>
+                </dl>
               </div>
-            )}
+
+              {/* メッセージ送信 概要 */}
+              <div className="rounded-xl border border-neutral-200 bg-white p-3 shadow-sm">
+                <div className="mb-1 text-sm font-semibold text-neutral-800">
+                  メッセージ送信自動化
+                </div>
+                <dl className="grid grid-cols-3 gap-x-3 gap-y-1 text-xs text-neutral-700">
+                  <dt className="col-span-1 text-neutral-500">状態</dt>
+                  <dd className="col-span-2">
+                    {settings.auto_send_messages ? "自動化オン" : "自動化なし"}
+                  </dd>
+
+                  <dt className="col-span-1 text-neutral-500">優先</dt>
+                  <dd className="col-span-2">
+                    {settings.dual_channel_priority === "form"
+                      ? "フォーム"
+                      : "メール"}
+                  </dd>
+
+                  <dt className="col-span-1 text-neutral-500">承認</dt>
+                  <dd className="col-span-2">
+                    {settings.confirm_by_email
+                      ? `メール確認（${settings.confirm_email_address || "-"}）`
+                      : "なし（即時実行）"}
+                  </dd>
+                </dl>
+              </div>
+            </div>
           </div>
         </div>
 
-        {/* 設定フォーム（「設定変更」時のみ表示） */}
+        {/* 設定フォーム（「設定変更」クリック時のみ表示） */}
         {editing && (
           <section className="rounded-2xl border border-neutral-200 p-4 mb-6">
-            {/* 法人リストの作成 自動化 */}
+            {/* 法人リスト自動化 */}
             <div className="mb-4">
               <label className="flex items-center gap-2 text-sm text-neutral-800">
                 <input
@@ -329,7 +442,7 @@ export default function AutomationPage() {
 
             <hr className="my-4 border-neutral-200" />
 
-            {/* メッセージ送信 自動化 */}
+            {/* メッセージ送信自動化 */}
             <div className="mb-4">
               <label className="flex items-center gap-2 text-sm text-neutral-800">
                 <input
@@ -349,7 +462,7 @@ export default function AutomationPage() {
                 <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
                   <div>
                     <div className="mb-1 text-xs text-neutral-600">
-                      両方可能な場合の優先チャンネル
+                      優先チャンネル
                     </div>
                     <div className="flex items-center gap-4 text-sm">
                       <label className="flex items-center gap-1">
@@ -385,7 +498,7 @@ export default function AutomationPage() {
 
                   <div>
                     <div className="mb-1 text-xs text-neutral-600">
-                      送信前確認（メールで承認）
+                      送信前確認
                     </div>
                     <label className="flex items-center gap-2 text-sm text-neutral-800">
                       <input
@@ -398,7 +511,7 @@ export default function AutomationPage() {
                           }))
                         }
                       />
-                      メールで確認する
+                      メールで承認する
                     </label>
                   </div>
 
@@ -420,7 +533,7 @@ export default function AutomationPage() {
                         }
                       />
                       <p className="mt-1 text-[11px] text-neutral-500">
-                        送信予定リストがこのアドレスへ届き、メール上の「実行」ボタン押下で送信されます。
+                        送信予定のリストがこのアドレスへ届き、メール上の「実行」ボタン押下で送信されます。
                       </p>
                     </div>
                   )}
@@ -492,20 +605,19 @@ export default function AutomationPage() {
 }
 
 function weekdayLabel(d?: number) {
-  const map = {
-    1: "月",
-    2: "火",
-    3: "水",
-    4: "木",
-    5: "金",
-    6: "土",
-    7: "日",
-  } as Record<number, string>;
-  return d && map[d] ? `毎週${map[d]}曜` : "毎週月曜";
+  const map: Record<number, string> = {
+    1: "毎週月曜",
+    2: "毎週火曜",
+    3: "毎週水曜",
+    4: "毎週木曜",
+    5: "毎週金曜",
+    6: "毎週土曜",
+    7: "毎週日曜",
+  };
+  return d && map[d] ? map[d] : "毎週月曜";
 }
 
 function formatTs(ts: string) {
-  // ISO → yyyy-mm-dd HH:MM
   try {
     const t = ts.replace("T", " ").replace("Z", "");
     const dt = t.split(".")[0] || t;

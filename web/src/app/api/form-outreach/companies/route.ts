@@ -1,72 +1,57 @@
 // web/src/app/api/form-outreach/companies/route.ts
-import type { NextRequest } from "next/server";
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
-export const runtime = "edge";
+const URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-const TENANT_ID_FALLBACK = "175b1a9d-3f85-482d-9323-68a44d214424";
-const REST_URL = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/rest/v1`;
-const ANON = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-const SERVICE = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-function authHeaders() {
-  const token = SERVICE || ANON;
+function h(tenantId: string) {
   return {
-    apikey: ANON,
-    Authorization: `Bearer ${token}`,
+    apikey: KEY!,
+    Authorization: `Bearer ${KEY}`,
     "Content-Type": "application/json",
+    "x-tenant-id": tenantId,
   };
 }
 
 export async function GET(req: NextRequest) {
   try {
-    const tenant = req.headers.get("x-tenant-id")?.trim() || TENANT_ID_FALLBACK;
-
-    // 1) form_outreach_companies 優先
-    const url1 =
-      `${REST_URL}/form_outreach_companies?` +
-      `select=id,tenant_id,source_site,company_name,site_company_url,official_website_url,contact_form_url,contact_email,industry,company_size,created_at` +
-      `&tenant_id=eq.${tenant}` +
-      `&order=created_at.desc&limit=1000`;
-
-    let r1 = await fetch(url1, { headers: authHeaders(), cache: "no-store" });
-    if (r1.ok) {
-      const rows = (await r1.json()) as any[];
-      return NextResponse.json({ rows });
-    }
-
-    // 2) Fallback: form_prospects を companies 風にマップ
-    const url2 =
-      `${REST_URL}/form_prospects?` +
-      `select=id,tenant_id,company_name,website,contact_form_url,contact_email,industry,company_size,job_site_source,created_at` +
-      `&tenant_id=eq.${tenant}` +
-      `&order=created_at.desc&limit=1000`;
-
-    const r2 = await fetch(url2, { headers: authHeaders(), cache: "no-store" });
-    if (!r2.ok) {
-      const t = await r2.text().catch(() => "");
+    const tenantId = req.headers.get("x-tenant-id") || "";
+    if (!tenantId) {
       return NextResponse.json(
-        { error: `db error ${r2.status}: ${t}` },
-        { status: 500 }
+        { error: "x-tenant-id header required" },
+        { status: 400 }
       );
     }
-    const pRows = (await r2.json()) as any[];
 
-    const mapped = pRows.map((p) => ({
-      id: p.id,
-      company_name: p.company_name,
-      source_site: p.job_site_source ?? null,
-      site_company_url: null,
-      official_website_url: p.website ?? null,
-      contact_form_url: p.contact_form_url ?? null,
-      contact_email: p.contact_email ?? null,
-      industry: p.industry ?? null,
-      company_size: p.company_size ?? null,
-      job_site_source: p.job_site_source ?? null,
-      created_at: p.created_at ?? null,
+    // form_prospects から必要な列を抽出（website をサイトURLとして利用）
+    const url =
+      `${URL}/rest/v1/form_prospects?tenant_id=eq.${tenantId}` +
+      `&select=id,tenant_id,company_name,website,contact_form_url,contact_email,job_site_source,created_at` +
+      `&order=created_at.desc,nullslast`;
+
+    const r = await fetch(url, { headers: h(tenantId), cache: "no-store" });
+    const j = await r.json();
+    if (!r.ok) {
+      return NextResponse.json(
+        { error: j?.message || "fetch failed" },
+        { status: r.status }
+      );
+    }
+
+    const rows = (j as any[]).map((x) => ({
+      id: x.id,
+      tenant_id: x.tenant_id,
+      company_name: x.company_name,
+      website: x.website,
+      contact_form_url: x.contact_form_url,
+      contact_email: x.contact_email,
+      source_site: x.job_site_source,
+      created_at: x.created_at,
     }));
 
-    return NextResponse.json({ rows: mapped });
+    return NextResponse.json({ rows });
   } catch (e: any) {
     return NextResponse.json(
       { error: String(e?.message || e) },

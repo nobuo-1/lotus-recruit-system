@@ -1,3 +1,4 @@
+// web/src/app/form-outreach/companies/page.tsx
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
@@ -8,15 +9,12 @@ const TENANT_ID = "175b1a9d-3f85-482d-9323-68a44d214424";
 type Company = {
   id: string;
   tenant_id: string | null;
-  source_site: string | null;
   company_name: string | null;
-  site_company_url: string | null; // ← このURLを「サイトURL」としてそのまま表示
-  official_website_url: string | null; // ← 使わない（列削除）
+  website: string | null; // ← form_prospects.website を使う
   contact_form_url: string | null;
   contact_email: string | null;
-  is_blocked: boolean | null; // ← 列から削除
-  last_checked_at: string | null; // ← 列から削除
-  created_at: string | null; // ← 取得日時として扱う
+  source_site: string | null; // 表示のみ（フィルタは削除）
+  created_at: string | null; // 取得日時
 };
 
 function ellipsizeUrl(u: string, max = 54) {
@@ -35,7 +33,7 @@ export default function CompaniesPage() {
   // 独立フィルタ
   const [showFilters, setShowFilters] = useState(true);
   const [q, setQ] = useState("");
-  const [site, setSite] = useState<string>("");
+  const [formFilter, setFormFilter] = useState<"" | "has" | "none">(""); // ★ 追加
   const [emailFilter, setEmailFilter] = useState<"" | "has" | "none">("");
   const [dateFrom, setDateFrom] = useState<string>("");
   const [dateTo, setDateTo] = useState<string>("");
@@ -73,23 +71,28 @@ export default function CompaniesPage() {
       if (qq) {
         const hit =
           (r.company_name || "").toLowerCase().includes(qq) ||
-          (r.site_company_url || "").toLowerCase().includes(qq) ||
+          (r.website || "").toLowerCase().includes(qq) ||
           (r.contact_email || "").toLowerCase().includes(qq);
         if (!hit) return false;
       }
-      if (site && (r.source_site || "") !== site) return false;
+      // ★ フォーム有無
+      if (formFilter === "has" && !(r.contact_form_url || "").trim())
+        return false;
+      if (formFilter === "none" && (r.contact_form_url || "").trim())
+        return false;
+
+      // メール有無
       if (emailFilter === "has" && !(r.contact_email || "").trim())
         return false;
       if (emailFilter === "none" && (r.contact_email || "").trim())
         return false;
 
-      // 取得日時フィルタ（created_at を採用）
+      // 取得日時
       if (df || dt) {
         const created = r.created_at ? new Date(r.created_at) : null;
         if (!created) return false;
         if (df && created < df) return false;
         if (dt) {
-          // 終了日の終端を含める
           const end = new Date(dt);
           end.setHours(23, 59, 59, 999);
           if (created > end) return false;
@@ -113,7 +116,7 @@ export default function CompaniesPage() {
       return 0;
     });
     return arr;
-  }, [rows, q, site, emailFilter, dateFrom, dateTo, sortKey, sortDir]);
+  }, [rows, q, formFilter, emailFilter, dateFrom, dateTo, sortKey, sortDir]);
 
   const fetchNow = async () => {
     if (loading) return;
@@ -145,7 +148,8 @@ export default function CompaniesPage() {
               企業一覧
             </h1>
             <p className="text-sm text-neutral-500">
-              表の列を整理（ブロック/最終チェック削除、サイトURLはリンク文字そのまま表示、取得日時列を追加）
+              列・フィルタを整理（フォーム有無追加／サイトURLは website
+              を表示／取得日時でソート可）
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -159,14 +163,12 @@ export default function CompaniesPage() {
               onClick={fetchNow}
               disabled={loading}
               className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50 disabled:opacity-50"
-              title="form_prospects から差分取り込み"
             >
               {loading ? "取得中…" : "今すぐ企業リストを取得"}
             </button>
           </div>
         </div>
 
-        {/* 独立フィルタ */}
         {showFilters && (
           <section className="rounded-2xl border border-neutral-200 p-4 mb-4">
             <div className="grid grid-cols-1 gap-3 md:grid-cols-6">
@@ -179,22 +181,23 @@ export default function CompaniesPage() {
                   onChange={(e) => setQ(e.target.value)}
                 />
               </div>
+
+              {/* ★ フォーム有無 */}
               <div>
                 <div className="mb-1 text-xs text-neutral-600">
-                  取得元サイト
+                  フォーム有無
                 </div>
                 <select
                   className="w-full rounded-lg border border-neutral-300 px-2 py-2 text-sm"
-                  value={site}
-                  onChange={(e) => setSite(e.target.value)}
+                  value={formFilter}
+                  onChange={(e) => setFormFilter(e.target.value as any)}
                 >
                   <option value="">（指定なし）</option>
-                  <option value="mynavi">マイナビ</option>
-                  <option value="doda">doda</option>
-                  <option value="type">type</option>
-                  <option value="womantype">女の転職type</option>
+                  <option value="has">あり</option>
+                  <option value="none">なし</option>
                 </select>
               </div>
+
               <div>
                 <div className="mb-1 text-xs text-neutral-600">メール有無</div>
                 <select
@@ -207,6 +210,7 @@ export default function CompaniesPage() {
                   <option value="none">なし</option>
                 </select>
               </div>
+
               <div>
                 <div className="mb-1 text-xs text-neutral-600">
                   取得日時(From)
@@ -229,6 +233,7 @@ export default function CompaniesPage() {
                   onChange={(e) => setDateTo(e.target.value)}
                 />
               </div>
+
               <div className="md:col-span-2">
                 <div className="mb-1 text-xs text-neutral-600">並び替え</div>
                 <div className="flex gap-2">
@@ -254,7 +259,6 @@ export default function CompaniesPage() {
           </section>
         )}
 
-        {/* 表本体（ブロック/最終チェック列は削除） */}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden">
           <table className="min-w-[900px] w-full text-sm">
             <thead className="bg-neutral-50 text-neutral-600">
@@ -271,13 +275,13 @@ export default function CompaniesPage() {
                 <tr key={c.id}>
                   <td className="px-3 py-2">{c.company_name || "-"}</td>
                   <td className="px-3 py-2">
-                    {c.site_company_url ? (
+                    {c.website ? (
                       <a
-                        href={c.site_company_url}
+                        href={c.website}
                         target="_blank"
                         className="text-indigo-700 hover:underline break-all"
                       >
-                        {ellipsizeUrl(c.site_company_url)}
+                        {ellipsizeUrl(c.website)}
                       </a>
                     ) : (
                       "-"
