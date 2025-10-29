@@ -1,4 +1,3 @@
-// web/src/app/form-outreach/page.tsx
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
@@ -6,9 +5,10 @@ import Link from "next/link";
 import AppHeader from "@/components/AppHeader";
 import dynamic from "next/dynamic";
 
+// ——— 設定 ———
 const TENANT_ID = "175b1a9d-3f85-482d-9323-68a44d214424";
 
-// Recharts（CSRでのみ読込）
+// Recharts は CSR のみ
 const ResponsiveContainer = dynamic(
   async () => (await import("recharts")).ResponsiveContainer,
   { ssr: false }
@@ -131,7 +131,7 @@ export default function FormOutreachTop() {
       const key = mondayKey(new Date(r.started_at));
       map[key] = (map[key] ?? 0) + 1;
     }
-    // 直近8週のキーを作る
+    // 直近8週のキー
     const out: { week: string; count: number }[] = [];
     const today = new Date();
     for (let i = 7; i >= 0; i--) {
@@ -143,13 +143,11 @@ export default function FormOutreachTop() {
         )
       );
       dt.setUTCDate(dt.getUTCDate() - i * 7);
-      const k = (function monday(d: Date) {
-        const wd = d.getUTCDay();
-        const diff = (wd + 6) % 7;
-        const m = new Date(d);
-        m.setUTCDate(m.getUTCDate() - diff);
-        return m.toISOString().slice(0, 10);
-      })(dt);
+      const wd = dt.getUTCDay();
+      const diff = (wd + 6) % 7;
+      const m = new Date(dt);
+      m.setUTCDate(m.getUTCDate() - diff);
+      const k = m.toISOString().slice(0, 10);
       out.push({ week: k, count: map[k] ?? 0 });
     }
     return out;
@@ -172,14 +170,14 @@ export default function FormOutreachTop() {
     <>
       <AppHeader showBack />
       <main className="mx-auto max-w-6xl p-6">
-        {/* タイトル＆ナビ（送信ログリンクを修正） */}
+        {/* タイトル＆ナビ（送信元設定・自動実行 を復活） */}
         <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h1 className="text-2xl font-semibold text-neutral-900">
               フォーム営業
             </h1>
             <p className="text-sm text-neutral-500">
-              企業管理・テンプレ・実行・ログ
+              企業管理・テンプレ・実行・ログ・送信元設定・自動実行
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -196,7 +194,7 @@ export default function FormOutreachTop() {
               手動実行
             </Link>
             <Link
-              href="/form-outreach/messages" // ← 修正：送信ログへ
+              href="/form-outreach/messages"
               className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
             >
               送信ログ
@@ -207,10 +205,22 @@ export default function FormOutreachTop() {
             >
               メッセージテンプレート
             </Link>
+            <Link
+              href="/form-outreach/senders"
+              className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
+            >
+              送信元設定
+            </Link>
+            <Link
+              href="/form-outreach/automation"
+              className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
+            >
+              自動実行設定
+            </Link>
           </div>
         </div>
 
-        {/* KPI */}
+        {/* KPI（グラフとは分離・元の構成に戻す） */}
         <section className="rounded-2xl border border-neutral-200 p-4 mb-6">
           <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
             <KpiCard label="テンプレ数" value={kpi.templates} />
@@ -218,9 +228,14 @@ export default function FormOutreachTop() {
             <KpiCard label="直近30日 実行" value={kpi.runs30d} />
             <KpiCard label="成功率(30日)" value={`${kpi.successRate}%`} />
           </div>
+        </section>
 
-          {/* 直近8週間の実行推移（復活） */}
-          <div className="mt-4 h-56">
+        {/* グラフ（単独セクション） */}
+        <section className="rounded-2xl border border-neutral-200 p-4">
+          <div className="mb-2 text-sm font-medium text-neutral-800">
+            直近8週間の実行推移
+          </div>
+          <div className="h-56">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={series}>
                 <CartesianGrid strokeDasharray="3 3" />
