@@ -149,7 +149,7 @@ export default function EmailSettingsPage() {
         <div className="mt-8 rounded-2xl border border-neutral-200 p-4">
           <h2 className="mb-2 text-lg font-semibold">受信者リストの表示列</h2>
           <p className="mb-3 text-sm text-neutral-500">
-            チェックした項目だけが「求職者リスト」の列とフィルターに出ます。
+            チェックした項目だけが「受信者リスト」の列とフィルターに出ます。
             会社名や職種（複数）も選択できます。
           </p>
           <RecipientListSettingsForm />

@@ -1,88 +1,130 @@
 // web/src/app/form-outreach/companies/fetch/page.tsx
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import AppHeader from "@/components/AppHeader";
+import Link from "next/link";
+import { CheckCircle, XCircle, Loader2, Play } from "lucide-react";
 
 const TENANT_ID = "175b1a9d-3f85-482d-9323-68a44d214424";
+const LS_KEY = "fo_manual_fetch_latest"; // 1日キャッシュ
 
-type StepKey = "discover" | "parse" | "dedupe" | "enrich" | "upsert";
 type StepState = "idle" | "running" | "done" | "error";
 
-const STEPS: { key: StepKey; label: string; desc: string }[] = [
-  { key: "discover", label: "探索", desc: "候補URLの取得・抽出" },
-  { key: "parse", label: "解析", desc: "会社名・サイトURLの解析" },
-  { key: "dedupe", label: "重複排除", desc: "既存レコードとの重複排除" },
-  { key: "enrich", label: "付加情報", desc: "フォーム/メールなどの付加" },
-  { key: "upsert", label: "保存", desc: "DBへ保存（INSERT/UPDATE）" },
-];
+type AddedRow = {
+  id: string;
+  tenant_id: string | null;
+  company_name: string | null;
+  website: string | null;
+  contact_email: string | null;
+  source_site: string | null;
+  created_at: string | null;
+};
 
-export default function CompaniesFetchPage() {
+type RunResult = {
+  inserted?: number;
+  rows?: AddedRow[];
+  error?: string;
+};
+
+export default function ManualFetch() {
   const [msg, setMsg] = useState("");
-  const [running, setRunning] = useState(false);
-  const [states, setStates] = useState<Record<StepKey, StepState>>({
-    discover: "idle",
-    parse: "idle",
-    dedupe: "idle",
-    enrich: "idle",
-    upsert: "idle",
-  });
+  const [s1, setS1] = useState<StepState>("idle"); // 収集
+  const [s2, setS2] = useState<StepState>("idle"); // 解析
+  const [s3, setS3] = useState<StepState>("idle"); // 保存
 
-  // 条件（必要に応じて拡張）
-  const [limit, setLimit] = useState<number>(100);
-  const [needForm, setNeedForm] = useState<"" | "yes" | "no">("");
-  const [needEmail, setNeedEmail] = useState<"" | "yes" | "no">("");
-  const [since, setSince] = useState<string>("");
+  const [added, setAdded] = useState<AddedRow[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  // 1日だけ保持した結果を表示
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(LS_KEY);
+      if (!raw) return;
+      const obj = JSON.parse(raw);
+      const ts = obj?.ts ? new Date(obj.ts).getTime() : 0;
+      if (Date.now() - ts < 24 * 60 * 60 * 1000) {
+        setAdded(obj.rows ?? []);
+      } else {
+        localStorage.removeItem(LS_KEY);
+      }
+    } catch {}
+  }, []);
+
+  const anyRunning = s1 === "running" || s2 === "running" || s3 === "running";
 
   const run = async () => {
-    if (running) return;
-    setRunning(true);
+    if (anyRunning || loading) return;
     setMsg("");
-    setStates({
-      discover: "running",
-      parse: "idle",
-      dedupe: "idle",
-      enrich: "idle",
-      upsert: "idle",
-    });
+    setLoading(true);
+    setS1("running");
+    setS2("idle");
+    setS3("idle");
+    setAdded([]);
+
     try {
-      // 実行（サーバ側で順次処理）
-      const r = await fetch("/api/form-outreach/companies/fetch", {
+      // ステップ1: 収集
+      await wait(400); // UX用の最小待機
+      // 実処理は fetch-now に集約
+      // ステップ2: 解析（見せ方上で遷移）
+      setS1("done");
+      setS2("running");
+      await wait(200);
+
+      // ステップ3: 保存
+      setS2("done");
+      setS3("running");
+
+      const r = await fetch("/api/form-outreach/companies/fetch-now", {
         method: "POST",
         headers: {
-          "content-type": "application/json",
           "x-tenant-id": TENANT_ID,
+          "content-type": "application/json",
         },
-        body: JSON.stringify({
-          limit,
-          needForm,
-          needEmail,
-          since,
-        }),
+        body: JSON.stringify({ tenant_id: TENANT_ID }),
+      });
+      const j: RunResult = await r.json();
+      if (!r.ok) throw new Error(j?.error || "fetch-now failed");
+
+      setS3("done");
+      const rows = j.rows ?? [];
+      setAdded(rows);
+
+      // 1日キャッシュ
+      localStorage.setItem(
+        LS_KEY,
+        JSON.stringify({ ts: new Date().toISOString(), rows })
+      );
+      setMsg(`実行完了：追加 ${j.inserted ?? rows.length} 件`);
+    } catch (e: any) {
+      setS1((v) => (v === "running" ? "error" : v));
+      setS2((v) => (v === "running" ? "error" : v));
+      setS3((v) => (v === "running" ? "error" : v));
+      setMsg(String(e?.message || e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const cancelAdditions = async () => {
+    if (added.length === 0) return;
+    const ids = added.map((r) => r.id);
+    try {
+      const r = await fetch("/api/form-outreach/companies/cancel-additions", {
+        method: "POST",
+        headers: {
+          "x-tenant-id": TENANT_ID,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ ids }),
       });
       const j = await r.json();
-      if (!r.ok) throw new Error(j?.error || "fetch failed");
-
-      // ステップ状態を結果に合わせて更新
-      const ok = (k: StepKey) => !j?.steps?.[k]?.error;
-      setStates({
-        discover: ok("discover") ? "done" : "error",
-        parse: ok("parse") ? "done" : "error",
-        dedupe: ok("dedupe") ? "done" : "error",
-        enrich: ok("enrich") ? "done" : "error",
-        upsert: ok("upsert") ? "done" : "error",
-      });
-
-      setMsg(
-        `完了: 取得 ${j?.steps?.discover?.found ?? 0} / 保存 ${
-          j?.steps?.upsert?.inserted ?? 0
-        }（重複 ${j?.steps?.dedupe?.skipped ?? 0}）`
-      );
+      if (!r.ok) throw new Error(j?.error || "cancel failed");
+      setMsg(`取消しました：削除 ${j.deleted ?? 0} 件`);
+      setAdded([]);
+      localStorage.removeItem(LS_KEY);
     } catch (e: any) {
       setMsg(String(e?.message || e));
-      setStates((s) => ({ ...s, upsert: "error" }));
-    } finally {
-      setRunning(false);
     }
   };
 
@@ -90,132 +132,147 @@ export default function CompaniesFetchPage() {
     <>
       <AppHeader showBack />
       <main className="mx-auto max-w-6xl p-6">
-        <div className="mb-4">
-          <h1 className="text-2xl font-semibold text-neutral-900">
-            企業リスト手動取得
-          </h1>
-          <p className="text-sm text-neutral-500">
-            固定ワークフローを可視化。条件を指定して実行すると、各ステップの進捗が表示されます。
-          </p>
+        <div className="mb-4 flex items-start justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-semibold text-neutral-900">
+              企業リスト手動取得
+            </h1>
+            <p className="text-sm text-neutral-500">
+              固定ワークフローで取得します。各ステップの進行状況を可視化します。
+            </p>
+          </div>
+          <Link
+            href="/form-outreach/companies"
+            className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
+          >
+            企業一覧へ
+          </Link>
         </div>
 
-        {/* 条件フォーム */}
+        {/* ワークフロー可視化 */}
         <section className="rounded-2xl border border-neutral-200 p-4 mb-4">
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
-            <div>
-              <div className="mb-1 text-xs text-neutral-600">最大取得件数</div>
-              <input
-                type="number"
-                min={1}
-                className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
-                value={limit}
-                onChange={(e) =>
-                  setLimit(Math.max(1, Number(e.target.value) || 1))
-                }
-              />
-            </div>
-            <div>
-              <div className="mb-1 text-xs text-neutral-600">
-                フォームの有無
-              </div>
-              <select
-                className="w-full rounded-lg border border-neutral-300 px-2 py-2 text-sm"
-                value={needForm}
-                onChange={(e) => setNeedForm(e.target.value as any)}
-              >
-                <option value="">（指定なし）</option>
-                <option value="yes">フォームありに限定</option>
-                <option value="no">フォーム無しに限定</option>
-              </select>
-            </div>
-            <div>
-              <div className="mb-1 text-xs text-neutral-600">メールの有無</div>
-              <select
-                className="w-full rounded-lg border border-neutral-300 px-2 py-2 text-sm"
-                value={needEmail}
-                onChange={(e) => setNeedEmail(e.target.value as any)}
-              >
-                <option value="">（指定なし）</option>
-                <option value="yes">メールありに限定</option>
-                <option value="no">メール無しに限定</option>
-              </select>
-            </div>
-            <div>
-              <div className="mb-1 text-xs text-neutral-600">
-                対象とする最古日時（任意）
-              </div>
-              <input
-                type="date"
-                className="w-full rounded-lg border border-neutral-300 px-2 py-2 text-sm"
-                value={since}
-                onChange={(e) => setSince(e.target.value)}
-              />
-            </div>
-          </div>
-        </section>
-
-        {/* ステップ可視化 */}
-        <section className="rounded-2xl border border-neutral-200 p-4 mb-3">
           <div className="mb-3 flex items-center justify-between">
-            <div className="text-base font-semibold text-neutral-800">
-              ワークフロー
-            </div>
+            <div className="text-sm font-medium text-neutral-800">フロー</div>
             <button
               onClick={run}
-              disabled={running}
-              className="rounded-lg border border-neutral-200 px-4 py-2 text-sm hover:bg-neutral-50 disabled:opacity-50"
+              disabled={anyRunning || loading}
+              className="inline-flex items-center gap-2 rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50 disabled:opacity-50"
             >
-              {running ? "実行中…" : "実行する"}
+              <Play className="h-4 w-4" />
+              {anyRunning || loading ? "実行中…" : "ワークフローを実行"}
             </button>
           </div>
 
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
-            {STEPS.map((s) => {
-              const st = states[s.key];
-              const color =
-                st === "done"
-                  ? "border-emerald-200 bg-emerald-50"
-                  : st === "running"
-                  ? "border-indigo-200 bg-indigo-50"
-                  : st === "error"
-                  ? "border-rose-200 bg-rose-50"
-                  : "border-neutral-200 bg-white";
-              return (
-                <div
-                  key={s.key}
-                  className={`rounded-xl border ${color} p-3 shadow-sm transition`}
-                >
-                  <div className="mb-1 text-sm font-semibold text-neutral-800">
-                    {s.label}
-                  </div>
-                  <div className="text-xs text-neutral-600">{s.desc}</div>
-                  <div className="mt-2 text-[11px]">
-                    状態：
-                    {st === "idle" && (
-                      <span className="text-neutral-500">待機</span>
-                    )}
-                    {st === "running" && (
-                      <span className="text-indigo-700">実行中…</span>
-                    )}
-                    {st === "done" && (
-                      <span className="text-emerald-700">完了</span>
-                    )}
-                    {st === "error" && (
-                      <span className="text-rose-700">エラー</span>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+            <StepCard title="収集（スクレイピング）" state={s1} />
+            <StepCard title="解析（正規化・抽出）" state={s2} />
+            <StepCard title="保存（DBへ反映）" state={s3} />
           </div>
         </section>
 
+        {/* 直近追加（1日だけ保持） */}
+        <section className="rounded-2xl border border-neutral-200 overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 bg-neutral-50">
+            <div className="text-sm font-medium text-neutral-800">
+              今回追加（1日表示）
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={cancelAdditions}
+                disabled={added.length === 0}
+                className="rounded-lg border border-neutral-200 px-3 py-1.5 text-xs hover:bg-neutral-50 disabled:opacity-50"
+              >
+                取り消して削除
+              </button>
+            </div>
+          </div>
+
+          <table className="min-w-[900px] w-full text-sm">
+            <thead className="bg-neutral-50 text-neutral-600">
+              <tr>
+                <th className="px-3 py-3 text-left">企業名</th>
+                <th className="px-3 py-3 text-left">サイトURL</th>
+                <th className="px-3 py-3 text-left">メール</th>
+                <th className="px-3 py-3 text-left">取得元</th>
+                <th className="px-3 py-3 text-left">取得日時</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-neutral-200">
+              {added.map((c) => (
+                <tr key={c.id}>
+                  <td className="px-3 py-2">{c.company_name || "-"}</td>
+                  <td className="px-3 py-2">
+                    {c.website ? (
+                      <a
+                        href={c.website}
+                        target="_blank"
+                        className="text-indigo-700 hover:underline break-all"
+                      >
+                        {c.website}
+                      </a>
+                    ) : (
+                      "-"
+                    )}
+                  </td>
+                  <td className="px-3 py-2">{c.contact_email || "-"}</td>
+                  <td className="px-3 py-2">{c.source_site || "-"}</td>
+                  <td className="px-3 py-2">
+                    {c.created_at
+                      ? c.created_at.replace("T", " ").replace("Z", "")
+                      : "-"}
+                  </td>
+                </tr>
+              ))}
+              {added.length === 0 && (
+                <tr>
+                  <td
+                    colSpan={5}
+                    className="px-4 py-10 text-center text-neutral-400"
+                  >
+                    新規追加はありません
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </section>
+
         {msg && (
-          <pre className="mt-3 whitespace-pre-wrap text-xs text-neutral-700">
+          <pre className="mt-3 whitespace-pre-wrap text-xs text-neutral-600">
             {msg}
           </pre>
         )}
       </main>
     </>
   );
+}
+
+function StepCard({ title, state }: { title: string; state: StepState }) {
+  const icon =
+    state === "running" ? (
+      <Loader2 className="h-8 w-8 animate-spin text-neutral-700" />
+    ) : state === "done" ? (
+      <CheckCircle className="h-8 w-8 text-emerald-600" />
+    ) : state === "error" ? (
+      <XCircle className="h-8 w-8 text-red-600" />
+    ) : (
+      <Play className="h-8 w-8 text-neutral-500" />
+    );
+
+  return (
+    <div className="rounded-xl border border-neutral-200 bg-white p-4 shadow-sm">
+      <div className="mb-2 text-sm font-semibold text-neutral-800">{title}</div>
+      <div className="flex items-center justify-center py-6">{icon}</div>
+      <div className="text-center text-xs text-neutral-500">
+        {state === "idle" && "待機中"}
+        {state === "running" && "実行中…"}
+        {state === "done" && "完了"}
+        {state === "error" && "失敗"}
+      </div>
+    </div>
+  );
+}
+
+function wait(ms: number) {
+  return new Promise((res) => setTimeout(res, ms));
 }

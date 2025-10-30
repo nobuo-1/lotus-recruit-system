@@ -1,54 +1,39 @@
-// web/src/app/api/form-outreach/companies/route.ts
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
+import { supabaseServer } from "@/lib/supabaseServer";
 
-const URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const KEY =
-  process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-function h(tenantId: string) {
-  return {
-    apikey: KEY!,
-    Authorization: `Bearer ${KEY}`,
-    "Content-Type": "application/json",
-    "x-tenant-id": tenantId,
-  };
-}
-
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   try {
-    const tenantId = req.headers.get("x-tenant-id") || "";
+    const tenantId = req.headers.get("x-tenant-id") ?? "";
     if (!tenantId) {
-      return NextResponse.json(
-        { error: "x-tenant-id header required" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "missing tenant id" }, { status: 400 });
     }
+    const sb = await supabaseServer();
 
-    // form_prospects から必要な列を抽出（website をサイトURLとして利用）
-    const url =
-      `${URL}/rest/v1/form_prospects?tenant_id=eq.${tenantId}` +
-      `&select=id,tenant_id,company_name,website,contact_form_url,contact_email,job_site_source,created_at` +
-      `&order=created_at.desc,nullslast`;
+    // 必要フィールドのみselect。nullsLastはorderのオプションで扱い、列としてselectしない。
+    const { data, error } = await sb
+      .from("form_prospects")
+      .select(
+        "id, tenant_id, source_site, company_name, website, contact_email, created_at, contact_form_url"
+      )
+      .eq("tenant_id", tenantId)
+      .order("created_at", { ascending: false, nullsFirst: false });
 
-    const r = await fetch(url, { headers: h(tenantId), cache: "no-store" });
-    const j = await r.json();
-    if (!r.ok) {
-      return NextResponse.json(
-        { error: j?.message || "fetch failed" },
-        { status: r.status }
-      );
-    }
+    if (error)
+      return NextResponse.json({ error: error.message }, { status: 500 });
 
-    const rows = (j as any[]).map((x) => ({
-      id: x.id,
-      tenant_id: x.tenant_id,
-      company_name: x.company_name,
-      website: x.website,
-      contact_form_url: x.contact_form_url,
-      contact_email: x.contact_email,
-      source_site: x.job_site_source,
-      created_at: x.created_at,
+    // フロントの期待に合わせてエイリアス整形（site_company_url = website）
+    const rows = (data || []).map((r) => ({
+      id: r.id,
+      tenant_id: r.tenant_id,
+      source_site: r.source_site,
+      company_name: r.company_name,
+      site_company_url: r.website, // ← フロントがこの名前で参照
+      official_website_url: null, // 使わない
+      contact_form_url: r.contact_form_url,
+      contact_email: r.contact_email,
+      is_blocked: null,
+      last_checked_at: null,
+      created_at: r.created_at,
     }));
 
     return NextResponse.json({ rows });

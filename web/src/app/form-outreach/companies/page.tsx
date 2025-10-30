@@ -3,6 +3,7 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import AppHeader from "@/components/AppHeader";
+import Link from "next/link";
 
 const TENANT_ID = "175b1a9d-3f85-482d-9323-68a44d214424";
 
@@ -159,13 +160,13 @@ export default function CompaniesPage() {
             >
               {showFilters ? "フィルタを隠す" : "フィルタを表示"}
             </button>
-            <button
-              onClick={fetchNow}
-              disabled={loading}
-              className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50 disabled:opacity-50"
+            <Link
+              href="/form-outreach/companies/fetch"
+              className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
+              title="手動で企業リストを取得"
             >
-              {loading ? "取得中…" : "今すぐ企業リストを取得"}
-            </button>
+              企業リスト手動取得
+            </Link>
           </div>
         </div>
 

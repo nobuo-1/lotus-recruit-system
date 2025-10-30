@@ -7,24 +7,15 @@ import AppHeader from "@/components/AppHeader";
 const TENANT_ID = "175b1a9d-3f85-482d-9323-68a44d214424";
 
 type Settings = {
-  // 自動化フラグ
   auto_company_list: boolean;
   auto_send_messages: boolean;
-
-  // 両方可能時の優先チャンネル
   dual_channel_priority: "form" | "email";
-
-  // 法人リスト自動化
   company_schedule: "weekly" | "monthly";
-  company_weekday?: number; // 1(月)〜7(日)
-  company_month_day?: number; // 1-31
-  company_limit?: number; // 取得件数
-
-  // 送信自動化（承認フロー）
+  company_weekday?: number;
+  company_month_day?: number;
+  company_limit?: number;
   confirm_by_email?: boolean;
   confirm_email_address?: string;
-
-  // サーバーから返る想定
   updated_at?: string | null;
 };
 
@@ -39,8 +30,8 @@ type ConflictRow = {
 export default function AutomationPage() {
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(false);
-  const [editing, setEditing] = useState(false);
 
+  // 画面表示用の「現在設定」
   const [settings, setSettings] = useState<Settings>({
     auto_company_list: false,
     auto_send_messages: false,
@@ -54,14 +45,16 @@ export default function AutomationPage() {
     updated_at: null,
   });
 
+  // モーダル内の編集用（開いた時に現設定をコピー）
+  const [modalOpen, setModalOpen] = useState(false);
+  const [draft, setDraft] = useState<Settings>(settings);
+
   const [conflicts, setConflicts] = useState<ConflictRow[]>([]);
 
-  // 初期ロード
   useEffect(() => {
     const load = async () => {
       setMsg("");
       try {
-        // 設定ロード
         const res = await fetch("/api/form-outreach/automation/settings", {
           headers: { "x-tenant-id": TENANT_ID },
           cache: "no-store",
@@ -70,15 +63,10 @@ export default function AutomationPage() {
           const j = await res.json().catch(() => ({}));
           const s = (j?.settings ?? j) as Partial<Settings>;
           const updated = j?.updatedAt || j?.updated_at || s.updated_at || null;
-
-          setSettings((prev) => ({
-            ...prev,
-            ...s,
-            updated_at: updated,
-          }));
+          setSettings((prev) => ({ ...prev, ...s, updated_at: updated }));
+          setDraft((prev) => ({ ...prev, ...s, updated_at: updated }));
         }
 
-        // クライアント被り候補
         const rc = await fetch("/api/form-outreach/conflicts", {
           headers: { "x-tenant-id": TENANT_ID },
           cache: "no-store",
@@ -96,7 +84,12 @@ export default function AutomationPage() {
     load();
   }, []);
 
-  // 保存
+  const openModal = () => {
+    setDraft(settings); // 現在設定を引き継ぐ
+    setModalOpen(true);
+  };
+  const closeModal = () => setModalOpen(false);
+
   const save = async () => {
     if (loading) return;
     setLoading(true);
@@ -108,16 +101,16 @@ export default function AutomationPage() {
           "content-type": "application/json",
           "x-tenant-id": TENANT_ID,
         },
-        body: JSON.stringify({ settings }),
+        body: JSON.stringify({ settings: draft }),
       });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j?.error || "save failed");
 
       const updated = j?.updatedAt || j?.updated_at || new Date().toISOString();
-
-      setSettings((prev) => ({ ...prev, updated_at: updated }));
+      // 画面の現在設定を更新
+      setSettings({ ...draft, updated_at: updated });
       setMsg(`更新しました（${formatTs(updated)}）`);
-      setEditing(false);
+      setModalOpen(false);
     } catch (e: any) {
       setMsg(String(e?.message || e));
     } finally {
@@ -125,28 +118,8 @@ export default function AutomationPage() {
     }
   };
 
-  // 取消（再読込）
-  const cancel = () => {
-    setEditing(false);
-    (async () => {
-      try {
-        const res = await fetch("/api/form-outreach/automation/settings", {
-          headers: { "x-tenant-id": TENANT_ID },
-          cache: "no-store",
-        });
-        const j = await res.json().catch(() => ({}));
-        const s = (j?.settings ?? j) as Partial<Settings>;
-        const updated = j?.updatedAt || j?.updated_at || s.updated_at || null;
-        setSettings((prev) => ({ ...prev, ...s, updated_at: updated }));
-      } catch {}
-    })();
-  };
-
-  // 現在設定の要約（チップに分割）
   const summaryChips = useMemo(() => {
     const chips: string[] = [];
-
-    // 法人リストの自動作成
     if (settings.auto_company_list) {
       if (settings.company_schedule === "weekly") {
         chips.push(
@@ -159,29 +132,23 @@ export default function AutomationPage() {
     } else {
       chips.push("法人リスト: 自動化しない");
     }
-
-    // メッセージ送信の自動化
     if (settings.auto_send_messages) {
       chips.push(
         `送信: 自動（優先=${
           settings.dual_channel_priority === "form" ? "フォーム" : "メール"
         })`
       );
-      if (settings.confirm_by_email) {
-        chips.push(
-          `承認: メール確認（${settings.confirm_email_address || "-"}）`
-        );
-      } else {
-        chips.push("承認: なし（即時実行）");
-      }
+      chips.push(
+        settings.confirm_by_email
+          ? `承認: メール確認（${settings.confirm_email_address || "-"}）`
+          : "承認: なし（即時実行）"
+      );
     } else {
       chips.push("送信: 自動化しない");
     }
-
     return chips;
   }, [settings]);
 
-  // 右側薄文字の一文サマリ
   const summaryInline = useMemo(() => {
     const parts: string[] = [];
     if (settings.auto_company_list) {
@@ -215,7 +182,6 @@ export default function AutomationPage() {
     <>
       <AppHeader showBack />
       <main className="mx-auto max-w-6xl p-6">
-        {/* ヘッダー + 現在設定の強調カード */}
         <div className="mb-4">
           <div className="flex items-start justify-between gap-3">
             <div>
@@ -227,42 +193,21 @@ export default function AutomationPage() {
                 {settings.updated_at ? formatTs(settings.updated_at) : "-"}
               </p>
             </div>
-
             <div className="shrink-0">
-              {!editing ? (
-                <button
-                  onClick={() => setEditing(true)}
-                  className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
-                >
-                  設定変更
-                </button>
-              ) : (
-                <div className="flex gap-2">
-                  <button
-                    onClick={cancel}
-                    className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
-                  >
-                    キャンセル
-                  </button>
-                  <button
-                    onClick={save}
-                    disabled={loading}
-                    className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50 disabled:opacity-50"
-                  >
-                    {loading ? "保存中…" : "保存する"}
-                  </button>
-                </div>
-              )}
+              <button
+                onClick={openModal}
+                className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
+              >
+                設定変更
+              </button>
             </div>
           </div>
 
-          {/* 強調された現在設定カード */}
+          {/* 現在設定の強調カード */}
           <div className="mt-3 rounded-2xl border border-neutral-200 bg-neutral-50/60 p-4">
             <div className="mb-2 text-sm font-medium text-neutral-800">
               現在の設定
             </div>
-
-            {/* チップ群 */}
             <div className="flex flex-wrap gap-2">
               {summaryChips.map((chip, i) => (
                 <span
@@ -273,277 +218,18 @@ export default function AutomationPage() {
                 </span>
               ))}
             </div>
-
-            {/* 薄文字のインライン要約（常時表示） */}
             <div className="mt-2 text-[11px] text-neutral-500">
               {summaryInline}
             </div>
 
-            {/* 2カラムの概要グリッド */}
             <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
-              {/* 法人リスト自動化 概要 */}
-              <div className="rounded-xl border border-neutral-200 bg-white p-3 shadow-sm">
-                <div className="mb-1 text-sm font-semibold text-neutral-800">
-                  法人リスト自動化
-                </div>
-                <dl className="grid grid-cols-3 gap-x-3 gap-y-1 text-xs text-neutral-700">
-                  <dt className="col-span-1 text-neutral-500">状態</dt>
-                  <dd className="col-span-2">
-                    {settings.auto_company_list ? "自動化オン" : "自動化なし"}
-                  </dd>
-
-                  <dt className="col-span-1 text-neutral-500">スケジュール</dt>
-                  <dd className="col-span-2">
-                    {settings.company_schedule === "weekly"
-                      ? `週次（${weekdayLabel(settings.company_weekday)}）`
-                      : `月次（毎月${settings.company_month_day}日）`}
-                  </dd>
-
-                  <dt className="col-span-1 text-neutral-500">取得件数</dt>
-                  <dd className="col-span-2">
-                    {settings.company_limit ?? "-"}
-                  </dd>
-                </dl>
-              </div>
-
-              {/* メッセージ送信 概要 */}
-              <div className="rounded-xl border border-neutral-200 bg-white p-3 shadow-sm">
-                <div className="mb-1 text-sm font-semibold text-neutral-800">
-                  メッセージ送信自動化
-                </div>
-                <dl className="grid grid-cols-3 gap-x-3 gap-y-1 text-xs text-neutral-700">
-                  <dt className="col-span-1 text-neutral-500">状態</dt>
-                  <dd className="col-span-2">
-                    {settings.auto_send_messages ? "自動化オン" : "自動化なし"}
-                  </dd>
-
-                  <dt className="col-span-1 text-neutral-500">優先</dt>
-                  <dd className="col-span-2">
-                    {settings.dual_channel_priority === "form"
-                      ? "フォーム"
-                      : "メール"}
-                  </dd>
-
-                  <dt className="col-span-1 text-neutral-500">承認</dt>
-                  <dd className="col-span-2">
-                    {settings.confirm_by_email
-                      ? `メール確認（${settings.confirm_email_address || "-"}）`
-                      : "なし（即時実行）"}
-                  </dd>
-                </dl>
-              </div>
+              <BlockA settings={settings} />
+              <BlockB settings={settings} />
             </div>
           </div>
         </div>
 
-        {/* 設定フォーム（「設定変更」クリック時のみ表示） */}
-        {editing && (
-          <section className="rounded-2xl border border-neutral-200 p-4 mb-6">
-            {/* 法人リスト自動化 */}
-            <div className="mb-4">
-              <label className="flex items-center gap-2 text-sm text-neutral-800">
-                <input
-                  type="checkbox"
-                  checked={settings.auto_company_list}
-                  onChange={(e) =>
-                    setSettings((s) => ({
-                      ...s,
-                      auto_company_list: e.target.checked,
-                    }))
-                  }
-                />
-                法人リストの作成を自動で行う
-              </label>
-
-              {settings.auto_company_list && (
-                <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-4">
-                  <div>
-                    <div className="mb-1 text-xs text-neutral-600">頻度</div>
-                    <select
-                      className="w-full rounded-lg border border-neutral-300 px-2 py-2 text-sm"
-                      value={settings.company_schedule}
-                      onChange={(e) =>
-                        setSettings((s) => ({
-                          ...s,
-                          company_schedule: e.target.value as
-                            | "weekly"
-                            | "monthly",
-                        }))
-                      }
-                    >
-                      <option value="weekly">週次</option>
-                      <option value="monthly">月次</option>
-                    </select>
-                  </div>
-
-                  {settings.company_schedule === "weekly" ? (
-                    <div>
-                      <div className="mb-1 text-xs text-neutral-600">
-                        実行曜日
-                      </div>
-                      <select
-                        className="w-full rounded-lg border border-neutral-300 px-2 py-2 text-sm"
-                        value={settings.company_weekday ?? 1}
-                        onChange={(e) =>
-                          setSettings((s) => ({
-                            ...s,
-                            company_weekday: Number(e.target.value),
-                          }))
-                        }
-                      >
-                        {[1, 2, 3, 4, 5, 6, 7].map((d) => (
-                          <option key={d} value={d}>
-                            {weekdayLabel(d)}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  ) : (
-                    <div>
-                      <div className="mb-1 text-xs text-neutral-600">
-                        実行日
-                      </div>
-                      <input
-                        type="number"
-                        min={1}
-                        max={31}
-                        className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
-                        value={settings.company_month_day ?? 1}
-                        onChange={(e) =>
-                          setSettings((s) => ({
-                            ...s,
-                            company_month_day: clampInt(e.target.value, 1, 31),
-                          }))
-                        }
-                      />
-                    </div>
-                  )}
-
-                  <div>
-                    <div className="mb-1 text-xs text-neutral-600">
-                      取得件数
-                    </div>
-                    <input
-                      type="number"
-                      min={1}
-                      className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
-                      value={settings.company_limit ?? 100}
-                      onChange={(e) =>
-                        setSettings((s) => ({
-                          ...s,
-                          company_limit: clampInt(e.target.value, 1, 100000),
-                        }))
-                      }
-                    />
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <hr className="my-4 border-neutral-200" />
-
-            {/* メッセージ送信自動化 */}
-            <div className="mb-4">
-              <label className="flex items-center gap-2 text-sm text-neutral-800">
-                <input
-                  type="checkbox"
-                  checked={settings.auto_send_messages}
-                  onChange={(e) =>
-                    setSettings((s) => ({
-                      ...s,
-                      auto_send_messages: e.target.checked,
-                    }))
-                  }
-                />
-                メッセージの送信を自動で行う
-              </label>
-
-              {settings.auto_send_messages && (
-                <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
-                  <div>
-                    <div className="mb-1 text-xs text-neutral-600">
-                      優先チャンネル
-                    </div>
-                    <div className="flex items-center gap-4 text-sm">
-                      <label className="flex items-center gap-1">
-                        <input
-                          type="radio"
-                          name="prio"
-                          checked={settings.dual_channel_priority === "form"}
-                          onChange={() =>
-                            setSettings((s) => ({
-                              ...s,
-                              dual_channel_priority: "form",
-                            }))
-                          }
-                        />
-                        フォーム
-                      </label>
-                      <label className="flex items-center gap-1">
-                        <input
-                          type="radio"
-                          name="prio"
-                          checked={settings.dual_channel_priority === "email"}
-                          onChange={() =>
-                            setSettings((s) => ({
-                              ...s,
-                              dual_channel_priority: "email",
-                            }))
-                          }
-                        />
-                        メール
-                      </label>
-                    </div>
-                  </div>
-
-                  <div>
-                    <div className="mb-1 text-xs text-neutral-600">
-                      送信前確認
-                    </div>
-                    <label className="flex items-center gap-2 text-sm text-neutral-800">
-                      <input
-                        type="checkbox"
-                        checked={!!settings.confirm_by_email}
-                        onChange={(e) =>
-                          setSettings((s) => ({
-                            ...s,
-                            confirm_by_email: e.target.checked,
-                          }))
-                        }
-                      />
-                      メールで承認する
-                    </label>
-                  </div>
-
-                  {settings.confirm_by_email && (
-                    <div>
-                      <div className="mb-1 text-xs text-neutral-600">
-                        確認用メールアドレス
-                      </div>
-                      <input
-                        type="email"
-                        className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
-                        placeholder="example@yourdomain.jp"
-                        value={settings.confirm_email_address ?? ""}
-                        onChange={(e) =>
-                          setSettings((s) => ({
-                            ...s,
-                            confirm_email_address: e.target.value.trim(),
-                          }))
-                        }
-                      />
-                      <p className="mt-1 text-[11px] text-neutral-500">
-                        送信予定のリストがこのアドレスへ届き、メール上の「実行」ボタン押下で送信されます。
-                      </p>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          </section>
-        )}
-
-        {/* クライアントと被っている可能性のある企業リスト */}
+        {/* 被り候補 */}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden">
           <div className="px-4 py-3 border-b border-neutral-200 bg-neutral-50 text-sm font-medium text-neutral-800">
             クライアントと被っている可能性のある企業
@@ -600,7 +286,311 @@ export default function AutomationPage() {
           </pre>
         )}
       </main>
+
+      {/* ▼ 設定変更モーダル（現設定を引き継いで編集） */}
+      {modalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30"
+          onClick={closeModal}
+        >
+          <div
+            className="w-full max-w-3xl rounded-2xl border border-neutral-200 bg-white p-4 shadow-lg"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 flex items-center justify-between">
+              <div className="text-base font-semibold text-neutral-800">
+                自動実行設定の変更
+              </div>
+              <button
+                onClick={closeModal}
+                className="rounded-lg border border-neutral-200 px-2 py-1 text-xs hover:bg-neutral-50"
+              >
+                閉じる
+              </button>
+            </div>
+
+            {/* 設定フォーム */}
+            <section className="rounded-xl border border-neutral-200 p-3">
+              {/* 法人リスト自動化 */}
+              <div className="mb-4">
+                <label className="flex items-center gap-2 text-sm text-neutral-800">
+                  <input
+                    type="checkbox"
+                    checked={draft.auto_company_list}
+                    onChange={(e) =>
+                      setDraft((s) => ({
+                        ...s,
+                        auto_company_list: e.target.checked,
+                      }))
+                    }
+                  />
+                  法人リストの作成を自動で行う
+                </label>
+
+                {draft.auto_company_list && (
+                  <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-4">
+                    <div>
+                      <div className="mb-1 text-xs text-neutral-600">頻度</div>
+                      <select
+                        className="w-full rounded-lg border border-neutral-300 px-2 py-2 text-sm"
+                        value={draft.company_schedule}
+                        onChange={(e) =>
+                          setDraft((s) => ({
+                            ...s,
+                            company_schedule: e.target.value as
+                              | "weekly"
+                              | "monthly",
+                          }))
+                        }
+                      >
+                        <option value="weekly">週次</option>
+                        <option value="monthly">月次</option>
+                      </select>
+                    </div>
+
+                    {draft.company_schedule === "weekly" ? (
+                      <div>
+                        <div className="mb-1 text-xs text-neutral-600">
+                          実行曜日
+                        </div>
+                        <select
+                          className="w-full rounded-lg border border-neutral-300 px-2 py-2 text-sm"
+                          value={draft.company_weekday ?? 1}
+                          onChange={(e) =>
+                            setDraft((s) => ({
+                              ...s,
+                              company_weekday: Number(e.target.value),
+                            }))
+                          }
+                        >
+                          {[1, 2, 3, 4, 5, 6, 7].map((d) => (
+                            <option key={d} value={d}>
+                              {weekdayLabel(d)}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    ) : (
+                      <div>
+                        <div className="mb-1 text-xs text-neutral-600">
+                          実行日
+                        </div>
+                        <input
+                          type="number"
+                          min={1}
+                          max={31}
+                          className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
+                          value={draft.company_month_day ?? 1}
+                          onChange={(e) =>
+                            setDraft((s) => ({
+                              ...s,
+                              company_month_day: clampInt(
+                                e.target.value,
+                                1,
+                                31
+                              ),
+                            }))
+                          }
+                        />
+                      </div>
+                    )}
+
+                    <div>
+                      <div className="mb-1 text-xs text-neutral-600">
+                        取得件数
+                      </div>
+                      <input
+                        type="number"
+                        min={1}
+                        className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
+                        value={draft.company_limit ?? 100}
+                        onChange={(e) =>
+                          setDraft((s) => ({
+                            ...s,
+                            company_limit: clampInt(e.target.value, 1, 100000),
+                          }))
+                        }
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <hr className="my-4 border-neutral-200" />
+
+              {/* メッセージ送信自動化 */}
+              <div className="mb-2">
+                <label className="flex items-center gap-2 text-sm text-neutral-800">
+                  <input
+                    type="checkbox"
+                    checked={draft.auto_send_messages}
+                    onChange={(e) =>
+                      setDraft((s) => ({
+                        ...s,
+                        auto_send_messages: e.target.checked,
+                      }))
+                    }
+                  />
+                  メッセージの送信を自動で行う
+                </label>
+
+                {draft.auto_send_messages && (
+                  <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
+                    <div>
+                      <div className="mb-1 text-xs text-neutral-600">
+                        優先チャンネル
+                      </div>
+                      <div className="flex items-center gap-4 text-sm">
+                        <label className="flex items-center gap-1">
+                          <input
+                            type="radio"
+                            name="prio"
+                            checked={draft.dual_channel_priority === "form"}
+                            onChange={() =>
+                              setDraft((s) => ({
+                                ...s,
+                                dual_channel_priority: "form",
+                              }))
+                            }
+                          />
+                          フォーム
+                        </label>
+                        <label className="flex items-center gap-1">
+                          <input
+                            type="radio"
+                            name="prio"
+                            checked={draft.dual_channel_priority === "email"}
+                            onChange={() =>
+                              setDraft((s) => ({
+                                ...s,
+                                dual_channel_priority: "email",
+                              }))
+                            }
+                          />
+                          メール
+                        </label>
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="mb-1 text-xs text-neutral-600">
+                        送信前確認
+                      </div>
+                      <label className="flex items-center gap-2 text-sm text-neutral-800">
+                        <input
+                          type="checkbox"
+                          checked={!!draft.confirm_by_email}
+                          onChange={(e) =>
+                            setDraft((s) => ({
+                              ...s,
+                              confirm_by_email: e.target.checked,
+                            }))
+                          }
+                        />
+                        メールで承認する
+                      </label>
+                    </div>
+
+                    {draft.confirm_by_email && (
+                      <div>
+                        <div className="mb-1 text-xs text-neutral-600">
+                          確認用メールアドレス
+                        </div>
+                        <input
+                          type="email"
+                          className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
+                          placeholder="example@yourdomain.jp"
+                          value={draft.confirm_email_address ?? ""}
+                          onChange={(e) =>
+                            setDraft((s) => ({
+                              ...s,
+                              confirm_email_address: e.target.value.trim(),
+                            }))
+                          }
+                        />
+                        <p className="mt-1 text-[11px] text-neutral-500">
+                          送信予定リストがこのアドレスへ届き、メール上の「実行」ボタン押下で送信されます。
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </section>
+
+            <div className="mt-3 flex justify-end gap-2">
+              <button
+                onClick={closeModal}
+                className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
+              >
+                キャンセル
+              </button>
+              <button
+                onClick={save}
+                disabled={loading}
+                className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50 disabled:opacity-50"
+              >
+                {loading ? "保存中…" : "保存する"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
+  );
+}
+
+function BlockA({ settings }: { settings: Settings }) {
+  return (
+    <div className="rounded-xl border border-neutral-200 bg-white p-3 shadow-sm">
+      <div className="mb-1 text-sm font-semibold text-neutral-800">
+        法人リスト自動化
+      </div>
+      <dl className="grid grid-cols-3 gap-x-3 gap-y-1 text-xs text-neutral-700">
+        <dt className="col-span-1 text-neutral-500">状態</dt>
+        <dd className="col-span-2">
+          {settings.auto_company_list ? "自動化オン" : "自動化なし"}
+        </dd>
+
+        <dt className="col-span-1 text-neutral-500">スケジュール</dt>
+        <dd className="col-span-2">
+          {settings.company_schedule === "weekly"
+            ? `週次（${weekdayLabel(settings.company_weekday)}）`
+            : `月次（毎月${settings.company_month_day}日）`}
+        </dd>
+
+        <dt className="col-span-1 text-neutral-500">取得件数</dt>
+        <dd className="col-span-2">{settings.company_limit ?? "-"}</dd>
+      </dl>
+    </div>
+  );
+}
+
+function BlockB({ settings }: { settings: Settings }) {
+  return (
+    <div className="rounded-xl border border-neutral-200 bg-white p-3 shadow-sm">
+      <div className="mb-1 text-sm font-semibold text-neutral-800">
+        メッセージ送信自動化
+      </div>
+      <dl className="grid grid-cols-3 gap-x-3 gap-y-1 text-xs text-neutral-700">
+        <dt className="col-span-1 text-neutral-500">状態</dt>
+        <dd className="col-span-2">
+          {settings.auto_send_messages ? "自動化オン" : "自動化なし"}
+        </dd>
+
+        <dt className="col-span-1 text-neutral-500">優先</dt>
+        <dd className="col-span-2">
+          {settings.dual_channel_priority === "form" ? "フォーム" : "メール"}
+        </dd>
+
+        <dt className="col-span-1 text-neutral-500">承認</dt>
+        <dd className="col-span-2">
+          {settings.confirm_by_email
+            ? `メール確認（${settings.confirm_email_address || "-"}）`
+            : "なし（即時実行）"}
+        </dd>
+      </dl>
+    </div>
   );
 }
 

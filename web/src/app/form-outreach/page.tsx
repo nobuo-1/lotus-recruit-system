@@ -138,10 +138,18 @@ export default function FormOutreachLanding() {
               <ul className="mt-1.5 space-y-1.5">
                 <li>
                   <Link
+                    href="/form-outreach/companies/fetch"
+                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
+                  >
+                    企業リスト手動取得
+                  </Link>
+                </li>
+                <li>
+                  <Link
                     href="/form-outreach/runs/manual"
                     className="text-base text-neutral-800 underline-offset-2 hover:underline"
                   >
-                    手動実行
+                    メッセージ手動送信
                   </Link>
                 </li>
                 <li>
@@ -149,7 +157,7 @@ export default function FormOutreachLanding() {
                     href="/form-outreach/schedules"
                     className="text-base text-neutral-800 underline-offset-2 hover:underline"
                   >
-                    送信ログ / スケジュール
+                    送信ログ
                   </Link>
                 </li>
               </ul>
