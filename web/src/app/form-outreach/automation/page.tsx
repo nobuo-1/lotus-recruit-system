@@ -62,7 +62,11 @@ export default function AutomationPage() {
         if (res.ok) {
           const j = await res.json().catch(() => ({}));
           const s = (j?.settings ?? j) as Partial<Settings>;
-          const updated = j?.updatedAt || j?.updated_at || s.updated_at || null;
+          const updated =
+            (j as any)?.updatedAt ||
+            (j as any)?.updated_at ||
+            s.updated_at ||
+            null;
           setSettings((prev) => ({ ...prev, ...s, updated_at: updated }));
           setDraft((prev) => ({ ...prev, ...s, updated_at: updated }));
         }
@@ -104,12 +108,18 @@ export default function AutomationPage() {
         body: JSON.stringify({ settings: draft }),
       });
       const j = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(j?.error || "save failed");
+      if (!r.ok) throw new Error((j as any)?.error || "save failed");
 
-      const updated = j?.updatedAt || j?.updated_at || new Date().toISOString();
-      // 画面の現在設定を更新
+      const updated: string =
+        (j as any)?.updatedAt ||
+        (j as any)?.updated_at ||
+        new Date().toISOString();
+
+      // 画面の現在設定を更新（即時反映）
       setSettings({ ...draft, updated_at: updated });
-      setMsg(`更新しました（${formatTs(updated)}）`);
+      setMsg(`更新しました（${formatTsJST(updated)}）`);
+
+      // モーダルを自動で閉じる
       setModalOpen(false);
     } catch (e: any) {
       setMsg(String(e?.message || e));
@@ -136,7 +146,7 @@ export default function AutomationPage() {
       chips.push(
         `送信: 自動（優先=${
           settings.dual_channel_priority === "form" ? "フォーム" : "メール"
-        })`
+        }）`
       );
       chips.push(
         settings.confirm_by_email
@@ -189,8 +199,7 @@ export default function AutomationPage() {
                 自動実行設定
               </h1>
               <p className="mt-1 text-xs text-neutral-500">
-                最終更新：
-                {settings.updated_at ? formatTs(settings.updated_at) : "-"}
+                最終更新：{formatTsJST(settings.updated_at)}
               </p>
             </div>
             <div className="shrink-0">
@@ -261,9 +270,7 @@ export default function AutomationPage() {
                       "-"
                     )}
                   </td>
-                  <td className="px-3 py-2">
-                    {c.detected_at ? formatTs(c.detected_at) : "-"}
-                  </td>
+                  <td className="px-3 py-2">{formatTsJST(c.detected_at)}</td>
                 </tr>
               ))}
               {conflicts.length === 0 && (
@@ -607,14 +614,32 @@ function weekdayLabel(d?: number) {
   return d && map[d] ? map[d] : "毎週月曜";
 }
 
-function formatTs(ts: string) {
-  try {
-    const t = ts.replace("T", " ").replace("Z", "");
-    const dt = t.split(".")[0] || t;
-    return dt;
-  } catch {
-    return ts;
-  }
+// JST(日本時間)で YYYY-MM-DD HH:MM 表示
+function formatTsJST(ts?: string | null) {
+  if (!ts) return "-";
+  const d = new Date(ts);
+  const y = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+  }).format(d);
+  const m = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    month: "2-digit",
+  }).format(d);
+  const day = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    day: "2-digit",
+  }).format(d);
+  const hh = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    hour: "2-digit",
+    hour12: false,
+  }).format(d);
+  const mm = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    minute: "2-digit",
+  }).format(d);
+  return `${y}-${m}-${day} ${hh}:${mm}`;
 }
 
 function clampInt(v: string, min: number, max: number) {

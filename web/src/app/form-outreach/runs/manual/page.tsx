@@ -450,7 +450,7 @@ export default function ManualRuns() {
           onClick={() => setShowTplModal(false)}
         >
           <div
-            className="w-full max-w-lg rounded-2xl border border-neutral-200 bg-white p-4 shadow-lg"
+            className="w-full max-w-3xl rounded-2xl border border-neutral-200 bg-white p-4 shadow-lg"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="mb-3 flex items-center justify-between">
