@@ -11,7 +11,9 @@ function headersJSON(tenantId: string) {
     apikey: SERVICE_KEY!,
     Authorization: `Bearer ${SERVICE_KEY}`,
     "Content-Type": "application/json",
-    Prefer: "resolution=merge-duplicates", // upsert
+    Accept: "application/json",
+    // ここが重要：保存後に representation を返させる
+    Prefer: "resolution=merge-duplicates,return=representation",
     "x-tenant-id": tenantId,
   };
 }
@@ -25,19 +27,17 @@ export async function GET(req: NextRequest) {
         { status: 400 }
       );
     }
-
     const r = await fetch(
       `${URL}/rest/v1/form_outreach_automation_settings?tenant_id=eq.${tenantId}&select=*`,
       { headers: headersJSON(tenantId), cache: "no-store" }
     );
-    const rows = await r.json();
+    const rows = await r.json().catch(() => []);
     if (!r.ok) {
       return NextResponse.json(
-        { error: rows?.message || "fetch failed" },
+        { error: (rows as any)?.message || "fetch failed" },
         { status: r.status }
       );
     }
-
     const settings = Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
     return NextResponse.json({
       settings,
@@ -61,13 +61,12 @@ export async function POST(req: NextRequest) {
       );
     }
     const body = await req.json().catch(() => ({}));
-    const settings = body?.settings ?? {};
+    const incoming = body?.settings ?? {};
 
-    // UPSERT (tenant_id をユニーク制約にしてあるため merge-duplicates が効く)
     const payload = [
       {
         tenant_id: tenantId,
-        ...settings,
+        ...incoming,
         updated_at: new Date().toISOString(),
       },
     ];
@@ -77,10 +76,12 @@ export async function POST(req: NextRequest) {
       headers: headersJSON(tenantId),
       body: JSON.stringify(payload),
     });
-    const j = await r.json();
+
+    // Prefer:return=representation により JSON が返る
+    const j = await r.json().catch(() => []);
     if (!r.ok) {
       return NextResponse.json(
-        { error: j?.message || "save failed" },
+        { error: (j as any)?.message || "save failed" },
         { status: r.status }
       );
     }
