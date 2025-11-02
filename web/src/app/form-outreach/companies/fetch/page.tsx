@@ -7,6 +7,7 @@ import Link from "next/link";
 import { CheckCircle, XCircle, Loader2, Play, ChevronDown } from "lucide-react";
 
 const LS_KEY = "fo_manual_fetch_latest"; // 1日キャッシュ
+const LS_FETCH_COUNT = "fo_manual_fetch_count"; // 最終実行件数を保存
 
 type StepState = "idle" | "running" | "done" | "error";
 
@@ -64,7 +65,11 @@ export default function ManualFetch() {
     updated_at: null,
   });
 
-  // 初期ロード：テナントとフィルタ、1日キャッシュ
+  // ▼ 実行前の件数指定モーダル
+  const [countModalOpen, setCountModalOpen] = useState(false);
+  const [fetchCount, setFetchCount] = useState<number>(60);
+
+  // 初期ロード：テナントとフィルタ、1日キャッシュ、最終件数
   useEffect(() => {
     (async () => {
       try {
@@ -104,8 +109,6 @@ export default function ManualFetch() {
             ? incoming.industries_small
             : Array.isArray(incoming.industries)
             ? incoming.industries
-            : Array.isArray(incoming.job_titles)
-            ? incoming.job_titles
             : [],
           updated_at: incoming.updated_at ?? null,
         });
@@ -121,6 +124,12 @@ export default function ManualFetch() {
             localStorage.removeItem(LS_KEY);
           }
         }
+
+        // 最終実行件数
+        const lastCount = Number(localStorage.getItem(LS_FETCH_COUNT));
+        if (Number.isFinite(lastCount) && lastCount > 0) {
+          setFetchCount(Math.max(10, Math.min(2000, lastCount)));
+        }
       } catch (e: any) {
         setMsg(String(e?.message || e));
       }
@@ -129,7 +138,25 @@ export default function ManualFetch() {
 
   const anyRunning = s1 === "running" || s2 === "running" || s3 === "running";
 
-  const run = async () => {
+  // 実行ボタン → 先に件数モーダルを開く
+  const openCountModal = () => {
+    if (anyRunning || loading) return;
+    if (!tenantId) {
+      setMsg("テナントが解決できませんでした。ログインを確認してください。");
+      return;
+    }
+    setCountModalOpen(true);
+  };
+
+  // モーダルから実行
+  const confirmAndRun = async () => {
+    setCountModalOpen(false);
+    // 値を保存
+    localStorage.setItem(LS_FETCH_COUNT, String(fetchCount));
+    await run(fetchCount);
+  };
+
+  const run = async (maxCount: number) => {
     if (anyRunning || loading) return;
     if (!tenantId) {
       setMsg("テナントが解決できませんでした。ログインを確認してください。");
@@ -150,6 +177,7 @@ export default function ManualFetch() {
       setOpen1(true);
       setLog1((v) => [
         ...v,
+        `取得件数: ${maxCount}件`,
         `都道府県: ${filters.prefectures.join(", ") || "全国"}`,
         `規模: ${filters.employee_size_ranges.join(", ") || "指定なし"}`,
         `キーワード: ${filters.keywords.join(", ") || "指定なし"}`,
@@ -170,7 +198,7 @@ export default function ManualFetch() {
       ]);
       await wait(300);
 
-      // ステップ3: 保存（API実行）— 送信は「業種のみ」
+      // ステップ3: 保存（API実行）
       setS2("done");
       setOpen3(true);
       setS3("running");
@@ -189,7 +217,7 @@ export default function ManualFetch() {
             keywords: filters.keywords,
             industries_large: filters.industries_large,
             industries_small: filters.industries_small,
-            max: 60,
+            max: maxCount,
           },
         }),
       });
@@ -289,12 +317,14 @@ export default function ManualFetch() {
           </div>
 
           {/* 右：ボタン（常に1行で表示） */}
-          <Link
-            href="/form-outreach/companies"
-            className="shrink-0 whitespace-nowrap rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
-          >
-            企業一覧へ
-          </Link>
+          <div className="shrink-0 whitespace-nowrap">
+            <Link
+              href="/form-outreach/companies"
+              className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
+            >
+              企業一覧へ
+            </Link>
+          </div>
         </div>
 
         {/* ワークフロー可視化 */}
@@ -309,7 +339,7 @@ export default function ManualFetch() {
                 取得フィルタ設定へ
               </Link>
               <button
-                onClick={run}
+                onClick={openCountModal}
                 disabled={anyRunning || loading}
                 className="inline-flex items-center gap-2 rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50 disabled:opacity-50"
               >
@@ -422,6 +452,18 @@ export default function ManualFetch() {
           </pre>
         )}
       </main>
+
+      {/* ▼ 実行件数モーダル */}
+      {countModalOpen && (
+        <CountModal
+          defaultValue={fetchCount}
+          onCloseAction={() => setCountModalOpen(false)}
+          onApplyAction={(n) => {
+            setFetchCount(n);
+            confirmAndRun();
+          }}
+        />
+      )}
     </>
   );
 }
@@ -509,4 +551,82 @@ async function safeJson(res: Response) {
   } catch {
     return {};
   }
+}
+
+/** 実行件数指定モーダル */
+function CountModal({
+  defaultValue,
+  onCloseAction,
+  onApplyAction,
+}: {
+  defaultValue: number;
+  onCloseAction: () => void;
+  onApplyAction: (n: number) => void;
+}) {
+  const [n, setN] = useState<number>(defaultValue ?? 60);
+
+  const clamp = (v: number) => Math.max(10, Math.min(2000, Math.floor(v)));
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="w-[520px] max-w-[96vw] rounded-2xl bg-white shadow-xl border border-neutral-200 overflow-hidden">
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200">
+          <div className="font-semibold">実行件数の指定</div>
+          <button
+            onClick={onCloseAction}
+            className="rounded-lg px-2 py-1 border border-neutral-300 hover:bg-neutral-50 text-sm"
+          >
+            閉じる
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="p-4 space-y-3">
+          <p className="text-sm text-neutral-700">
+            収集する企業数を指定してください（10〜2000件）。
+          </p>
+          <div className="flex items-center gap-3">
+            <input
+              type="range"
+              min={10}
+              max={2000}
+              step={10}
+              value={n}
+              onChange={(e) => setN(clamp(Number(e.target.value)))}
+              className="w-full"
+            />
+            <input
+              type="number"
+              min={10}
+              max={2000}
+              step={10}
+              value={n}
+              onChange={(e) => setN(clamp(Number(e.target.value)))}
+              className="w-28 rounded-lg border border-neutral-300 px-3 py-2 text-sm"
+            />
+          </div>
+          <p className="text-[11px] text-neutral-500">
+            ※ 大きい値を指定すると完了まで時間がかかる可能性があります。
+          </p>
+        </div>
+
+        {/* Footer（他モーダルと同系統） */}
+        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-neutral-200">
+          <button
+            onClick={() => setN(60)}
+            className="rounded-lg px-3 py-1 border border-neutral-300 text-sm hover:bg-neutral-50"
+          >
+            デフォルトに戻す（60件）
+          </button>
+          <button
+            onClick={() => onApplyAction(n)}
+            className="rounded-lg px-3 py-1 border border-neutral-300 text-sm hover:bg-neutral-50"
+          >
+            実行する
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
