@@ -31,7 +31,6 @@ type Filters = {
   prefectures: string[];
   employee_size_ranges: string[];
   keywords: string[];
-  // ↓ 職種は廃止。業種に統一
   industries_large: string[]; // 大分類
   industries_small: string[]; // 小分類
   updated_at?: string | null;
@@ -72,7 +71,7 @@ export default function ManualFetch() {
         // テナント
         let meRes = await fetch("/api/me/tenant", { cache: "no-store" });
         if (!meRes.ok) {
-          // 404対策で末尾スラありも再試行
+          // 一部環境の末尾スラ対策
           const meRes2 = await fetch("/api/me/tenant/", { cache: "no-store" });
           meRes = meRes2;
         }
@@ -100,7 +99,7 @@ export default function ManualFetch() {
           industries_large: Array.isArray(incoming.industries_large)
             ? incoming.industries_large
             : [],
-          // 後方互換（旧: job_titles/industries から拾っておく）
+          // 後方互換（旧: industries / job_titles からも拾う）
           industries_small: Array.isArray(incoming.industries_small)
             ? incoming.industries_small
             : Array.isArray(incoming.industries)
@@ -154,7 +153,6 @@ export default function ManualFetch() {
         `都道府県: ${filters.prefectures.join(", ") || "全国"}`,
         `規模: ${filters.employee_size_ranges.join(", ") || "指定なし"}`,
         `キーワード: ${filters.keywords.join(", ") || "指定なし"}`,
-        // 職種 → 業種（薄字ログに業種を反映）
         `業種(大): ${filters.industries_large.join(", ") || "指定なし"}`,
         `業種(小): ${
           filters.industries_small.slice(0, 10).join(", ") || "指定なし"
@@ -242,36 +240,25 @@ export default function ManualFetch() {
     }
   };
 
-  // フィルタ要約（上部に表示：デザイン維持・表現のみ「職種→業種」に変更）
-  const filtersSummary = useMemo(() => {
-    const a: string[] = [];
-    a.push(
-      `都道府県=${
-        filters.prefectures.length ? filters.prefectures.join(" / ") : "全国"
-      }`
-    );
-    a.push(
-      `規模=${
-        filters.employee_size_ranges.length
-          ? filters.employee_size_ranges.join(" / ")
-          : "指定なし"
-      }`
-    );
-    a.push(
-      `KW=${
-        filters.keywords.length ? filters.keywords.join(" / ") : "指定なし"
-      }`
-    );
-    // 職種→業種
-    const indLabel =
+  /** ========= フィルタ要約（改行位置を固定） ========= */
+  const summaryParts = useMemo(() => {
+    const pref = filters.prefectures.length
+      ? filters.prefectures.join(" / ")
+      : "全国";
+    const size = filters.employee_size_ranges.length
+      ? filters.employee_size_ranges.join(" / ")
+      : "指定なし";
+    const kw = filters.keywords.length
+      ? filters.keywords.join(" / ")
+      : "指定なし";
+    const ind =
       filters.industries_small.length > 0
         ? filters.industries_small.slice(0, 6).join(" / ") +
           (filters.industries_small.length > 6 ? " …" : "")
         : filters.industries_large.length > 0
         ? filters.industries_large.join(" / ")
         : "指定なし";
-    a.push(`業種=${indLabel}`);
-    return a.join(" / ");
+    return { pref, size, kw, ind };
   }, [filters]);
 
   return (
@@ -279,22 +266,32 @@ export default function ManualFetch() {
       <AppHeader showBack />
       <main className="mx-auto max-w-6xl p-6">
         <div className="mb-4 flex items-start justify-between gap-3">
-          <div>
+          {/* 左：テキスト（強制改行ポイントを挿入） */}
+          <div className="min-w-0">
             <h1 className="text-2xl font-semibold text-neutral-900">
               企業リスト手動取得
             </h1>
             <p className="text-sm text-neutral-500">
               固定ワークフローで取得します。各ステップの進行状況を可視化します。
             </p>
-            <p className="text-xs text-neutral-500 mt-1">
+            <p className="text-xs text-neutral-500 mt-1 break-words">
               テナント: <span className="font-mono">{tenantId ?? "-"}</span> /
+              <br />
               現在のフィルタ:{" "}
-              <span className="opacity-80">{filtersSummary}</span>
+              <span className="opacity-80">
+                都道府県={summaryParts.pref} / 規模={summaryParts.size}
+              </span>
+              <br />
+              <span className="opacity-80">KW={summaryParts.kw}</span>
+              <br />
+              <span className="opacity-80">業種={summaryParts.ind}</span>
             </p>
           </div>
+
+          {/* 右：ボタン（常に1行で表示） */}
           <Link
             href="/form-outreach/companies"
-            className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
+            className="shrink-0 whitespace-nowrap rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
           >
             企業一覧へ
           </Link>
