@@ -4,19 +4,26 @@
 import React, { useEffect, useMemo, useState } from "react";
 import AppHeader from "@/components/AppHeader";
 
-/** ====== 型 ====== */
+/** =========================
+ * 型
+ * ========================= */
+type IndustryLarge = (typeof INDUSTRY_LARGE)[number];
+
 type Filters = {
   prefectures: string[];
   employee_size_ranges: string[];
   keywords: string[];
-  industries: string[]; // 業種（複数選択）
+  industries_large: IndustryLarge[]; // ← 厳密化
+  industries_small: string[];
   updated_at?: string | null;
 };
 
-/** ====== 定数 ====== */
-const SIZE_OPTS = ["1-9", "10-49", "50-249", "250+"];
+/** =========================
+ * 定数
+ * ========================= */
+const SIZE_OPTS = ["1-9", "10-49", "50-249", "250+"] as const;
 
-// 47都道府県（グループ）
+// 47都道府県を地方ごとに
 const PREF_GROUPS: { label: string; items: string[] }[] = [
   {
     label: "北海道・東北",
@@ -85,310 +92,254 @@ const PREF_GROUPS: { label: string; items: string[] }[] = [
   },
 ];
 
-// 日本標準産業分類を意識して実務向けに集約・拡充
-const INDUSTRY_GROUPS: { label: string; items: string[] }[] = [
-  {
-    label: "農林水産",
-    items: ["農業", "畜産", "園芸", "林業", "水産業", "水産加工"],
-  },
-  { label: "鉱業・採石", items: ["鉱業", "採石業", "砂利・土石採取"] },
+// 業種（日本標準産業分類を意識した大分類・小分類）
+const INDUSTRY_LARGE = [
+  "農林水産",
+  "鉱業・採石",
+  "建設",
+  "製造（食品・生活）",
+  "製造（素材・化学・資源）",
+  "製造（機械・電機・輸送）",
+  "エネルギー・公益",
+  "情報通信・メディア",
+  "運輸・物流・郵便",
+  "卸売",
+  "小売",
+  "金融・保険・不動産",
+  "専門サービス・士業",
+  "宿泊・飲食",
+  "生活関連・娯楽・スポーツ",
+  "教育・学習支援",
+  "医療・福祉",
+  "公務・団体・NPO",
+  "環境・安全・インフラ保全",
+  "人材・BPO",
+  "レンタル・リース・シェア",
+  "その他サービス",
+] as const;
 
-  {
-    label: "建設",
-    items: [
-      "総合工事",
-      "土木工事",
-      "建築工事",
-      "建築設計",
-      "測量・地質調査",
-      "内装仕上げ",
-      "電気工事",
-      "管工事・空調",
-      "設備工事",
-      "解体工事",
-      "リフォーム",
-    ],
-  },
+const INDUSTRY_CATEGORIES: Record<IndustryLarge, readonly string[]> = {
+  農林水産: ["農業", "畜産", "園芸", "林業", "水産業", "水産加工"],
+  "鉱業・採石": ["鉱業", "採石業", "砂利・土石採取"],
+  建設: [
+    "総合工事",
+    "土木工事",
+    "建築工事",
+    "建築設計",
+    "測量・地質調査",
+    "内装仕上げ",
+    "電気工事",
+    "管工事・空調",
+    "設備工事",
+    "解体工事",
+    "リフォーム",
+  ],
+  "製造（食品・生活）": [
+    "食料品製造",
+    "飲料・酒類",
+    "たばこ",
+    "飼料",
+    "繊維工業",
+    "衣服・アパレル",
+    "皮革・靴",
+    "木材・木製品",
+    "家具・装備品",
+    "紙・パルプ",
+    "印刷・製本",
+    "ゴム製品",
+    "プラスチック製品",
+  ],
+  "製造（素材・化学・資源）": [
+    "化学工業",
+    "医薬品",
+    "化粧品・トイレタリー",
+    "石油製品",
+    "石炭製品",
+    "窯業・土石",
+    "セメント",
+    "ガラス・ガラス製品",
+    "鉄鋼",
+    "非鉄金属",
+    "金属製品",
+  ],
+  "製造（機械・電機・輸送）": [
+    "一般機械",
+    "産業機械",
+    "ロボット",
+    "電気機械",
+    "電子部品・半導体",
+    "情報通信機器",
+    "精密機器",
+    "計測機器",
+    "医療機器",
+    "輸送用機器（自動車・航空機・造船）",
+    "自動車部品",
+    "その他製造",
+  ],
+  "エネルギー・公益": [
+    "電力",
+    "ガス",
+    "熱供給",
+    "水道",
+    "再生可能エネルギー",
+    "エネルギー商社",
+    "送配電",
+    "プラントエンジ",
+  ],
+  "情報通信・メディア": [
+    "ソフトウェア",
+    "受託開発・SI",
+    "SaaS",
+    "クラウド・データセンター",
+    "通信（キャリア/ISP）",
+    "インターネットサービス",
+    "プラットフォーム",
+    "コンテンツ制作",
+    "アニメ/ゲーム",
+    "放送",
+    "出版・メディア",
+  ],
+  "運輸・物流・郵便": [
+    "鉄道",
+    "バス・タクシー",
+    "道路貨物（トラック）",
+    "倉庫",
+    "物流・3PL",
+    "宅配・ラストマイル",
+    "海運",
+    "空運",
+    "フォワーダー",
+    "郵便",
+  ],
+  卸売: [
+    "総合商社",
+    "専門商社",
+    "機械器具卸",
+    "化学品卸",
+    "建材・金物卸",
+    "食品・飲料卸",
+    "繊維・衣料卸",
+    "医薬品卸",
+    "自動車・部品卸",
+    "IT機器卸",
+    "その他卸",
+  ],
+  小売: [
+    "百貨店・総合小売",
+    "スーパーマーケット",
+    "コンビニ",
+    "ドラッグストア",
+    "専門小売（家電・家具・衣料・スポーツ・書籍）",
+    "ホームセンター",
+    "EC・ネット通販",
+    "自動車小売",
+    "リユース・リサイクルショップ",
+  ],
+  "金融・保険・不動産": [
+    "銀行",
+    "信金・信組",
+    "証券",
+    "投資・VC/PE",
+    "リース・クレジット",
+    "決済・フィンテック",
+    "保険（生保・損保・代理店）",
+    "不動産開発",
+    "不動産仲介",
+    "不動産管理・PM",
+    "駐車場",
+    "REIT",
+  ],
+  "専門サービス・士業": [
+    "法律（弁護士）",
+    "会計（公認会計士/税理士）",
+    "社労士",
+    "司法書士・行政書士",
+    "コンサル（戦略/IT/業務）",
+    "監査・アドバイザリー",
+    "調査・リサーチ",
+    "翻訳・通訳",
+    "デザイン・クリエイティブ",
+    "広告代理店",
+    "PR・ブランディング",
+    "イベント・展示会",
+  ],
+  "宿泊・飲食": [
+    "ホテル・旅館",
+    "民泊・簡易宿所",
+    "飲食店（レストラン・カフェ・バー）",
+    "フードデリバリー/ケータリング",
+  ],
+  "生活関連・娯楽・スポーツ": [
+    "理美容・エステ",
+    "クリーニング",
+    "旅行業",
+    "冠婚葬祭",
+    "スポーツ・フィットネス",
+    "娯楽・アミューズメント",
+    "テーマパーク",
+    "ペット関連",
+  ],
+  "教育・学習支援": [
+    "学校教育",
+    "幼稚園・保育園",
+    "学習塾・予備校",
+    "語学・カルチャー",
+    "企業研修・人材育成",
+    "オンライン教育",
+  ],
+  "医療・福祉": [
+    "病院・クリニック",
+    "歯科",
+    "調剤薬局",
+    "介護・福祉施設",
+    "訪問看護・介護",
+    "医療系サービス",
+    "保育",
+  ],
+  "公務・団体・NPO": [
+    "官公庁・自治体",
+    "独立行政法人",
+    "公社・公団",
+    "業界団体・組合",
+    "国際機関",
+    "NPO/NGO",
+    "公益法人",
+  ],
+  "環境・安全・インフラ保全": [
+    "廃棄物処理・リサイクル",
+    "環境コンサル/計測",
+    "ビルメンテナンス",
+    "清掃・警備",
+    "設備保全",
+    "インフラ保全",
+  ],
+  "人材・BPO": [
+    "人材紹介",
+    "人材派遣",
+    "求人媒体・HRテック",
+    "BPO/アウトソーシング",
+    "コールセンター",
+    "SES",
+  ],
+  "レンタル・リース・シェア": [
+    "レンタル（機器・車両・スペース）",
+    "カーシェア/モビリティ",
+    "シェアオフィス/スペース",
+    "レンタルスペース",
+  ],
+  その他サービス: [
+    "写真・映像",
+    "印刷サービス",
+    "修理・メンテナンス",
+    "配管・水回り",
+    "ハウスクリーニング",
+    "その他サービス",
+  ],
+} as const;
 
-  {
-    label: "製造（食品・生活）",
-    items: [
-      "食料品製造",
-      "飲料・酒類",
-      "たばこ",
-      "飼料",
-      "繊維工業",
-      "衣服・アパレル",
-      "皮革・靴",
-      "木材・木製品",
-      "家具・装備品",
-      "紙・パルプ",
-      "印刷・製本",
-      "ゴム製品",
-      "プラスチック製品",
-    ],
-  },
-
-  {
-    label: "製造（素材・化学・資源）",
-    items: [
-      "化学工業",
-      "医薬品",
-      "化粧品・トイレタリー",
-      "石油製品",
-      "石炭製品",
-      "窯業・土石",
-      "セメント",
-      "ガラス・ガラス製品",
-      "鉄鋼",
-      "非鉄金属",
-      "金属製品",
-    ],
-  },
-
-  {
-    label: "製造（機械・電機・輸送）",
-    items: [
-      "一般機械",
-      "産業機械",
-      "ロボット",
-      "電気機械",
-      "電子部品・半導体",
-      "情報通信機器",
-      "精密機器",
-      "計測機器",
-      "医療機器",
-      "輸送用機器（自動車・航空機・造船）",
-      "自動車部品",
-      "その他製造",
-    ],
-  },
-
-  {
-    label: "エネルギー・公益",
-    items: [
-      "電力",
-      "ガス",
-      "熱供給",
-      "水道",
-      "再生可能エネルギー",
-      "エネルギー商社",
-      "送配電",
-      "プラントエンジ",
-    ],
-  },
-
-  {
-    label: "情報通信・メディア",
-    items: [
-      "ソフトウェア",
-      "受託開発・SI",
-      "SaaS",
-      "クラウド・データセンター",
-      "通信（キャリア/ISP）",
-      "インターネットサービス",
-      "プラットフォーム",
-      "コンテンツ制作",
-      "アニメ/ゲーム",
-      "放送",
-      "出版・メディア",
-    ],
-  },
-
-  {
-    label: "運輸・物流・郵便",
-    items: [
-      "鉄道",
-      "バス・タクシー",
-      "道路貨物（トラック）",
-      "倉庫",
-      "物流・3PL",
-      "宅配・ラストマイル",
-      "海運",
-      "空運",
-      "フォワーダー",
-      "郵便",
-    ],
-  },
-
-  {
-    label: "卸売",
-    items: [
-      "総合商社",
-      "専門商社",
-      "機械器具卸",
-      "化学品卸",
-      "建材・金物卸",
-      "食品・飲料卸",
-      "繊維・衣料卸",
-      "医薬品卸",
-      "自動車・部品卸",
-      "IT機器卸",
-      "その他卸",
-    ],
-  },
-
-  {
-    label: "小売",
-    items: [
-      "百貨店・総合小売",
-      "スーパーマーケット",
-      "コンビニ",
-      "ドラッグストア",
-      "専門小売（家電・家具・衣料・スポーツ・書籍）",
-      "ホームセンター",
-      "EC・ネット通販",
-      "自動車小売",
-      "リユース・リサイクルショップ",
-    ],
-  },
-
-  {
-    label: "金融・保険・不動産",
-    items: [
-      "銀行",
-      "信金・信組",
-      "証券",
-      "投資・VC/PE",
-      "リース・クレジット",
-      "決済・フィンテック",
-      "保険（生保・損保・代理店）",
-      "不動産開発",
-      "不動産仲介",
-      "不動産管理・PM",
-      "駐車場",
-      "REIT",
-    ],
-  },
-
-  {
-    label: "専門サービス・士業",
-    items: [
-      "法律（弁護士）",
-      "会計（公認会計士/税理士）",
-      "社労士",
-      "司法書士・行政書士",
-      "コンサルティング（戦略/IT/業務）",
-      "監査・アドバイザリー",
-      "調査・リサーチ",
-      "翻訳・通訳",
-      "デザイン・クリエイティブ",
-      "広告代理店",
-      "PR・ブランディング",
-      "イベント・展示会",
-    ],
-  },
-
-  {
-    label: "宿泊・飲食",
-    items: [
-      "ホテル・旅館",
-      "民泊・簡易宿所",
-      "飲食店（レストラン・カフェ・バー）",
-      "フードデリバリー/ケータリング",
-    ],
-  },
-
-  {
-    label: "生活関連・娯楽・スポーツ",
-    items: [
-      "理美容・エステ",
-      "クリーニング",
-      "旅行業",
-      "冠婚葬祭",
-      "スポーツ・フィットネス",
-      "娯楽・アミューズメント",
-      "テーマパーク",
-      "ペット関連",
-    ],
-  },
-
-  {
-    label: "教育・学習支援",
-    items: [
-      "学校教育",
-      "幼稚園・保育園",
-      "学習塾・予備校",
-      "語学・カルチャー",
-      "企業研修・人材育成",
-      "オンライン教育",
-    ],
-  },
-
-  {
-    label: "医療・福祉",
-    items: [
-      "病院・クリニック",
-      "歯科",
-      "調剤薬局",
-      "介護・福祉施設",
-      "訪問看護・介護",
-      "医療系サービス",
-      "保育",
-    ],
-  },
-
-  {
-    label: "公務・団体・NPO",
-    items: [
-      "官公庁・自治体",
-      "独立行政法人",
-      "公社・公団",
-      "業界団体・組合",
-      "国際機関",
-      "NPO/NGO",
-      "公益法人",
-    ],
-  },
-
-  {
-    label: "環境・安全・インフラ保全",
-    items: [
-      "廃棄物処理・リサイクル",
-      "環境コンサル/計測",
-      "ビルメンテナンス",
-      "清掃・警備",
-      "設備保全",
-      "インフラ保全",
-    ],
-  },
-
-  {
-    label: "人材・BPO",
-    items: [
-      "人材紹介",
-      "人材派遣",
-      "求人媒体・HRテック",
-      "BPO/アウトソーシング",
-      "コールセンター",
-      "SES",
-    ],
-  },
-
-  {
-    label: "レンタル・リース・シェア",
-    items: [
-      "レンタル（機器・車両・スペース）",
-      "カーシェア/モビリティ",
-      "シェアオフィス/スペース",
-      "レンタルスペース",
-    ],
-  },
-
-  {
-    label: "その他サービス",
-    items: [
-      "写真・映像",
-      "印刷サービス",
-      "修理・メンテナンス",
-      "配管・水回り",
-      "ハウスクリーニング",
-      "その他サービス",
-    ],
-  },
-];
-
-/** ====== 画面本体 ====== */
+/** =========================
+ * 画面
+ * ========================= */
 export default function FiltersPage() {
   const [tenantId, setTenantId] = useState<string | null>(null);
   const [msg, setMsg] = useState("");
@@ -398,20 +349,14 @@ export default function FiltersPage() {
     prefectures: [],
     employee_size_ranges: [],
     keywords: [],
-    industries: [],
+    industries_large: [],
+    industries_small: [],
     updated_at: null,
   });
 
-  // 都道府県モーダル
+  // モーダル開閉
   const [prefModalOpen, setPrefModalOpen] = useState(false);
-  const [prefQuery, setPrefQuery] = useState("");
-
-  // 業種モーダル（左右2ペイン）
   const [indModalOpen, setIndModalOpen] = useState(false);
-  const [industryQuery, setIndustryQuery] = useState("");
-  const [activeIndGroup, setActiveIndGroup] = useState<string>(
-    INDUSTRY_GROUPS[0]?.label || ""
-  );
 
   useEffect(() => {
     (async () => {
@@ -428,13 +373,26 @@ export default function FiltersPage() {
         }).then((r) => r.json());
 
         const incoming = j?.filters ?? {};
-        setFilters({
-          prefectures: incoming.prefectures ?? [],
-          employee_size_ranges: incoming.employee_size_ranges ?? [],
-          keywords: incoming.keywords ?? [],
-          industries: incoming.industries ?? incoming.job_titles ?? [],
+        setFilters((prev) => ({
+          ...prev,
+          prefectures: Array.isArray(incoming.prefectures)
+            ? incoming.prefectures
+            : [],
+          employee_size_ranges: Array.isArray(incoming.employee_size_ranges)
+            ? incoming.employee_size_ranges
+            : [],
+          keywords: Array.isArray(incoming.keywords) ? incoming.keywords : [],
+          // 受信値を IndustryLarge に安全変換（未知値は捨てる）
+          industries_large: toIndustryLarge(incoming.industries_large),
+          industries_small: Array.isArray(incoming.industries_small)
+            ? incoming.industries_small
+            : Array.isArray(incoming.industries)
+            ? incoming.industries
+            : Array.isArray(incoming.job_titles)
+            ? incoming.job_titles
+            : [],
           updated_at: incoming.updated_at ?? null,
-        });
+        }));
       } catch (e: any) {
         setMsg(String(e?.message || e));
       }
@@ -465,7 +423,7 @@ export default function FiltersPage() {
     }
   };
 
-  /** ====== サマリ ====== */
+  /** ====== サマリ表示 ====== */
   const summaryPref = useMemo(() => {
     const n = filters.prefectures.length;
     if (n === 0) return "（全国）";
@@ -473,38 +431,12 @@ export default function FiltersPage() {
   }, [filters.prefectures]);
 
   const summaryInd = useMemo(() => {
-    const n = filters.industries.length;
-    if (n === 0) return "（未選択）";
-    return n <= 6 ? filters.industries.join(" / ") : `${n} 業種を選択中`;
-  }, [filters.industries]);
+    const nL = filters.industries_large.length;
+    const nS = filters.industries_small.length;
+    if (nL === 0 && nS === 0) return "（未選択）";
+    return `${nL}大分類 / ${nS}小分類を選択中`;
+  }, [filters.industries_large, filters.industries_small]);
 
-  /** ====== 検索適用（都道府県） ====== */
-  const filteredPrefGroups = useMemo(() => {
-    const q = prefQuery.trim().toLowerCase();
-    if (!q) return PREF_GROUPS;
-    return PREF_GROUPS.map((g) => ({
-      ...g,
-      items: g.items.filter((x) => x.toLowerCase().includes(q)),
-    })).filter((g) => g.items.length > 0);
-  }, [prefQuery]);
-
-  /** ====== 検索適用（業種：右ペイン表示用） ====== */
-  const activeGroupItems = useMemo(() => {
-    const group = INDUSTRY_GROUPS.find((g) => g.label === activeIndGroup);
-    if (!group) return [];
-    const q = industryQuery.trim().toLowerCase();
-    if (!q) return group.items;
-    return group.items.filter((x) => x.toLowerCase().includes(q));
-  }, [activeIndGroup, industryQuery]);
-
-  /** ====== 選択ユーティリティ ====== */
-  const allPrefectures = useMemo(() => PREF_GROUPS.flatMap((g) => g.items), []);
-  const allIndustries = useMemo(
-    () => INDUSTRY_GROUPS.flatMap((g) => g.items),
-    []
-  );
-
-  /** ====== UI ====== */
   return (
     <>
       <AppHeader showBack />
@@ -530,7 +462,7 @@ export default function FiltersPage() {
         </div>
 
         <section className="rounded-2xl border border-neutral-200 p-4 space-y-6">
-          {/* 都道府県（モーダル起動型） */}
+          {/* 都道府県（モーダル起動） */}
           <div>
             <div className="mb-2 flex items-center justify-between">
               <div>
@@ -551,7 +483,6 @@ export default function FiltersPage() {
               </button>
             </div>
 
-            {/* 選択中チップ（削除可） */}
             {filters.prefectures.length > 0 && (
               <div className="flex flex-wrap gap-2">
                 {filters.prefectures.map((name) => (
@@ -629,12 +560,12 @@ export default function FiltersPage() {
 
           <hr className="border-neutral-200" />
 
-          {/* 業種（転職サイト風：モーダル起動型） */}
+          {/* 業種（JobCategoryModal の UI を模倣） */}
           <div>
             <div className="mb-2 flex items-center justify-between">
               <div>
                 <div className="text-sm font-medium text-neutral-800">
-                  業種（複数選択可）
+                  業種（大分類/小分類 複数選択可）
                 </div>
                 <div className="text-[11px] text-neutral-500">{summaryInd}</div>
               </div>
@@ -646,18 +577,28 @@ export default function FiltersPage() {
               </button>
             </div>
 
-            {/* 選択中チップ（削除可） */}
-            {filters.industries.length > 0 && (
+            {(filters.industries_large.length > 0 ||
+              filters.industries_small.length > 0) && (
               <div className="flex flex-wrap gap-2">
-                {filters.industries.map((name) => (
+                {filters.industries_large.map((name) => (
+                  <span
+                    key={`L:${name}`}
+                    className="inline-flex items-center gap-1 rounded-full border border-neutral-300 bg-white px-2 py-0.5 text-xs"
+                  >
+                    {name} <em className="not-italic opacity-60">大</em>
+                  </span>
+                ))}
+                {filters.industries_small.map((name) => (
                   <button
-                    key={name}
+                    key={`S:${name}`}
                     className="inline-flex items-center gap-1 rounded-full border border-neutral-300 bg-white px-2 py-0.5 text-xs"
                     title="クリックで除外"
                     onClick={() =>
                       setFilters((s) => ({
                         ...s,
-                        industries: s.industries.filter((x) => x !== name),
+                        industries_small: s.industries_small.filter(
+                          (x) => x !== name
+                        ),
                       }))
                     }
                   >
@@ -676,77 +617,155 @@ export default function FiltersPage() {
         )}
       </main>
 
-      {/* ====== 都道府県モーダル（アクション構成を業種と統一） ====== */}
+      {/* 都道府県モーダル */}
       {prefModalOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30"
-          onClick={() => setPrefModalOpen(false)}
-        >
-          <div
-            className="w-full max-w-4xl rounded-2xl border border-neutral-200 bg-white p-4 shadow-lg"
-            onClick={(e) => e.stopPropagation()}
+        <PrefectureModal
+          selected={filters.prefectures}
+          onCloseAction={() => setPrefModalOpen(false)}
+          onApplyAction={(next) => {
+            setFilters((s) => ({ ...s, prefectures: next }));
+            setPrefModalOpen(false);
+          }}
+        />
+      )}
+
+      {/* 業種モーダル（JobCategoryModal を踏襲） */}
+      {indModalOpen && (
+        <IndustryCategoryModal
+          large={filters.industries_large}
+          small={filters.industries_small}
+          onCloseAction={() => setIndModalOpen(false)}
+          onApplyAction={(L, S) => {
+            setFilters((s) => ({
+              ...s,
+              industries_large: L,
+              industries_small: S,
+            }));
+            setIndModalOpen(false);
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+/** =========================
+ * 都道府県モーダル（地方ごとの「すべて選択」対応）
+ * ========================= */
+function PrefectureModal({
+  selected,
+  onCloseAction,
+  onApplyAction,
+}: {
+  selected: string[];
+  onCloseAction: () => void;
+  onApplyAction: (pref: string[]) => void;
+}) {
+  const [pref, setPref] = useState<string[]>(selected ?? []);
+  const [query, setQuery] = useState("");
+
+  useEffect(() => setPref(selected ?? []), [selected]);
+
+  const allPrefList = useMemo(() => PREF_GROUPS.flatMap((g) => g.items), []);
+  const nationalAll = pref.length === allPrefList.length;
+
+  const filteredGroups = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return PREF_GROUPS;
+    return PREF_GROUPS.map((g) => ({
+      ...g,
+      items: g.items.filter((x) => x.toLowerCase().includes(q)),
+    })).filter((g) => g.items.length > 0);
+  }, [query]);
+
+  const toggleNational = (checked: boolean) => {
+    if (checked) {
+      setPref([...allPrefList]);
+    } else {
+      setPref([]);
+    }
+  };
+
+  const regionAllChecked = (items: string[]) =>
+    items.every((x) => pref.includes(x)) && items.length > 0;
+
+  const toggleRegionAll = (items: string[], checked: boolean) => {
+    if (checked) {
+      const union = new Set<string>([...pref, ...items]);
+      setPref(Array.from(union));
+    } else {
+      setPref(pref.filter((x) => !items.includes(x)));
+    }
+  };
+
+  const toggleOne = (name: string, checked: boolean) => {
+    setPref((p) =>
+      checked ? Array.from(new Set([...p, name])) : p.filter((x) => x !== name)
+    );
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="w-[980px] max-w-[96vw] rounded-2xl bg-white shadow-xl border border-neutral-200 overflow-hidden">
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200">
+          <div className="font-semibold">都道府県選択</div>
+          <button
+            onClick={onCloseAction}
+            className="rounded-lg px-2 py-1 border border-neutral-300 hover:bg-neutral-50 text-sm"
           >
-            {/* ヘッダー：全選択 / 全クリア / 閉じる / 適用 */}
-            <div className="mb-3 flex items-center justify-between">
-              <div className="text-base font-semibold text-neutral-800">
-                都道府県を選択
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  className="rounded-lg border border-neutral-200 px-2 py-1 text-xs hover:bg-neutral-50"
-                  onClick={() =>
-                    setFilters((s) => ({
-                      ...s,
-                      prefectures: Array.from(new Set(allPrefectures)),
-                    }))
-                  }
-                >
-                  全選択
-                </button>
-                <button
-                  className="rounded-lg border border-neutral-200 px-2 py-1 text-xs hover:bg-neutral-50"
-                  onClick={() => setFilters((s) => ({ ...s, prefectures: [] }))}
-                >
-                  全クリア
-                </button>
-                <button
-                  className="rounded-lg border border-neutral-200 px-2 py-1 text-xs hover:bg-neutral-50"
-                  onClick={() => setPrefModalOpen(false)}
-                >
-                  閉じる
-                </button>
-                <button
-                  className="rounded-lg border border-neutral-200 px-2 py-1 text-xs hover:bg-neutral-50"
-                  onClick={() => setPrefModalOpen(false)}
-                >
-                  適用
-                </button>
-              </div>
-            </div>
+            閉じる
+          </button>
+        </div>
 
-            {/* 検索 */}
-            <div className="mb-3">
+        <div className="p-4 space-y-3">
+          {/* 全国 すべて選択 */}
+          <div className="flex items-center justify-between">
+            <label className="text-sm inline-flex items-center">
               <input
-                className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
-                placeholder="都道府県を検索…（例: 大阪、東）"
-                value={prefQuery}
-                onChange={(e) => setPrefQuery(e.target.value)}
+                type="checkbox"
+                className="mr-2"
+                checked={nationalAll}
+                onChange={(e) => toggleNational(e.target.checked)}
               />
-            </div>
+              全国 すべて選択
+            </label>
+            <input
+              className="w-64 rounded-lg border border-neutral-300 px-3 py-2 text-sm"
+              placeholder="検索（例: 大阪、東）"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </div>
 
-            {/* 本体 */}
-            <div className="max-h-[60vh] overflow-auto space-y-3 pr-1">
-              {filteredPrefGroups.map((g) => (
+          {/* 地方グループ */}
+          <div className="max-h-[520px] overflow-auto space-y-3">
+            {filteredGroups.map((g) => {
+              const regionAll = regionAllChecked(g.items);
+              return (
                 <div
                   key={g.label}
                   className="rounded-xl border border-neutral-200 p-3"
                 >
-                  <div className="text-xs font-semibold text-neutral-700 mb-2">
-                    {g.label}
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-xs font-semibold text-neutral-700">
+                      {g.label}
+                    </div>
+                    <label className="text-xs inline-flex items-center">
+                      <input
+                        type="checkbox"
+                        className="mr-2"
+                        checked={regionAll}
+                        onChange={(e) =>
+                          toggleRegionAll(g.items, e.target.checked)
+                        }
+                      />
+                      この地方をすべて選択/解除
+                    </label>
                   </div>
                   <div className="grid grid-cols-2 md:grid-cols-3 gap-x-3 gap-y-2 text-sm">
                     {g.items.map((name) => {
-                      const checked = filters.prefectures.includes(name);
+                      const checked = pref.includes(name);
                       return (
                         <label
                           key={name}
@@ -759,16 +778,7 @@ export default function FiltersPage() {
                           <input
                             type="checkbox"
                             checked={checked}
-                            onChange={(e) =>
-                              setFilters((s) => ({
-                                ...s,
-                                prefectures: e.target.checked
-                                  ? Array.from(
-                                      new Set([...s.prefectures, name])
-                                    )
-                                  : s.prefectures.filter((x) => x !== name),
-                              }))
-                            }
+                            onChange={(e) => toggleOne(name, e.target.checked)}
                           />
                           {name}
                         </label>
@@ -776,220 +786,236 @@ export default function FiltersPage() {
                     })}
                   </div>
                 </div>
-              ))}
-              {filteredPrefGroups.length === 0 && (
-                <div className="text-xs text-neutral-400">
-                  該当する都道府県がありません
-                </div>
-              )}
-            </div>
+              );
+            })}
+            {filteredGroups.length === 0 && (
+              <div className="text-xs text-neutral-400">
+                該当する都道府県がありません
+              </div>
+            )}
           </div>
         </div>
-      )}
 
-      {/* ====== 業種モーダル（左右2ペイン・バッジ廃止） ====== */}
-      {indModalOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30"
-          onClick={() => setIndModalOpen(false)}
-        >
-          <div
-            className="w-full max-w-5xl rounded-2xl border border-neutral-200 bg-white p-0 shadow-lg overflow-hidden"
-            onClick={(e) => e.stopPropagation()}
+        {/* Footer */}
+        <div className="flex items中心 justify-end gap-2 px-4 py-3 border-t border-neutral-200">
+          <button
+            onClick={() => setPref([])}
+            className="rounded-lg px-3 py-1 border border-neutral-300 text-sm hover:bg-neutral-50"
           >
-            {/* ヘッダー：全選択 / 全クリア / 閉じる / 適用 */}
-            <div className="px-4 py-3 border-b border-neutral-200 flex items-center justify-between">
-              <div className="text-base font-semibold text-neutral-800">
-                業種を選択
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  className="rounded-lg border border-neutral-200 px-2 py-1 text-xs hover:bg-neutral-50"
-                  onClick={() =>
-                    setFilters((s) => ({
-                      ...s,
-                      industries: Array.from(new Set(allIndustries)),
-                    }))
-                  }
-                >
-                  全選択
-                </button>
-                <button
-                  className="rounded-lg border border-neutral-200 px-2 py-1 text-xs hover:bg-neutral-50"
-                  onClick={() => setFilters((s) => ({ ...s, industries: [] }))}
-                >
-                  全クリア
-                </button>
-                <button
-                  className="rounded-lg border border-neutral-200 px-2 py-1 text-xs hover:bg-neutral-50"
-                  onClick={() => setIndModalOpen(false)}
-                >
-                  閉じる
-                </button>
-                <button
-                  className="rounded-lg border border-neutral-200 px-2 py-1 text-xs hover:bg-neutral-50"
-                  onClick={() => setIndModalOpen(false)}
-                >
-                  適用
-                </button>
-              </div>
-            </div>
-
-            {/* 検索 */}
-            <div className="px-4 py-3 border-b border-neutral-100">
-              <input
-                className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
-                placeholder="業種を検索…（例: 製造、広告、物流、SaaS）"
-                value={industryQuery}
-                onChange={(e) => setIndustryQuery(e.target.value)}
-              />
-            </div>
-
-            {/* 本体：左右2ペイン */}
-            <div className="flex h-[64vh]">
-              {/* 左ペイン：カテゴリ */}
-              <aside className="w-64 shrink-0 border-r border-neutral-200 overflow-auto">
-                {INDUSTRY_GROUPS.map((g) => {
-                  const count = g.items.filter((x) =>
-                    filters.industries.includes(x)
-                  ).length;
-                  const active = g.label === activeIndGroup;
-                  return (
-                    <button
-                      key={g.label}
-                      onClick={() => setActiveIndGroup(g.label)}
-                      className={`w-full flex items-center justify-between px-3 py-2 text-sm border-b border-neutral-100 ${
-                        active
-                          ? "bg-neutral-50 font-semibold"
-                          : "hover:bg-neutral-50"
-                      }`}
-                    >
-                      <span className="text-left">{g.label}</span>
-                      <span className="text-[11px] text-neutral-500">
-                        {count}
-                      </span>
-                    </button>
-                  );
-                })}
-              </aside>
-
-              {/* 右ペイン：詳細（アクティブカテゴリ） */}
-              <section className="flex-1 overflow-auto p-4">
-                {/* 選択中チップ */}
-                {filters.industries.length > 0 && (
-                  <div className="mb-3 flex flex-wrap gap-2">
-                    {filters.industries.map((name) => (
-                      <button
-                        key={name}
-                        className="inline-flex items-center gap-1 rounded-full border border-neutral-300 bg-white px-2 py-0.5 text-xs"
-                        title="クリックで除外"
-                        onClick={() =>
-                          setFilters((s) => ({
-                            ...s,
-                            industries: s.industries.filter((x) => x !== name),
-                          }))
-                        }
-                      >
-                        {name} <span className="opacity-60">×</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-
-                {/* グループ操作（カテゴリ全選択/クリア） */}
-                <div className="mb-2 flex items-center justify-between">
-                  <div className="text-sm font-semibold text-neutral-800">
-                    {activeIndGroup}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      className="rounded border border-neutral-200 px-2 py-1 text-xs hover:bg-neutral-50"
-                      onClick={() => {
-                        const group = INDUSTRY_GROUPS.find(
-                          (g) => g.label === activeIndGroup
-                        );
-                        if (!group) return;
-                        setFilters((s) => ({
-                          ...s,
-                          industries: Array.from(
-                            new Set([...s.industries, ...group.items])
-                          ),
-                        }));
-                      }}
-                    >
-                      このカテゴリを全選択
-                    </button>
-                    <button
-                      className="rounded border border-neutral-200 px-2 py-1 text-xs hover:bg-neutral-50"
-                      onClick={() => {
-                        const group = INDUSTRY_GROUPS.find(
-                          (g) => g.label === activeIndGroup
-                        );
-                        if (!group) return;
-                        setFilters((s) => ({
-                          ...s,
-                          industries: s.industries.filter(
-                            (x) => !group.items.includes(x)
-                          ),
-                        }));
-                      }}
-                    >
-                      クリア
-                    </button>
-                  </div>
-                </div>
-
-                {/* チェック群（検索適用済） */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                  {activeGroupItems.map((name) => {
-                    const checked = filters.industries.includes(name);
-                    return (
-                      <label
-                        key={name}
-                        className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-sm ${
-                          checked
-                            ? "border-indigo-300 bg-indigo-50 text-indigo-800"
-                            : "border-neutral-200 bg-white text-neutral-800 hover:bg-neutral-50"
-                        }`}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={(e) =>
-                            setFilters((s) => ({
-                              ...s,
-                              industries: e.target.checked
-                                ? Array.from(new Set([...s.industries, name]))
-                                : s.industries.filter((x) => x !== name),
-                            }))
-                          }
-                        />
-                        {name}
-                      </label>
-                    );
-                  })}
-                  {activeGroupItems.length === 0 && (
-                    <div className="text-xs text-neutral-400">
-                      該当する項目がありません
-                    </div>
-                  )}
-                </div>
-              </section>
-            </div>
-          </div>
+            クリア
+          </button>
+          <button
+            onClick={() => onApplyAction(pref)}
+            className="rounded-lg px-3 py-1 border border-neutral-300 text-sm hover:bg-neutral-50"
+          >
+            適用して閉じる
+          </button>
         </div>
-      )}
-    </>
+      </div>
+    </div>
   );
 }
 
-/** ====== helpers ====== */
+/** =========================
+ * 業種モーダル（JobCategoryModal を忠実に模倣）
+ * ========================= */
+function IndustryCategoryModal({
+  large,
+  small,
+  onCloseAction,
+  onApplyAction,
+}: {
+  large: IndustryLarge[]; // ← 厳密化
+  small: string[];
+  onCloseAction: () => void;
+  onApplyAction: (L: IndustryLarge[], S: string[]) => void;
+}) {
+  // 初期反映
+  const [L, setL] = useState<IndustryLarge[]>(large ?? []);
+  const [S, setS] = useState<string[]>(small ?? []);
+  const [activeL, setActiveL] = useState<IndustryLarge>(
+    (L[0] ?? INDUSTRY_LARGE[0]) as IndustryLarge
+  );
+
+  useEffect(() => {
+    setL(large ?? []);
+    setS(small ?? []);
+    setActiveL(
+      ((large?.[0] as IndustryLarge) ?? INDUSTRY_LARGE[0]) as IndustryLarge
+    );
+  }, [large, small]);
+
+  const rightGroup: IndustryLarge = activeL;
+
+  const toggleLarge = (lg: IndustryLarge) => {
+    const checked = !L.includes(lg);
+    const nextL = checked ? [...L, lg] : L.filter((x) => x !== lg);
+    setL(nextL);
+
+    const children = INDUSTRY_CATEGORIES[lg] ?? [];
+    if (checked) {
+      const union = new Set<string>([...S, ...children]);
+      setS(Array.from(union));
+    } else {
+      setS(S.filter((x) => !children.includes(x)));
+    }
+  };
+
+  const toggleSmall = (sm: string) =>
+    setS(S.includes(sm) ? S.filter((x) => x !== sm) : [...S, sm]);
+
+  // 「大分類 すべて選択/解除」
+  const allLarge = L.length === INDUSTRY_LARGE.length;
+  const toggleAllLarge = (checked: boolean) => {
+    if (checked) {
+      setL([...INDUSTRY_LARGE]);
+      const allSm = INDUSTRY_LARGE.flatMap(
+        (lg) => INDUSTRY_CATEGORIES[lg] || []
+      );
+      setS(allSm.slice());
+    } else {
+      setL([]);
+      setS([]);
+    }
+  };
+
+  // アクティブ大分類の小分類が全選択か
+  const activeAllSmall =
+    (INDUSTRY_CATEGORIES[rightGroup] || []).every((sm: string) =>
+      S.includes(sm)
+    ) && (INDUSTRY_CATEGORIES[rightGroup] || []).length > 0;
+
+  const toggleActiveAllSmall = (checked: boolean) => {
+    const children = INDUSTRY_CATEGORIES[rightGroup] || [];
+    if (checked) {
+      const union = new Set<string>([...S, ...children]);
+      setS(Array.from(union));
+      if (!L.includes(rightGroup)) setL([...L, rightGroup]);
+    } else {
+      setS(S.filter((x) => !children.includes(x)));
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="w-[980px] max-w-[96vw] rounded-2xl bg-white shadow-xl border border-neutral-200 overflow-hidden">
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200">
+          <div className="font-semibold">業種選択</div>
+          <button
+            onClick={onCloseAction}
+            className="rounded-lg px-2 py-1 border border-neutral-300 hover:bg-neutral-50 text-sm"
+          >
+            閉じる
+          </button>
+        </div>
+
+        <div className="grid grid-cols-12 gap-4 p-4">
+          {/* 左：大分類 */}
+          <div className="col-span-4">
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-sm inline-flex items-center">
+                <input
+                  type="checkbox"
+                  className="mr-2"
+                  checked={allLarge}
+                  onChange={(e) => toggleAllLarge(e.target.checked)}
+                />
+                大分類 すべて選択
+              </label>
+            </div>
+            <div className="rounded-xl border border-neutral-200 divide-y divide-neutral-200 max-h-[520px] overflow-auto">
+              {INDUSTRY_LARGE.map((lg: IndustryLarge) => {
+                const checked = L.includes(lg);
+                const active = activeL === lg;
+                return (
+                  <div
+                    key={lg}
+                    onClick={() => setActiveL(lg)}
+                    className={`flex items-center justify-between px-3 py-2 cursor-pointer ${
+                      active ? "bg-neutral-100" : "bg-white"
+                    }`}
+                  >
+                    <div className="text-sm font-medium">{lg}</div>
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleLarge(lg)}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* 右：小分類（アクティブのみ） */}
+          <div className="col-span-8">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-sm font-semibold text-neutral-800">
+                小分類（{rightGroup}）
+              </div>
+              <label className="text-sm inline-flex items-center">
+                <input
+                  type="checkbox"
+                  className="mr-2"
+                  checked={activeAllSmall}
+                  onChange={(e) => toggleActiveAllSmall(e.target.checked)}
+                />
+                表示中の小分類をすべて選択/解除
+              </label>
+            </div>
+
+            <div className="rounded-xl border border-neutral-200 p-3 max-h-[520px] overflow-auto">
+              <div className="grid grid-cols-2 gap-2">
+                {(INDUSTRY_CATEGORIES[rightGroup] || []).map((sm: string) => (
+                  <label key={sm} className="inline-flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={S.includes(sm)}
+                      onChange={() => toggleSmall(sm)}
+                    />
+                    <span className="text-sm">{sm}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-neutral-200">
+          <button
+            onClick={() => {
+              setL([]);
+              setS([]);
+            }}
+            className="rounded-lg px-3 py-1 border border-neutral-300 text-sm hover:bg-neutral-50"
+          >
+            クリア
+          </button>
+          <button
+            onClick={() => onApplyAction(L, S)}
+            className="rounded-lg px-3 py-1 border border-neutral-300 text-sm hover:bg-neutral-50"
+          >
+            適用して閉じる
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** =========================
+ * helpers
+ * ========================= */
 function splitCsv(s: string): string[] {
   return s
     .split(",")
     .map((x) => x.trim())
     .filter(Boolean);
 }
+
 function formatTs(ts: string) {
   try {
     const d = new Date(ts);
@@ -1006,4 +1032,13 @@ function formatTs(ts: string) {
   } catch {
     return ts;
   }
+}
+
+function toIndustryLarge(input: unknown): IndustryLarge[] {
+  if (!Array.isArray(input)) return [];
+  const set = new Set(INDUSTRY_LARGE);
+  return input.filter(
+    (x): x is IndustryLarge =>
+      typeof x === "string" && set.has(x as IndustryLarge)
+  );
 }
