@@ -5,7 +5,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import AppHeader from "@/components/AppHeader";
 
 /** =========================
- * 定数（先に宣言して型で参照できるようにする）
+ * 定数
  * ========================= */
 
 // 従業員規模
@@ -80,7 +80,7 @@ const PREF_GROUPS: { label: string; items: string[] }[] = [
   },
 ];
 
-// 業種（日本標準産業分類を意識した大分類）※あとで型に使う
+// 業種（日本標準産業分類を意識した大分類）
 const INDUSTRY_LARGE = [
   "農林水産",
   "鉱業・採石",
@@ -360,22 +360,37 @@ export default function FiltersPage() {
   const [prefModalOpen, setPrefModalOpen] = useState(false);
   const [indModalOpen, setIndModalOpen] = useState(false);
 
-  // 初期ロード：ログイン中テナント → そのテナントの保存値を反映
+  // --- ここを堅牢化（404/HTMLでも落ちないように） ---
   useEffect(() => {
     (async () => {
       try {
-        const me = await fetch("/api/me/tenant", { cache: "no-store" }).then(
-          (r) => r.json()
-        );
-        const tId = me?.profile?.tenant_id ?? null;
+        // 1) テナント取得（404時はトレイリングスラッシュ再試行）
+        let me: any = null;
+        let meRes = await fetch("/api/me/tenant", { cache: "no-store" });
+        if (!meRes.ok) {
+          const meRes2 = await fetch("/api/me/tenant/", { cache: "no-store" });
+          meRes = meRes2;
+        }
+        if (meRes.ok) {
+          me = await safeJson(meRes);
+        } else {
+          // 未ログイン or ルート未配備でも落ちないように
+          me = null;
+        }
+
+        const tId: string | null =
+          me?.profile?.tenant_id ?? me?.tenant_id ?? null;
         setTenantId(tId);
 
-        const j = await fetch("/api/form-outreach/settings/filters", {
+        // 2) 保存フィルタ読み込み（テナントがあればヘッダ付与）
+        const fRes = await fetch("/api/form-outreach/settings/filters", {
           cache: "no-store",
           headers: tId ? { "x-tenant-id": tId } : undefined,
-        }).then((r) => r.json());
+        });
 
+        const j = fRes.ok ? await safeJson(fRes) : {};
         const incoming = j?.filters ?? {};
+
         setFilters((prev) => ({
           ...prev,
           prefectures: Array.isArray(incoming.prefectures)
@@ -414,7 +429,7 @@ export default function FiltersPage() {
         },
         body: JSON.stringify({ filters }),
       });
-      const j = await r.json().catch(() => ({}));
+      const j = await safeJson(r);
       if (!r.ok) throw new Error(j?.error || "save failed");
       setFilters((f) => ({ ...f, updated_at: j?.filters?.updated_at ?? null }));
       setMsg("保存しました。");
@@ -562,7 +577,7 @@ export default function FiltersPage() {
 
           <hr className="border-neutral-200" />
 
-          {/* 業種（JobCategoryModal の UI を踏襲） */}
+          {/* 業種（モーダル） */}
           <div>
             <div className="mb-2 flex items-center justify-between">
               <div>
@@ -631,7 +646,7 @@ export default function FiltersPage() {
         />
       )}
 
-      {/* 業種モーダル（JobCategoryModal を忠実に踏襲） */}
+      {/* 業種モーダル */}
       {indModalOpen && (
         <IndustryCategoryModal
           large={filters.industries_large}
@@ -652,7 +667,7 @@ export default function FiltersPage() {
 }
 
 /** =========================
- * 都道府県モーダル（地方ごとの「すべて選択」対応）
+ * 都道府県モーダル
  * ========================= */
 function PrefectureModal({
   selected,
@@ -681,11 +696,8 @@ function PrefectureModal({
   }, [query]);
 
   const toggleNational = (checked: boolean) => {
-    if (checked) {
-      setPref([...allPrefList]);
-    } else {
-      setPref([]);
-    }
+    if (checked) setPref([...allPrefList]);
+    else setPref([]);
   };
 
   const regionAllChecked = (items: string[]) =>
@@ -798,7 +810,7 @@ function PrefectureModal({
           </div>
         </div>
 
-        {/* Footer（JobCategoryModal と同系の構成） */}
+        {/* Footer（JobCategoryModal と同系構成） */}
         <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-neutral-200">
           <button
             onClick={() => setPref([])}
@@ -819,7 +831,7 @@ function PrefectureModal({
 }
 
 /** =========================
- * 業種モーダル（JobCategoryModal を忠実に模倣）
+ * 業種モーダル
  * ========================= */
 function IndustryCategoryModal({
   large,
@@ -866,7 +878,6 @@ function IndustryCategoryModal({
   const toggleSmall = (sm: string) =>
     setS(S.includes(sm) ? S.filter((x) => x !== sm) : [...S, sm]);
 
-  // 「大分類 すべて選択/解除」
   const allLarge = L.length === INDUSTRY_LARGE.length;
   const toggleAllLarge = (checked: boolean) => {
     if (checked) {
@@ -881,7 +892,6 @@ function IndustryCategoryModal({
     }
   };
 
-  // アクティブ大分類の小分類が全選択か
   const activeAllSmall =
     (INDUSTRY_CATEGORIES[rightGroup] || []).every((sm: string) =>
       S.includes(sm)
@@ -899,8 +909,8 @@ function IndustryCategoryModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-      <div className="w-[980px] max-w-[96vw] rounded-2xl bg-white shadow-xl border border-neutral-200 overflow-hidden">
+    <div className="fixed inset-0 z-50 flex items-center justify中心 bg-black/40">
+      <div className="w-[980px] max-w-[96vw] rounded-2xl bg白 shadow-xl border border-neutral-200 overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200">
           <div className="font-semibold">業種選択</div>
@@ -987,7 +997,7 @@ function IndustryCategoryModal({
           </div>
         </div>
 
-        {/* Footer（JobCategoryModal と同系の構成） */}
+        {/* Footer */}
         <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-neutral-200">
           <button
             onClick={() => {
@@ -1018,6 +1028,16 @@ function splitCsv(s: string): string[] {
     .split(",")
     .map((x) => x.trim())
     .filter(Boolean);
+}
+
+async function safeJson(res: Response) {
+  try {
+    // JSON以外（例：HTMLの404ページ）が来ても落ちない
+    const text = await res.text();
+    return text ? JSON.parse(text) : {};
+  } catch {
+    return {};
+  }
 }
 
 function formatTs(ts: string) {
