@@ -6,10 +6,14 @@ export const revalidate = 0;
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+
 type Filters = {
   prefectures?: string[];
   employee_size_ranges?: string[]; // ["1-9","10-49","50-249","250+"]
   keywords?: string[];
+  job_titles?: string[];
   max?: number;
 };
 
@@ -61,10 +65,9 @@ function findEmails(text: string): string[] {
 
 type Anchor = { href: string; text: string };
 
-// 非依存の a タグ抽出
 function extractAnchors(html: string): Anchor[] {
   const out: Anchor[] = [];
-  const re = /<a\b[^>]*href\s*=\s*(['"])(.*?)\1[^>]*>([\s\S]*?)<\/a\s*>/gi; // href と中身を抽出
+  const re = /<a\b[^>]*href\s*=\s*(['"])(.*?)\1[^>]*>([\s\S]*?)<\/a\s*>/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(html))) {
     const href = m[2] || "";
@@ -115,12 +118,9 @@ async function fetchHTML(url: string): Promise<string> {
   return await r.text();
 }
 
-// DuckDuckGo(HTML) をスクレイピングして結果リンクのみ抽出
 async function ddgSearch(q: string, max: number): Promise<string[]> {
   const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`;
   const html = await fetchHTML(url);
-
-  // <a class="result__a" href="..."> マッチ
   const out: string[] = [];
   const re =
     /<a\b[^>]*class\s*=\s*(['"])(?=[^'"]*\bresult__a\b)[\s\S]*?\1[^>]*href\s*=\s*(['"])(.*?)\2/gi;
@@ -132,12 +132,53 @@ async function ddgSearch(q: string, max: number): Promise<string[]> {
   return uniq(out).slice(0, max);
 }
 
-// （任意）LLM補助はダミー返却。必要になれば chat API に差し替え。
-async function enrichWithLLM(_html: string): Promise<{
+// --- LLM 補助（業種・規模をゆるく抽出） ---
+async function enrichWithLLM(html: string): Promise<{
   industry: string | null;
   sizeRange: string | null;
 }> {
-  return { industry: null, sizeRange: null };
+  try {
+    if (!OPENAI_API_KEY) return { industry: null, sizeRange: null };
+
+    const text = stripTags(html).slice(0, 12000); // トークン節約
+    const sys =
+      "あなたは日本企業サイトのテキストから「主な業種」と「従業員規模(1-9,10-49,50-249,250+ のいずれか)」を推定するアシスタントです。無理なら null を返してください。";
+    const user = `以下のテキストから JSON を返してください。\n\n---\n${text}\n---\n出力例: {"industry":"ITサービス","sizeRange":"50-249"}`;
+
+    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: OPENAI_MODEL,
+        temperature: 0,
+        messages: [
+          { role: "system", content: sys },
+          { role: "user", content: user },
+        ],
+        response_format: { type: "json_object" },
+      }),
+    });
+
+    const j = await r.json();
+    const content =
+      j?.choices?.[0]?.message?.content || '{"industry":null,"sizeRange":null}';
+    const parsed = JSON.parse(content);
+    const sizeRange = ["1-9", "10-49", "50-249", "250+"].includes(
+      parsed?.sizeRange
+    )
+      ? parsed.sizeRange
+      : null;
+
+    return {
+      industry: typeof parsed?.industry === "string" ? parsed.industry : null,
+      sizeRange,
+    };
+  } catch {
+    return { industry: null, sizeRange: null };
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -159,23 +200,31 @@ export async function POST(req: NextRequest) {
       ? filters.employee_size_ranges
       : [];
     const keywords = Array.isArray(filters.keywords) ? filters.keywords : [];
+    const jobTitles = Array.isArray(filters.job_titles)
+      ? filters.job_titles
+      : [];
     const max =
       typeof filters.max === "number" && filters.max > 0
         ? Math.min(filters.max, 150)
         : 50;
 
-    // 検索クエリ生成
-    const prefQ = prefectures.length ? prefectures : [""];
-    const baseKw = [
+    // 検索クエリ
+    const baseWords = [
       "採用",
       "募集",
       "求人",
       "recruit",
       "採用情報",
       ...keywords,
-    ].join(" ");
+      ...jobTitles,
+    ]
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .join(" ");
+
+    const prefQ = prefectures.length ? prefectures : [""];
     const queries = uniq(
-      prefQ.map((p) => `${p} ${baseKw} 企業 site:.jp`.trim())
+      prefQ.map((p) => `${p} ${baseWords} 企業 site:.jp`.trim())
     );
 
     // 1) 検索 → 候補URL
@@ -204,8 +253,6 @@ export async function POST(req: NextRequest) {
             const emails = findEmails(html);
             const recruitLinks = findRecruitLinks(root, html);
             const contactForm = findContactForm(root, html);
-
-            // LLM補助（現状ダミー）
             const { industry, sizeRange } = await enrichWithLLM(html);
 
             const row: ProspectRow = {
@@ -218,14 +265,10 @@ export async function POST(req: NextRequest) {
               job_site_source: "ddg",
             };
 
-            // フィルタ適用（簡易）
-            // ※ sizeRanges は現状 LLM 推定に依存。将来は別データ源に拡張可。
+            // フィルタ（簡易）
             if (sizeRanges.length && row.company_size) {
               if (!sizeRanges.includes(row.company_size)) return null;
             }
-
-            // prefectures は現状ページ本文解析が必要だが、
-            // ここでは URL/タイトルに県名が入っている場合のみ簡易に通す
             if (prefectures.length) {
               const hay = `${row.company_name || ""} ${row.website}`;
               const hit = prefectures.some((p) => hay.includes(p));
@@ -241,21 +284,19 @@ export async function POST(req: NextRequest) {
       for (const r of results) if (r) out.push(r);
     }
 
-    // 4) 既存と重複排除して保存
+    // 4) 既存と重複排除して保存（IDを返す）
     const admin = supabaseAdmin();
 
     let existSet = new Set<string>();
     if (out.length > 0) {
       const websites = out.map((r) => r.website);
-      // Postgrest の .in で空配列はエラーになるためガード
-      const { data: existing, error: exErr } = await admin
+      const { data: existing } = await admin
         .from("form_prospects")
         .select("website")
         .eq("tenant_id", tenantId)
         .in("website", websites);
-      if (!exErr && existing) {
+      if (existing)
         existSet = new Set(existing.map((r: { website: string }) => r.website));
-      }
     }
 
     const now = new Date().toISOString();
@@ -275,19 +316,35 @@ export async function POST(req: NextRequest) {
         updated_at: now,
       }));
 
+    let insertedRows:
+      | {
+          id: string;
+          tenant_id: string | null;
+          company_name: string | null;
+          website: string | null;
+          contact_email: string | null;
+          job_site_source: string | null;
+          created_at: string | null;
+        }[]
+      | null = [];
+
     if (inserts.length > 0) {
-      const { error: insErr } = await admin
+      const { data, error: insErr } = await admin
         .from("form_prospects")
-        .insert(inserts);
+        .insert(inserts)
+        .select(
+          "id, tenant_id, company_name, website, contact_email, job_site_source, created_at"
+        );
       if (insErr) {
         return NextResponse.json({ error: insErr.message }, { status: 500 });
       }
+      insertedRows = data ?? [];
     }
 
     return NextResponse.json({
       fetched: out.length,
-      inserted: inserts.length,
-      rows: inserts, // 画面下部の一時表示で利用
+      inserted: insertedRows?.length ?? 0,
+      rows: insertedRows ?? [],
     });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);

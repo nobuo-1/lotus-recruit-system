@@ -196,6 +196,14 @@ export default function FormOutreachLanding() {
               <ul className="mt-1.5 space-y-1.5">
                 <li>
                   <Link
+                    href="/form-outreach/settings/filters"
+                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
+                  >
+                    取得フィルタ設定
+                  </Link>
+                </li>
+                <li>
+                  <Link
                     href="/form-outreach/automation"
                     className="text-base text-neutral-800 underline-offset-2 hover:underline"
                   >

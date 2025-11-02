@@ -1,3 +1,4 @@
+// web/src/app/api/me/tenant/route.ts
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
 import { createClient } from "@supabase/supabase-js";

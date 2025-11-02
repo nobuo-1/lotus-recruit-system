@@ -4,9 +4,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import AppHeader from "@/components/AppHeader";
 import Link from "next/link";
-import { CheckCircle, XCircle, Loader2, Play } from "lucide-react";
+import { CheckCircle, XCircle, Loader2, Play, ChevronDown } from "lucide-react";
 
-const TENANT_ID = "175b1a9d-3f85-482d-9323-68a44d214424";
 const LS_KEY = "fo_manual_fetch_latest"; // 1日キャッシュ
 
 type StepState = "idle" | "running" | "done" | "error";
@@ -17,7 +16,8 @@ type AddedRow = {
   company_name: string | null;
   website: string | null;
   contact_email: string | null;
-  source_site: string | null;
+  job_site_source?: string | null; // ← APIの返却名に合わせる
+  source_site?: string | null; // 後方互換
   created_at: string | null;
 };
 
@@ -27,74 +27,146 @@ type RunResult = {
   error?: string;
 };
 
+type Filters = {
+  prefectures: string[];
+  employee_size_ranges: string[];
+  keywords: string[];
+  job_titles: string[];
+  updated_at?: string | null;
+};
+
 export default function ManualFetch() {
+  const [tenantId, setTenantId] = useState<string | null>(null);
+
   const [msg, setMsg] = useState("");
   const [s1, setS1] = useState<StepState>("idle"); // 収集
   const [s2, setS2] = useState<StepState>("idle"); // 解析
   const [s3, setS3] = useState<StepState>("idle"); // 保存
 
+  const [log1, setLog1] = useState<string[]>([]);
+  const [log2, setLog2] = useState<string[]>([]);
+  const [log3, setLog3] = useState<string[]>([]);
+
+  const [open1, setOpen1] = useState(false);
+  const [open2, setOpen2] = useState(false);
+  const [open3, setOpen3] = useState(false);
+
   const [added, setAdded] = useState<AddedRow[]>([]);
   const [loading, setLoading] = useState(false);
 
-  // 1日だけ保持した結果を表示
+  const [filters, setFilters] = useState<Filters>({
+    prefectures: [],
+    employee_size_ranges: [],
+    keywords: [],
+    job_titles: [],
+    updated_at: null,
+  });
+
+  // 初期ロード：テナントとフィルタ、1日キャッシュ
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(LS_KEY);
-      if (!raw) return;
-      const obj = JSON.parse(raw);
-      const ts = obj?.ts ? new Date(obj.ts).getTime() : 0;
-      if (Date.now() - ts < 24 * 60 * 60 * 1000) {
-        setAdded(obj.rows ?? []);
-      } else {
-        localStorage.removeItem(LS_KEY);
+    (async () => {
+      try {
+        const t = await fetch("/api/me/tenant", { cache: "no-store" }).then(
+          (r) => r.json()
+        );
+        setTenantId(t?.tenant_id ?? null);
+
+        const f = await fetch("/api/form-outreach/settings/filters", {
+          cache: "no-store",
+        }).then((r) => r.json());
+        if (f?.filters) setFilters(f.filters);
+
+        const raw = localStorage.getItem(LS_KEY);
+        if (raw) {
+          const obj = JSON.parse(raw);
+          const ts = obj?.ts ? new Date(obj.ts).getTime() : 0;
+          if (Date.now() - ts < 24 * 60 * 60 * 1000) {
+            setAdded(obj.rows ?? []);
+          } else {
+            localStorage.removeItem(LS_KEY);
+          }
+        }
+      } catch (e: any) {
+        setMsg(String(e?.message || e));
       }
-    } catch {}
+    })();
   }, []);
 
   const anyRunning = s1 === "running" || s2 === "running" || s3 === "running";
 
   const run = async () => {
     if (anyRunning || loading) return;
+    if (!tenantId) {
+      setMsg("テナントが解決できませんでした。ログインを確認してください。");
+      return;
+    }
     setMsg("");
     setLoading(true);
     setS1("running");
     setS2("idle");
     setS3("idle");
     setAdded([]);
+    setLog1([]);
+    setLog2([]);
+    setLog3([]);
 
     try {
-      // ステップ1: 収集
-      await wait(400); // UX用の最小待機
-      // 実処理は fetch-now に集約
-      // ステップ2: 解析（見せ方上で遷移）
+      // ステップ1: 収集（検索クエリの表示）
+      setOpen1(true);
+      setLog1((v) => [
+        ...v,
+        `都道府県: ${filters.prefectures.join(", ") || "全国"}`,
+        `規模: ${filters.employee_size_ranges.join(", ") || "指定なし"}`,
+        `キーワード: ${filters.keywords.join(", ") || "指定なし"}`,
+        `職種: ${filters.job_titles.join(", ") || "指定なし"}`,
+      ]);
+      await wait(300);
       setS1("done");
+
+      // ステップ2: 解析（見せ方上ログ）
+      setOpen2(true);
       setS2("running");
-      await wait(200);
+      setLog2((v) => [
+        ...v,
+        "候補サイトのタイトル/メール/採用・問い合わせリンク解析…",
+      ]);
+      await wait(300);
 
-      // ステップ3: 保存
+      // ステップ3: 保存（API実行）
       setS2("done");
+      setOpen3(true);
       setS3("running");
+      setLog3((v) => [...v, "DBへ保存しています…"]);
 
-      const r = await fetch("/api/form-outreach/companies/fetch-now", {
+      const r = await fetch("/api/form-outreach/companies/fetch", {
         method: "POST",
         headers: {
-          "x-tenant-id": TENANT_ID,
+          "x-tenant-id": tenantId,
           "content-type": "application/json",
         },
-        body: JSON.stringify({ tenant_id: TENANT_ID }),
+        body: JSON.stringify({
+          filters: {
+            prefectures: filters.prefectures,
+            employee_size_ranges: filters.employee_size_ranges,
+            keywords: filters.keywords,
+            job_titles: filters.job_titles,
+            max: 60,
+          },
+        }),
       });
+
       const j: RunResult = await r.json();
-      if (!r.ok) throw new Error(j?.error || "fetch-now failed");
+      if (!r.ok) throw new Error(j?.error || "fetch failed");
 
       setS3("done");
       const rows = j.rows ?? [];
       setAdded(rows);
 
-      // 1日キャッシュ
       localStorage.setItem(
         LS_KEY,
         JSON.stringify({ ts: new Date().toISOString(), rows })
       );
+      setLog3((v) => [...v, `保存完了：追加 ${j.inserted ?? rows.length} 件`]);
       setMsg(`実行完了：追加 ${j.inserted ?? rows.length} 件`);
     } catch (e: any) {
       setS1((v) => (v === "running" ? "error" : v));
@@ -107,13 +179,14 @@ export default function ManualFetch() {
   };
 
   const cancelAdditions = async () => {
+    if (!tenantId) return;
     if (added.length === 0) return;
     const ids = added.map((r) => r.id);
     try {
       const r = await fetch("/api/form-outreach/companies/cancel-additions", {
         method: "POST",
         headers: {
-          "x-tenant-id": TENANT_ID,
+          "x-tenant-id": tenantId,
           "content-type": "application/json",
         },
         body: JSON.stringify({ ids }),
@@ -128,6 +201,34 @@ export default function ManualFetch() {
     }
   };
 
+  // フィルタ要約（上部に表示）
+  const filtersSummary = useMemo(() => {
+    const a: string[] = [];
+    a.push(
+      `都道府県=${
+        filters.prefectures.length ? filters.prefectures.join(" / ") : "全国"
+      }`
+    );
+    a.push(
+      `規模=${
+        filters.employee_size_ranges.length
+          ? filters.employee_size_ranges.join(" / ")
+          : "指定なし"
+      }`
+    );
+    a.push(
+      `KW=${
+        filters.keywords.length ? filters.keywords.join(" / ") : "指定なし"
+      }`
+    );
+    a.push(
+      `職種=${
+        filters.job_titles.length ? filters.job_titles.join(" / ") : "指定なし"
+      }`
+    );
+    return a.join(" / ");
+  }, [filters]);
+
   return (
     <>
       <AppHeader showBack />
@@ -139,6 +240,11 @@ export default function ManualFetch() {
             </h1>
             <p className="text-sm text-neutral-500">
               固定ワークフローで取得します。各ステップの進行状況を可視化します。
+            </p>
+            <p className="text-xs text-neutral-500 mt-1">
+              テナント: <span className="font-mono">{tenantId ?? "-"}</span> /
+              現在のフィルタ:{" "}
+              <span className="opacity-80">{filtersSummary}</span>
             </p>
           </div>
           <Link
@@ -153,20 +259,49 @@ export default function ManualFetch() {
         <section className="rounded-2xl border border-neutral-200 p-4 mb-4">
           <div className="mb-3 flex items-center justify-between">
             <div className="text-sm font-medium text-neutral-800">フロー</div>
-            <button
-              onClick={run}
-              disabled={anyRunning || loading}
-              className="inline-flex items-center gap-2 rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50 disabled:opacity-50"
-            >
-              <Play className="h-4 w-4" />
-              {anyRunning || loading ? "実行中…" : "ワークフローを実行"}
-            </button>
+            <div className="flex items-center gap-2">
+              <Link
+                href="/form-outreach/settings/filters"
+                className="rounded-lg border border-neutral-200 px-3 py-2 text-xs hover:bg-neutral-50"
+              >
+                取得フィルタ設定へ
+              </Link>
+              <button
+                onClick={run}
+                disabled={anyRunning || loading}
+                className="inline-flex items-center gap-2 rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50 disabled:opacity-50"
+              >
+                <Play className="h-4 w-4" />
+                {anyRunning || loading ? "実行中…" : "ワークフローを実行"}
+              </button>
+            </div>
           </div>
 
           <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-            <StepCard title="収集（スクレイピング）" state={s1} />
-            <StepCard title="解析（正規化・抽出）" state={s2} />
-            <StepCard title="保存（DBへ反映）" state={s3} />
+            <StepCard
+              title="収集（スクレイピング）"
+              state={s1}
+              open={open1}
+              onToggle={() => setOpen1((v) => !v)}
+            >
+              <Logs items={log1} />
+            </StepCard>
+            <StepCard
+              title="解析（正規化・抽出）"
+              state={s2}
+              open={open2}
+              onToggle={() => setOpen2((v) => !v)}
+            >
+              <Logs items={log2} />
+            </StepCard>
+            <StepCard
+              title="保存（DBへ反映）"
+              state={s3}
+              open={open3}
+              onToggle={() => setOpen3((v) => !v)}
+            >
+              <Logs items={log3} />
+            </StepCard>
           </div>
         </section>
 
@@ -215,7 +350,9 @@ export default function ManualFetch() {
                     )}
                   </td>
                   <td className="px-3 py-2">{c.contact_email || "-"}</td>
-                  <td className="px-3 py-2">{c.source_site || "-"}</td>
+                  <td className="px-3 py-2">
+                    {c.job_site_source || c.source_site || "-"}
+                  </td>
                   <td className="px-3 py-2">
                     {c.created_at
                       ? c.created_at.replace("T", " ").replace("Z", "")
@@ -247,7 +384,19 @@ export default function ManualFetch() {
   );
 }
 
-function StepCard({ title, state }: { title: string; state: StepState }) {
+function StepCard({
+  title,
+  state,
+  open,
+  onToggle,
+  children,
+}: {
+  title: string;
+  state: StepState;
+  open: boolean;
+  onToggle: () => void;
+  children?: React.ReactNode;
+}) {
   const icon =
     state === "running" ? (
       <Loader2 className="h-8 w-8 animate-spin text-neutral-700" />
@@ -261,14 +410,47 @@ function StepCard({ title, state }: { title: string; state: StepState }) {
 
   return (
     <div className="rounded-xl border border-neutral-200 bg-white p-4 shadow-sm">
-      <div className="mb-2 text-sm font-semibold text-neutral-800">{title}</div>
-      <div className="flex items-center justify-center py-6">{icon}</div>
-      <div className="text-center text-xs text-neutral-500">
-        {state === "idle" && "待機中"}
-        {state === "running" && "実行中…"}
-        {state === "done" && "完了"}
-        {state === "error" && "失敗"}
+      <button
+        onClick={onToggle}
+        className="w-full flex items-center justify-between"
+        aria-expanded={open}
+        aria-controls={title}
+      >
+        <div>
+          <div className="text-sm font-semibold text-neutral-800">{title}</div>
+          <div className="text-xs text-neutral-500">
+            {state === "idle" && "待機中"}
+            {state === "running" && "実行中…"}
+            {state === "done" && "完了"}
+            {state === "error" && "失敗"}
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          {icon}
+          <ChevronDown
+            className={`h-4 w-4 transition-transform ${
+              open ? "rotate-180" : ""
+            }`}
+          />
+        </div>
+      </button>
+      {open && <div className="pt-3">{children}</div>}
+    </div>
+  );
+}
+
+function Logs({ items }: { items: string[] }) {
+  if (!items.length)
+    return (
+      <div className="rounded-lg border border-neutral-200 p-3 text-xs text-neutral-500">
+        ログはありません
       </div>
+    );
+  return (
+    <div className="rounded-lg border border-neutral-200 p-3 text-xs text-neutral-700 space-y-1">
+      {items.map((l, i) => (
+        <div key={i}>• {l}</div>
+      ))}
     </div>
   );
 }
