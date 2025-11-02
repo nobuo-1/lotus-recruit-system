@@ -9,7 +9,7 @@ type Filters = {
   prefectures: string[];
   employee_size_ranges: string[];
   keywords: string[];
-  industries: string[]; // ← 職種ではなく業種に変更
+  industries: string[]; // 業種（複数選択）
   updated_at?: string | null;
 };
 
@@ -85,12 +85,9 @@ const PREF_GROUPS: { label: string; items: string[] }[] = [
   },
 ];
 
-// 日本標準産業分類をベースに網羅的に（粒度を実務で使いやすい単位へ調整）
+// 日本標準産業分類ベース（実務向けに集約）
 const INDUSTRY_GROUPS: { label: string; items: string[] }[] = [
-  {
-    label: "農林水産",
-    items: ["農業", "林業", "水産業"],
-  },
+  { label: "農林水産", items: ["農業", "林業", "水産業"] },
   {
     label: "鉱業・採石・砂利採取",
     items: ["鉱業", "採石業", "砂利・土石採取"],
@@ -304,8 +301,8 @@ const INDUSTRY_GROUPS: { label: string; items: string[] }[] = [
   },
 ];
 
-// よく使うクイック選択
-const QUICK_INDUSTRIES = [
+// クイック選択
+const QUICK_INDS = [
   "SaaS",
   "受託開発/SI",
   "EC/ネット通販",
@@ -319,7 +316,7 @@ const QUICK_INDUSTRIES = [
   "人材派遣",
   "広告代理店",
   "マーケティング支援",
-  "製造（一般機械器具）",
+  "一般機械器具",
   "倉庫・運輸関連",
 ];
 
@@ -337,14 +334,14 @@ export default function FiltersPage() {
     updated_at: null,
   });
 
-  // 検索ボックス
+  // 都道府県検索
   const [prefQuery, setPrefQuery] = useState("");
-  const [industryQuery, setIndustryQuery] = useState("");
 
-  // 折りたたみ（業種）
-  const [openGroups, setOpenGroups] = useState<Set<string>>(
-    () => new Set(INDUSTRY_GROUPS.slice(0, 4).map((g) => g.label)) // 初期は上位4グループを展開
-  );
+  // 業種：モーダル開閉（トグル式）
+  const [indPanelOpen, setIndPanelOpen] = useState(false);
+  const [industryQuery, setIndustryQuery] = useState("");
+  // 業種グループの折りたたみ（初期：全て閉じる）
+  const [openGroups, setOpenGroups] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     (async () => {
@@ -358,7 +355,6 @@ export default function FiltersPage() {
           cache: "no-store",
         }).then((r) => r.json());
 
-        // 互換: industries がまだ無いAPIでも job_titles があれば取り込む
         const incoming = j?.filters ?? {};
         setFilters({
           prefectures: incoming.prefectures ?? [],
@@ -381,7 +377,7 @@ export default function FiltersPage() {
       const r = await fetch("/api/form-outreach/settings/filters", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ filters }), // industries を保存
+        body: JSON.stringify({ filters }),
       });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j?.error || "save failed");
@@ -394,7 +390,7 @@ export default function FiltersPage() {
     }
   };
 
-  /** ====== サマリ表示 ====== */
+  /** ====== サマリ ====== */
   const summaryPref = useMemo(() => {
     const n = filters.prefectures.length;
     if (n === 0) return "（全国）";
@@ -407,14 +403,13 @@ export default function FiltersPage() {
     return n <= 6 ? filters.industries.join(" / ") : `${n} 業種を選択中`;
   }, [filters.industries]);
 
-  /** ====== 検索 ====== */
+  /** ====== 検索適用 ====== */
   const filteredPrefGroups = useMemo(() => {
-    const q = prefQuery.trim();
+    const q = prefQuery.trim().toLowerCase();
     if (!q) return PREF_GROUPS;
-    const f = q.toLowerCase();
     return PREF_GROUPS.map((g) => ({
       ...g,
-      items: g.items.filter((x) => x.toLowerCase().includes(f)),
+      items: g.items.filter((x) => x.toLowerCase().includes(q)),
     })).filter((g) => g.items.length > 0);
   }, [prefQuery]);
 
@@ -427,20 +422,25 @@ export default function FiltersPage() {
     })).filter((g) => g.items.length > 0);
   }, [industryQuery]);
 
-  /** ====== 都道府県 一括 ====== */
+  /** ====== 県 一括 ====== */
   const selectAllPref = () => {
     const all = PREF_GROUPS.flatMap((g) => g.items);
     setFilters((s) => ({ ...s, prefectures: Array.from(new Set(all)) }));
   };
   const clearPref = () => setFilters((s) => ({ ...s, prefectures: [] }));
 
-  /** ====== 業種：グループ操作 ====== */
+  /** ====== 業種グループ操作 ====== */
   const toggleGroupOpen = (label: string) =>
     setOpenGroups((prev) => {
       const n = new Set(prev);
       n.has(label) ? n.delete(label) : n.add(label);
       return n;
     });
+
+  const expandAllGroups = () =>
+    setOpenGroups(new Set(INDUSTRY_GROUPS.map((g) => g.label)));
+
+  const collapseAllGroups = () => setOpenGroups(new Set());
 
   const countSelectedInGroup = (items: string[]) =>
     items.filter((x) => filters.industries.includes(x)).length;
@@ -455,15 +455,6 @@ export default function FiltersPage() {
     setFilters((s) => ({
       ...s,
       industries: s.industries.filter((x) => !items.includes(x)),
-    }));
-
-  /** ====== クイック選択 ====== */
-  const toggleQuick = (name: string) =>
-    setFilters((s) => ({
-      ...s,
-      industries: s.industries.includes(name)
-        ? s.industries.filter((x) => x !== name)
-        : [...s.industries, name],
     }));
 
   /** ====== UI ====== */
@@ -492,7 +483,7 @@ export default function FiltersPage() {
         </div>
 
         <section className="rounded-2xl border border-neutral-200 p-4 space-y-6">
-          {/* 都道府県 */}
+          {/* 都道府県（常時表示） */}
           <div>
             <div className="mb-2 flex items-center justify-between">
               <div>
@@ -629,7 +620,7 @@ export default function FiltersPage() {
 
           <hr className="border-neutral-200" />
 
-          {/* 業種（選択式） */}
+          {/* 業種（トグル式：閉じた状態でサマリのみ） */}
           <div>
             <div className="mb-2 flex items-center justify-between">
               <div>
@@ -638,38 +629,89 @@ export default function FiltersPage() {
                 </div>
                 <div className="text-[11px] text-neutral-500">{summaryInd}</div>
               </div>
+              <button
+                className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
+                onClick={() => setIndPanelOpen(true)}
+              >
+                業種を選択
+              </button>
+            </div>
+
+            {/* 選択中のチップ（削除可・閉じたままでも操作できる） */}
+            {filters.industries.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {filters.industries.map((name) => (
+                  <button
+                    key={name}
+                    className="inline-flex items-center gap-1 rounded-full border border-neutral-300 bg-white px-2 py-0.5 text-xs"
+                    title="クリックで除外"
+                    onClick={() =>
+                      setFilters((s) => ({
+                        ...s,
+                        industries: s.industries.filter((x) => x !== name),
+                      }))
+                    }
+                  >
+                    {name} <span className="opacity-60">×</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
+
+        {msg && (
+          <pre className="mt-3 whitespace-pre-wrap text-xs text-neutral-600">
+            {msg}
+          </pre>
+        )}
+      </main>
+
+      {/* ====== 業種選択モーダル（トグル式で開く） ====== */}
+      {indPanelOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30"
+          onClick={() => setIndPanelOpen(false)}
+        >
+          <div
+            className="w-full max-w-4xl rounded-2xl border border-neutral-200 bg-white p-4 shadow-lg"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 flex items-center justify-between">
+              <div className="text-base font-semibold text-neutral-800">
+                業種を選択
+              </div>
               <div className="flex items-center gap-2">
-                {/* 選択中バッジ（削除可能） */}
-                {filters.industries.length > 0 && (
-                  <div className="hidden md:flex flex-wrap gap-2 max-w-[520px] justify-end">
-                    {filters.industries.slice(0, 6).map((name) => (
-                      <button
-                        key={name}
-                        className="inline-flex items-center gap-1 rounded-full border border-neutral-300 bg-white px-2 py-0.5 text-xs"
-                        onClick={() =>
-                          setFilters((s) => ({
-                            ...s,
-                            industries: s.industries.filter((x) => x !== name),
-                          }))
-                        }
-                        title="クリックで削除"
-                      >
-                        {name} <span className="opacity-60">×</span>
-                      </button>
-                    ))}
-                    {filters.industries.length > 6 && (
-                      <span className="text-xs text-neutral-500">
-                        +{filters.industries.length - 6}
-                      </span>
-                    )}
-                  </div>
-                )}
+                <button
+                  className="rounded-lg border border-neutral-200 px-2 py-1 text-xs hover:bg-neutral-50"
+                  onClick={expandAllGroups}
+                >
+                  すべて展開
+                </button>
+                <button
+                  className="rounded-lg border border-neutral-200 px-2 py-1 text-xs hover:bg-neutral-50"
+                  onClick={collapseAllGroups}
+                >
+                  すべて閉じる
+                </button>
+                <button
+                  className="rounded-lg border border-neutral-200 px-2 py-1 text-xs hover:bg-neutral-50"
+                  onClick={() => setIndPanelOpen(false)}
+                >
+                  閉じる
+                </button>
+                <button
+                  className="rounded-lg border border-neutral-200 px-2 py-1 text-xs hover:bg-neutral-50"
+                  onClick={() => setIndPanelOpen(false)}
+                >
+                  完了
+                </button>
               </div>
             </div>
 
             {/* クイック選択 */}
             <div className="mb-3 flex flex-wrap gap-2">
-              {QUICK_INDUSTRIES.map((q) => {
+              {QUICK_INDS.map((q) => {
                 const on = filters.industries.includes(q);
                 return (
                   <button
@@ -679,7 +721,14 @@ export default function FiltersPage() {
                         ? "border-indigo-400 bg-indigo-50 text-indigo-700"
                         : "border-neutral-300 hover:bg-neutral-50 text-neutral-700"
                     }`}
-                    onClick={() => toggleQuick(q)}
+                    onClick={() =>
+                      setFilters((s) => ({
+                        ...s,
+                        industries: s.industries.includes(q)
+                          ? s.industries.filter((x) => x !== q)
+                          : [...s.industries, q],
+                      }))
+                    }
                   >
                     {q}
                   </button>
@@ -688,7 +737,7 @@ export default function FiltersPage() {
             </div>
 
             {/* 検索 */}
-            <div className="mb-2">
+            <div className="mb-3">
               <input
                 className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
                 placeholder="業種を検索…（例: 製造、広告、物流、SaaS）"
@@ -697,8 +746,8 @@ export default function FiltersPage() {
               />
             </div>
 
-            {/* グループ（折りたたみ可能） */}
-            <div className="space-y-3">
+            {/* グループ一覧（折りたたみ/展開） */}
+            <div className="space-y-3 max-h-[60vh] overflow-auto pr-1">
               {filteredIndustryGroups.map((g) => {
                 const opened = openGroups.has(g.label);
                 const selectedCount = countSelectedInGroup(g.items);
@@ -755,6 +804,7 @@ export default function FiltersPage() {
                                     ? "border-indigo-300 bg-indigo-50 text-indigo-800"
                                     : "border-neutral-200 bg-white text-neutral-800 hover:bg-neutral-50"
                                 }`}
+                                onClick={(e) => e.stopPropagation()}
                               >
                                 <input
                                   type="checkbox"
@@ -789,14 +839,8 @@ export default function FiltersPage() {
               )}
             </div>
           </div>
-        </section>
-
-        {msg && (
-          <pre className="mt-3 whitespace-pre-wrap text-xs text-neutral-600">
-            {msg}
-          </pre>
-        )}
-      </main>
+        </div>
+      )}
     </>
   );
 }
