@@ -16,7 +16,7 @@ type AddedRow = {
   company_name: string | null;
   website: string | null;
   contact_email: string | null;
-  job_site_source?: string | null; // ← APIの返却名に合わせる
+  job_site_source?: string | null; // APIの返却名に合わせる
   source_site?: string | null; // 後方互換
   created_at: string | null;
 };
@@ -31,7 +31,9 @@ type Filters = {
   prefectures: string[];
   employee_size_ranges: string[];
   keywords: string[];
-  job_titles: string[];
+  // ↓ 職種は廃止。業種に統一
+  industries_large: string[]; // 大分類
+  industries_small: string[]; // 小分類
   updated_at?: string | null;
 };
 
@@ -58,7 +60,8 @@ export default function ManualFetch() {
     prefectures: [],
     employee_size_ranges: [],
     keywords: [],
-    job_titles: [],
+    industries_large: [],
+    industries_small: [],
     updated_at: null,
   });
 
@@ -66,16 +69,49 @@ export default function ManualFetch() {
   useEffect(() => {
     (async () => {
       try {
-        const t = await fetch("/api/me/tenant", { cache: "no-store" }).then(
-          (r) => r.json()
-        );
-        setTenantId(t?.tenant_id ?? null);
+        // テナント
+        let meRes = await fetch("/api/me/tenant", { cache: "no-store" });
+        if (!meRes.ok) {
+          // 404対策で末尾スラありも再試行
+          const meRes2 = await fetch("/api/me/tenant/", { cache: "no-store" });
+          meRes = meRes2;
+        }
+        const me = await safeJson(meRes);
+        setTenantId(me?.tenant_id ?? me?.profile?.tenant_id ?? null);
 
-        const f = await fetch("/api/form-outreach/settings/filters", {
+        // フィルタ
+        const fRes = await fetch("/api/form-outreach/settings/filters", {
           cache: "no-store",
-        }).then((r) => r.json());
-        if (f?.filters) setFilters(f.filters);
+          headers: me?.tenant_id
+            ? { "x-tenant-id": String(me.tenant_id) }
+            : undefined,
+        });
+        const fj = await safeJson(fRes);
+        const incoming = fj?.filters ?? {};
 
+        setFilters({
+          prefectures: Array.isArray(incoming.prefectures)
+            ? incoming.prefectures
+            : [],
+          employee_size_ranges: Array.isArray(incoming.employee_size_ranges)
+            ? incoming.employee_size_ranges
+            : [],
+          keywords: Array.isArray(incoming.keywords) ? incoming.keywords : [],
+          industries_large: Array.isArray(incoming.industries_large)
+            ? incoming.industries_large
+            : [],
+          // 後方互換（旧: job_titles/industries から拾っておく）
+          industries_small: Array.isArray(incoming.industries_small)
+            ? incoming.industries_small
+            : Array.isArray(incoming.industries)
+            ? incoming.industries
+            : Array.isArray(incoming.job_titles)
+            ? incoming.job_titles
+            : [],
+          updated_at: incoming.updated_at ?? null,
+        });
+
+        // 1日キャッシュ
         const raw = localStorage.getItem(LS_KEY);
         if (raw) {
           const obj = JSON.parse(raw);
@@ -118,7 +154,11 @@ export default function ManualFetch() {
         `都道府県: ${filters.prefectures.join(", ") || "全国"}`,
         `規模: ${filters.employee_size_ranges.join(", ") || "指定なし"}`,
         `キーワード: ${filters.keywords.join(", ") || "指定なし"}`,
-        `職種: ${filters.job_titles.join(", ") || "指定なし"}`,
+        // 職種 → 業種（薄字ログに業種を反映）
+        `業種(大): ${filters.industries_large.join(", ") || "指定なし"}`,
+        `業種(小): ${
+          filters.industries_small.slice(0, 10).join(", ") || "指定なし"
+        }${filters.industries_small.length > 10 ? " …" : ""}`,
       ]);
       await wait(300);
       setS1("done");
@@ -132,7 +172,7 @@ export default function ManualFetch() {
       ]);
       await wait(300);
 
-      // ステップ3: 保存（API実行）
+      // ステップ3: 保存（API実行）— 送信は「業種のみ」
       setS2("done");
       setOpen3(true);
       setS3("running");
@@ -149,13 +189,14 @@ export default function ManualFetch() {
             prefectures: filters.prefectures,
             employee_size_ranges: filters.employee_size_ranges,
             keywords: filters.keywords,
-            job_titles: filters.job_titles,
+            industries_large: filters.industries_large,
+            industries_small: filters.industries_small,
             max: 60,
           },
         }),
       });
 
-      const j: RunResult = await r.json();
+      const j: RunResult = await safeJson(r);
       if (!r.ok) throw new Error(j?.error || "fetch failed");
 
       setS3("done");
@@ -191,7 +232,7 @@ export default function ManualFetch() {
         },
         body: JSON.stringify({ ids }),
       });
-      const j = await r.json();
+      const j = await safeJson(r);
       if (!r.ok) throw new Error(j?.error || "cancel failed");
       setMsg(`取消しました：削除 ${j.deleted ?? 0} 件`);
       setAdded([]);
@@ -201,7 +242,7 @@ export default function ManualFetch() {
     }
   };
 
-  // フィルタ要約（上部に表示）
+  // フィルタ要約（上部に表示：デザイン維持・表現のみ「職種→業種」に変更）
   const filtersSummary = useMemo(() => {
     const a: string[] = [];
     a.push(
@@ -221,11 +262,15 @@ export default function ManualFetch() {
         filters.keywords.length ? filters.keywords.join(" / ") : "指定なし"
       }`
     );
-    a.push(
-      `職種=${
-        filters.job_titles.length ? filters.job_titles.join(" / ") : "指定なし"
-      }`
-    );
+    // 職種→業種
+    const indLabel =
+      filters.industries_small.length > 0
+        ? filters.industries_small.slice(0, 6).join(" / ") +
+          (filters.industries_small.length > 6 ? " …" : "")
+        : filters.industries_large.length > 0
+        ? filters.industries_large.join(" / ")
+        : "指定なし";
+    a.push(`業種=${indLabel}`);
     return a.join(" / ");
   }, [filters]);
 
@@ -457,4 +502,14 @@ function Logs({ items }: { items: string[] }) {
 
 function wait(ms: number) {
   return new Promise((res) => setTimeout(res, ms));
+}
+
+// 404でHTMLが返っても安全に処理
+async function safeJson(res: Response) {
+  try {
+    const text = await res.text();
+    return text ? JSON.parse(text) : {};
+  } catch {
+    return {};
+  }
 }
