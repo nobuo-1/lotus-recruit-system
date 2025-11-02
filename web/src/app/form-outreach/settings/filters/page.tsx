@@ -5,22 +5,10 @@ import React, { useEffect, useMemo, useState } from "react";
 import AppHeader from "@/components/AppHeader";
 
 /** =========================
- * 型
+ * 定数（先に宣言して型で参照できるようにする）
  * ========================= */
-type IndustryLarge = (typeof INDUSTRY_LARGE)[number];
 
-type Filters = {
-  prefectures: string[];
-  employee_size_ranges: string[];
-  keywords: string[];
-  industries_large: IndustryLarge[]; // ← 厳密化
-  industries_small: string[];
-  updated_at?: string | null;
-};
-
-/** =========================
- * 定数
- * ========================= */
+// 従業員規模
 const SIZE_OPTS = ["1-9", "10-49", "50-249", "250+"] as const;
 
 // 47都道府県を地方ごとに
@@ -92,7 +80,7 @@ const PREF_GROUPS: { label: string; items: string[] }[] = [
   },
 ];
 
-// 業種（日本標準産業分類を意識した大分類・小分類）
+// 業種（日本標準産業分類を意識した大分類）※あとで型に使う
 const INDUSTRY_LARGE = [
   "農林水産",
   "鉱業・採石",
@@ -117,6 +105,8 @@ const INDUSTRY_LARGE = [
   "レンタル・リース・シェア",
   "その他サービス",
 ] as const;
+
+type IndustryLarge = (typeof INDUSTRY_LARGE)[number];
 
 const INDUSTRY_CATEGORIES: Record<IndustryLarge, readonly string[]> = {
   農林水産: ["農業", "畜産", "園芸", "林業", "水産業", "水産加工"],
@@ -338,6 +328,18 @@ const INDUSTRY_CATEGORIES: Record<IndustryLarge, readonly string[]> = {
 } as const;
 
 /** =========================
+ * 型
+ * ========================= */
+type Filters = {
+  prefectures: string[];
+  employee_size_ranges: string[];
+  keywords: string[];
+  industries_large: IndustryLarge[];
+  industries_small: string[];
+  updated_at?: string | null;
+};
+
+/** =========================
  * 画面
  * ========================= */
 export default function FiltersPage() {
@@ -358,6 +360,7 @@ export default function FiltersPage() {
   const [prefModalOpen, setPrefModalOpen] = useState(false);
   const [indModalOpen, setIndModalOpen] = useState(false);
 
+  // 初期ロード：ログイン中テナント → そのテナントの保存値を反映
   useEffect(() => {
     (async () => {
       try {
@@ -382,7 +385,6 @@ export default function FiltersPage() {
             ? incoming.employee_size_ranges
             : [],
           keywords: Array.isArray(incoming.keywords) ? incoming.keywords : [],
-          // 受信値を IndustryLarge に安全変換（未知値は捨てる）
           industries_large: toIndustryLarge(incoming.industries_large),
           industries_small: Array.isArray(incoming.industries_small)
             ? incoming.industries_small
@@ -560,7 +562,7 @@ export default function FiltersPage() {
 
           <hr className="border-neutral-200" />
 
-          {/* 業種（JobCategoryModal の UI を模倣） */}
+          {/* 業種（JobCategoryModal の UI を踏襲） */}
           <div>
             <div className="mb-2 flex items-center justify-between">
               <div>
@@ -629,7 +631,7 @@ export default function FiltersPage() {
         />
       )}
 
-      {/* 業種モーダル（JobCategoryModal を踏襲） */}
+      {/* 業種モーダル（JobCategoryModal を忠実に踏襲） */}
       {indModalOpen && (
         <IndustryCategoryModal
           large={filters.industries_large}
@@ -670,11 +672,11 @@ function PrefectureModal({
   const nationalAll = pref.length === allPrefList.length;
 
   const filteredGroups = useMemo(() => {
-    const q = query.trim().toLowerCase();
+    const q = query.trim();
     if (!q) return PREF_GROUPS;
     return PREF_GROUPS.map((g) => ({
       ...g,
-      items: g.items.filter((x) => x.toLowerCase().includes(q)),
+      items: g.items.filter((x) => x.includes(q)),
     })).filter((g) => g.items.length > 0);
   }, [query]);
 
@@ -796,8 +798,8 @@ function PrefectureModal({
           </div>
         </div>
 
-        {/* Footer */}
-        <div className="flex items中心 justify-end gap-2 px-4 py-3 border-t border-neutral-200">
+        {/* Footer（JobCategoryModal と同系の構成） */}
+        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-neutral-200">
           <button
             onClick={() => setPref([])}
             className="rounded-lg px-3 py-1 border border-neutral-300 text-sm hover:bg-neutral-50"
@@ -825,7 +827,7 @@ function IndustryCategoryModal({
   onCloseAction,
   onApplyAction,
 }: {
-  large: IndustryLarge[]; // ← 厳密化
+  large: IndustryLarge[];
   small: string[];
   onCloseAction: () => void;
   onApplyAction: (L: IndustryLarge[], S: string[]) => void;
@@ -869,8 +871,8 @@ function IndustryCategoryModal({
   const toggleAllLarge = (checked: boolean) => {
     if (checked) {
       setL([...INDUSTRY_LARGE]);
-      const allSm = INDUSTRY_LARGE.flatMap(
-        (lg) => INDUSTRY_CATEGORIES[lg] || []
+      const allSm = (INDUSTRY_LARGE as readonly IndustryLarge[]).flatMap(
+        (lg: IndustryLarge) => INDUSTRY_CATEGORIES[lg] || []
       );
       setS(allSm.slice());
     } else {
@@ -925,27 +927,29 @@ function IndustryCategoryModal({
               </label>
             </div>
             <div className="rounded-xl border border-neutral-200 divide-y divide-neutral-200 max-h-[520px] overflow-auto">
-              {INDUSTRY_LARGE.map((lg: IndustryLarge) => {
-                const checked = L.includes(lg);
-                const active = activeL === lg;
-                return (
-                  <div
-                    key={lg}
-                    onClick={() => setActiveL(lg)}
-                    className={`flex items-center justify-between px-3 py-2 cursor-pointer ${
-                      active ? "bg-neutral-100" : "bg-white"
-                    }`}
-                  >
-                    <div className="text-sm font-medium">{lg}</div>
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() => toggleLarge(lg)}
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                  </div>
-                );
-              })}
+              {(INDUSTRY_LARGE as readonly IndustryLarge[]).map(
+                (lg: IndustryLarge) => {
+                  const checked = L.includes(lg);
+                  const active = activeL === lg;
+                  return (
+                    <div
+                      key={lg}
+                      onClick={() => setActiveL(lg)}
+                      className={`flex items-center justify-between px-3 py-2 cursor-pointer ${
+                        active ? "bg-neutral-100" : "bg-white"
+                      }`}
+                    >
+                      <div className="text-sm font-medium">{lg}</div>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleLarge(lg)}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                    </div>
+                  );
+                }
+              )}
             </div>
           </div>
 
@@ -983,7 +987,7 @@ function IndustryCategoryModal({
           </div>
         </div>
 
-        {/* Footer */}
+        {/* Footer（JobCategoryModal と同系の構成） */}
         <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-neutral-200">
           <button
             onClick={() => {
@@ -1036,9 +1040,11 @@ function formatTs(ts: string) {
 
 function toIndustryLarge(input: unknown): IndustryLarge[] {
   if (!Array.isArray(input)) return [];
-  const set = new Set(INDUSTRY_LARGE);
+  const allow = new Set<IndustryLarge>(
+    INDUSTRY_LARGE as readonly IndustryLarge[]
+  );
   return input.filter(
     (x): x is IndustryLarge =>
-      typeof x === "string" && set.has(x as IndustryLarge)
+      typeof x === "string" && allow.has(x as IndustryLarge)
   );
 }
