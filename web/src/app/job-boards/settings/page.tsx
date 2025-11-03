@@ -5,6 +5,7 @@ import React, { useEffect, useState } from "react";
 import AppHeader from "@/components/AppHeader";
 import Link from "next/link";
 import Toggle from "@/components/Toggle";
+import { Pencil, Trash2 } from "lucide-react";
 
 const TENANT_ID = "175b1a9d-3f85-482d-9323-68a44d214424";
 
@@ -112,41 +113,19 @@ export default function NotifySettingsPage() {
                   </td>
                   <td className="px-3 py-3">
                     <div className="flex items-center gap-2">
-                      {/* 編集（鉛筆） */}
                       <Link
                         title="編集"
-                        className="inline-flex rounded-md border border-neutral-300 p-1 hover:bg-neutral-50"
+                        className="inline-flex h-6 w-6 items-center justify-center rounded-lg border border-neutral-200 hover:bg-neutral-50"
                         href={`/job-boards/settings/${r.id}`}
                       >
-                        <svg
-                          width="16"
-                          height="16"
-                          viewBox="0 0 20 20"
-                          fill="none"
-                        >
-                          <path
-                            d="M4 13.5V16h2.5L15 7.5 12.5 5 4 13.5z"
-                            fill="#374151"
-                          />
-                        </svg>
+                        <Pencil className="h-3 w-3" />
                       </Link>
-                      {/* 削除（ゴミ箱） */}
                       <button
                         title="削除"
                         onClick={() => del(r.id)}
-                        className="inline-flex rounded-md border border-neutral-300 p-1 hover:bg-neutral-50"
+                        className="inline-flex h-6 w-6 items-center justify-center rounded-lg border border-neutral-200 text-red-600 hover:bg-red-50"
                       >
-                        <svg
-                          width="16"
-                          height="16"
-                          viewBox="0 0 20 20"
-                          fill="none"
-                        >
-                          <path
-                            d="M6 7h8l-1 9H7L6 7zm1-2h6l1 1H6l1-1z"
-                            fill="#374151"
-                          />
-                        </svg>
+                        <Trash2 className="h-3.5 w-3.5" />
                       </button>
                     </div>
                   </td>
