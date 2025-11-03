@@ -51,7 +51,7 @@ export default function ManualFetch() {
   const [tenantId, setTenantId] = useState<string | null>(null);
 
   const [msg, setMsg] = useState("");
-  // 8フロー（フローチャート風）
+  // 8ステップ（フローチャート）
   const [s, setS] = useState<StepState[]>(Array(8).fill("idle"));
   const [logs, setLogs] = useState<string[][]>(
     Array(8)
@@ -75,21 +75,19 @@ export default function ManualFetch() {
   const [countModalOpen, setCountModalOpen] = useState(false);
   const [fetchCount, setFetchCount] = useState<number>(60);
 
-  // 削除選択
+  // 取り消し（選択削除）
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const allSelected = added.length > 0 && selectedIds.length === added.length;
 
   useEffect(() => {
     (async () => {
       try {
-        // tenant
         let meRes = await fetch("/api/me/tenant", { cache: "no-store" });
         if (!meRes.ok)
           meRes = await fetch("/api/me/tenant/", { cache: "no-store" });
         const me = await safeJson(meRes);
         setTenantId(me?.tenant_id ?? me?.profile?.tenant_id ?? null);
 
-        // filters
         const fRes = await fetch("/api/form-outreach/settings/filters", {
           cache: "no-store",
           headers: me?.tenant_id
@@ -117,22 +115,17 @@ export default function ManualFetch() {
           updated_at: incoming.updated_at ?? null,
         });
 
-        // 1日キャッシュ
         const raw = localStorage.getItem(LS_KEY);
         if (raw) {
           const obj = JSON.parse(raw);
           const ts = obj?.ts ? new Date(obj.ts).getTime() : 0;
-          if (Date.now() - ts < 24 * 60 * 60 * 1000) {
-            setAdded(obj.rows ?? []);
-          } else {
-            localStorage.removeItem(LS_KEY);
-          }
+          if (Date.now() - ts < 24 * 60 * 60 * 1000) setAdded(obj.rows ?? []);
+          else localStorage.removeItem(LS_KEY);
         }
 
-        // 最終件数
-        const lastCount = Number(localStorage.getItem(LS_FETCH_COUNT));
-        if (Number.isFinite(lastCount) && lastCount > 0)
-          setFetchCount(Math.max(10, Math.min(2000, lastCount)));
+        const last = Number(localStorage.getItem(LS_FETCH_COUNT));
+        if (Number.isFinite(last) && last > 0)
+          setFetchCount(Math.max(10, Math.min(2000, last)));
       } catch (e: any) {
         setMsg(String(e?.message || e));
       }
@@ -140,7 +133,6 @@ export default function ManualFetch() {
   }, []);
 
   useEffect(() => {
-    // 追加リストが変わったら選択も同期
     setSelectedIds((prev) =>
       prev.filter((id) => added.some((r) => r.id === id))
     );
@@ -194,71 +186,79 @@ export default function ManualFetch() {
           filters.industries_small.slice(0, 10).join(", ") || "指定なし"
         }${filters.industries_small.length > 10 ? " …" : ""}`,
       ]);
-      await wait(250);
+      await wait(200);
       completeStep(0);
 
-      // API起動
+      // Step 2: 候補生成（API起動）
       startStep(1, ["候補生成（LLM）…"]);
-      const apiPromise = fetch("/api/form-outreach/companies/fetch", {
-        method: "POST",
-        headers: {
+
+      const body = {
+        filters: {
+          prefectures: filters.prefectures,
+          employee_size_ranges: filters.employee_size_ranges,
+          keywords: filters.keywords,
+          industries_large: filters.industries_large,
+          industries_small: filters.industries_small,
+          max: maxCount,
+        },
+      };
+
+      // ★ Failed to fetch/ネットワーク一時停止に備えてリトライ
+      const r = await postWithRetry(
+        "/api/form-outreach/companies/fetch",
+        body,
+        {
           "x-tenant-id": tenantId,
           "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          filters: {
-            prefectures: filters.prefectures,
-            employee_size_ranges: filters.employee_size_ranges,
-            keywords: filters.keywords,
-            industries_large: filters.industries_large,
-            industries_small: filters.industries_small,
-            max: maxCount,
-          },
-        }),
-      });
-
-      await wait(300);
+        }
+      );
       completeStep(1);
 
-      // 中間ステップをリアルタイム表示（API完了待ちの間）
+      // 中間ステップ（視覚的な進捗）
       startStep(2, ["重複チェック（DB）…"]);
-      await wait(300);
+      await wait(250);
       completeStep(2);
 
       startStep(3, ["到達性チェック（HTTP）…"]);
-      await wait(300);
+      await wait(250);
       completeStep(3);
 
       startStep(4, ["フォーム探索（/contact 等）…"]);
-      await wait(300);
+      await wait(250);
       completeStep(4);
 
       startStep(5, ["メール抽出（本文から）…"]);
-      await wait(300);
+      await wait(250);
       completeStep(5);
 
       startStep(6, ["属性抽出（規模/都道府県/業種）…"]);
-      await wait(300);
+      await wait(250);
       completeStep(6);
 
-      // 保存（API結果）
+      // Step 8: 保存（API結果を反映）
       startStep(7, ["DBへ保存しています…"]);
-      const r = await apiPromise;
       const j: RunResult = await safeJson(r);
-      if (!r.ok) throw new Error(j?.error || "fetch failed");
-
+      if (!("ok" in r) && !(r as any).ok) {
+        throw new Error(j?.error || "fetch failed");
+      }
       const rows = Array.isArray(j.rows) ? j.rows : [];
       setAdded(rows);
       localStorage.setItem(
         LS_KEY,
         JSON.stringify({ ts: new Date().toISOString(), rows })
       );
-
       completeStep(7, [`保存完了：追加 ${j.inserted ?? rows.length} 件`]);
       setMsg(`実行完了：追加 ${j.inserted ?? rows.length} 件`);
     } catch (e: any) {
       failAllSteps();
-      setMsg(String(e?.message || e));
+      const m = String(e?.message || e);
+      const hint =
+        /ERR_NETWORK_IO_SUSPENDED|Failed to fetch|NetworkError|The user aborted a request/i.test(
+          m
+        )
+          ? "ネットワークが一時停止/切断されました。数秒後に再実行してください。"
+          : "";
+      setMsg(hint ? `${m}\n${hint}` : m);
     } finally {
       setLoading(false);
     }
@@ -278,10 +278,9 @@ export default function ManualFetch() {
       const j = await safeJson(r);
       if (!r.ok) throw new Error(j?.error || "cancel failed");
       setMsg(`取消しました：削除 ${j.deleted ?? 0} 件`);
-      setAdded((rows) => rows.filter((r) => !selectedIds.includes(r.id)));
+      const rest = added.filter((row) => !selectedIds.includes(row.id));
+      setAdded(rest);
       setSelectedIds([]);
-      // キャッシュも更新
-      const rest = added.filter((r) => !selectedIds.includes(r.id));
       localStorage.setItem(
         LS_KEY,
         JSON.stringify({ ts: new Date().toISOString(), rows: rest })
@@ -363,7 +362,7 @@ export default function ManualFetch() {
           </div>
         </div>
 
-        {/* フローチャート */}
+        {/* フローチャート（画像イメージに寄せた横一列ノード＋矢印＋ポート） */}
         <section className="rounded-2xl border border-neutral-200 p-4 mb-4">
           <div className="mb-3 flex items-center justify-between">
             <div className="text-sm font-medium text-neutral-800">フロー</div>
@@ -385,9 +384,8 @@ export default function ManualFetch() {
             </div>
           </div>
 
-          {/* 横並びのフローチャート（小画面は折返し） */}
           <div className="overflow-x-auto">
-            <div className="min-w-[900px] grid grid-flow-col auto-cols-fr items-stretch gap-2">
+            <ol className="min-w-[1024px] flex items-stretch gap-2">
               {[
                 "条件読み込み/表示",
                 "候補生成（LLM）",
@@ -399,20 +397,26 @@ export default function ManualFetch() {
                 "保存（DB）",
               ].map((title, idx, arr) => (
                 <React.Fragment key={idx}>
-                  <FlowStep
-                    title={title}
-                    state={s[idx]}
-                    active={activeIdx === idx}
-                    logs={logs[idx]}
-                  />
-                  {idx < arr.length - 1 && <FlowArrow />}
+                  <li className="flex items-stretch">
+                    <FlowNode
+                      title={title}
+                      state={s[idx]}
+                      active={activeIdx === idx}
+                      logs={logs[idx]}
+                    />
+                  </li>
+                  {idx < arr.length - 1 && (
+                    <li aria-hidden className="flex items-center">
+                      <FlowConnector />
+                    </li>
+                  )}
                 </React.Fragment>
               ))}
-            </div>
+            </ol>
           </div>
         </section>
 
-        {/* 今回追加（横スクロール、ヘッダ横書き維持） */}
+        {/* 今回追加（横スクロール・選択削除） */}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden">
           <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 bg-neutral-50">
             <div className="text-sm font-medium text-neutral-800">
@@ -445,7 +449,10 @@ export default function ManualFetch() {
             <table className="min-w-[1100px] w-full text-sm">
               <thead className="bg-neutral-50 text-neutral-600">
                 <tr>
-                  <th className="px-3 py-3 text-left">
+                  <th
+                    className="px-3 py-3 text-left whitespace-nowrap"
+                    style={{ writingMode: "horizontal-tb" as any }}
+                  >
                     <input
                       type="checkbox"
                       checked={allSelected}
@@ -456,31 +463,58 @@ export default function ManualFetch() {
                       }
                     />
                   </th>
-                  <th className="px-3 py-3 text-left whitespace-nowrap">
+                  <th
+                    className="px-3 py-3 text-left whitespace-nowrap"
+                    style={{ writingMode: "horizontal-tb" as any }}
+                  >
                     企業名
                   </th>
-                  <th className="px-3 py-3 text-left whitespace-nowrap">
+                  <th
+                    className="px-3 py-3 text-left whitespace-nowrap"
+                    style={{ writingMode: "horizontal-tb" as any }}
+                  >
                     サイトURL
                   </th>
-                  <th className="px-3 py-3 text-left whitespace-nowrap">
+                  <th
+                    className="px-3 py-3 text-left whitespace-nowrap"
+                    style={{ writingMode: "horizontal-tb" as any }}
+                  >
                     メール
                   </th>
-                  <th className="px-3 py-3 text-left whitespace-nowrap">
+                  <th
+                    className="px-3 py-3 text-left whitespace-nowrap"
+                    style={{ writingMode: "horizontal-tb" as any }}
+                  >
                     フォーム
                   </th>
-                  <th className="px-3 py-3 text-left whitespace-nowrap">
+                  <th
+                    className="px-3 py-3 text-left whitespace-nowrap"
+                    style={{ writingMode: "horizontal-tb" as any }}
+                  >
                     従業員規模
                   </th>
-                  <th className="px-3 py-3 text-left whitespace-nowrap">
+                  <th
+                    className="px-3 py-3 text-left whitespace-nowrap"
+                    style={{ writingMode: "horizontal-tb" as any }}
+                  >
                     都道府県
                   </th>
-                  <th className="px-3 py-3 text-left whitespace-nowrap">
+                  <th
+                    className="px-3 py-3 text-left whitespace-nowrap"
+                    style={{ writingMode: "horizontal-tb" as any }}
+                  >
                     業種
                   </th>
-                  <th className="px-3 py-3 text-left whitespace-nowrap">
+                  <th
+                    className="px-3 py-3 text-left whitespace-nowrap"
+                    style={{ writingMode: "horizontal-tb" as any }}
+                  >
                     取得元
                   </th>
-                  <th className="px-3 py-3 text-left whitespace-nowrap">
+                  <th
+                    className="px-3 py-3 text-left whitespace-nowrap"
+                    style={{ writingMode: "horizontal-tb" as any }}
+                  >
                     取得日時
                   </th>
                 </tr>
@@ -571,7 +605,6 @@ export default function ManualFetch() {
         )}
       </main>
 
-      {/* 件数モーダル */}
       {countModalOpen && (
         <CountModal
           defaultValue={fetchCount}
@@ -587,7 +620,7 @@ export default function ManualFetch() {
 }
 
 /** ---------- フローチャートUI ---------- */
-function FlowStep({
+function FlowNode({
   title,
   state,
   active,
@@ -616,33 +649,46 @@ function FlowStep({
       : "h-6 w-6 text-neutral-500";
 
   return (
-    <div className="relative rounded-xl border border-neutral-200 bg-white p-3 shadow-sm flex flex-col">
-      <div className="flex items-center gap-2">
-        <Icon className={iconClass} />
-        <div className="text-sm font-semibold text-neutral-800">{title}</div>
+    <div className="relative flex items-stretch">
+      {/* 左ポート */}
+      <div className="flex items-center">
+        <span className="h-2 w-2 rounded-full bg-neutral-300" />
+        <span className="mx-1 h-0.5 w-2 bg-neutral-300" />
       </div>
-      <div className="mt-2 rounded-lg border border-neutral-200 p-2 min-h-[58px] bg-neutral-50">
-        {logs.length === 0 ? (
-          <div className="text-[11px] text-neutral-500">ログはありません</div>
-        ) : (
-          <div className="text-[11px] text-neutral-700 space-y-1">
-            {logs.map((l, i) => (
-              <div key={i}>• {l}</div>
-            ))}
+
+      {/* ノード本体 */}
+      <div className="rounded-xl border border-neutral-200 bg-white p-3 shadow-sm min-w-[220px] max-w-[280px] flex flex-col">
+        <div className="flex items-center gap-2">
+          <Icon className={iconClass} />
+          <div className="text-sm font-semibold text-neutral-800">{title}</div>
+        </div>
+        <div className="mt-2 rounded-lg border border-neutral-200 p-2 min-h-[58px] bg-neutral-50">
+          {logs.length === 0 ? (
+            <div className="text-[11px] text-neutral-500">ログはありません</div>
+          ) : (
+            <div className="text-[11px] text-neutral-700 space-y-1">
+              {logs.map((l, i) => (
+                <div key={i}>• {l}</div>
+              ))}
+            </div>
+          )}
+        </div>
+        {active && (
+          <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 rounded-full bg-indigo-600 text-white text-[10px] px-2 py-0.5 animate-pulse">
+            実行中
           </div>
         )}
       </div>
-      {active && (
-        <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 rounded-full bg-indigo-600 text-white text-[10px] px-2 py-0.5 animate-pulse">
-          実行中
-        </div>
-      )}
+
+      {/* 右ポートはコネクタ側で描画（FlowConnector） */}
     </div>
   );
 }
-function FlowArrow() {
+function FlowConnector() {
   return (
-    <div className="flex items-center justify-center">
+    <div className="flex items-center">
+      <span className="mx-1 h-0.5 w-6 bg-neutral-300" />
+      <span className="h-2 w-2 rounded-full bg-neutral-300" />
       <ChevronRight className="h-5 w-5 text-neutral-400" />
     </div>
   );
@@ -735,4 +781,50 @@ function appendLog(arr: string[][], idx: number, lines: string[]) {
   const next = arr.map((v) => v.slice());
   next[idx].push(...lines);
   return next;
+}
+
+/** ネットワーク一時停止/502/504などを考慮したPOSTリトライ */
+async function postWithRetry(
+  url: string,
+  body: unknown,
+  headers: Record<string, string>,
+  attempts = 4
+): Promise<Response> {
+  let lastErr: any = null;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      const ctl = new AbortController();
+      const timeout = setTimeout(() => ctl.abort(), 1000 * 60 * 2); // 120s
+      const res = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        cache: "no-store",
+        signal: ctl.signal,
+        keepalive: false,
+      } as RequestInit);
+      clearTimeout(timeout);
+      if (res.ok) return res;
+      // 502/504/524 などはリトライ
+      if ([502, 503, 504].includes(res.status)) {
+        await wait(300 * i);
+        continue;
+      }
+      return res; // 4xxなどは即返す
+    } catch (e: any) {
+      lastErr = e;
+      const m = String(e?.message || e);
+      if (
+        /ERR_NETWORK_IO_SUSPENDED|Failed to fetch|NetworkError|aborted|Timeout/i.test(
+          m
+        ) &&
+        i < attempts
+      ) {
+        await wait(400 * i);
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr ?? new Error("request failed");
 }
