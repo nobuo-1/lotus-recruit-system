@@ -9,7 +9,7 @@ import { createClient } from "@supabase/supabase-js";
 type Filters = {
   prefectures?: string[];
   employee_size_ranges?: string[];
-  keywords?: string[];
+  keywords?: string[]; // ANDマッチ（全て含む）で厳格化
   industries_large?: string[];
   industries_small?: string[];
   max?: number;
@@ -18,12 +18,13 @@ type Filters = {
 type Candidate = {
   company_name: string;
   website?: string;
-  contact_email?: string | null; // ← null 許容
+  contact_email?: string | null;
   contact_form_url?: string | null;
   industry_large?: string | null;
   industry_small?: string | null;
   prefectures?: string[]; // 複数
   company_size?: string | null; // レンジ
+  _snippet?: string; // サーバ内判定用（保存しない）
 };
 
 type AskBatchHint = {
@@ -40,7 +41,6 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const clamp = (n: any, min: number, max: number) =>
   Math.max(min, Math.min(max, Math.floor(Number(n) || 0)));
 
-// 末尾スラ除去 + 小文字化で同値化（DBの一意制約と整合）
 const normalizeKey = (u: string) => u.trim().toLowerCase().replace(/\/$/, "");
 
 const JP_PREFS = [
@@ -99,7 +99,7 @@ function normalizeUrl(u?: string): string | undefined {
     const raw = u.trim();
     const url = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
     url.hash = "";
-    return url.toString(); // 末尾の / は残る場合がある（キー側で normalizeKey する）
+    return url.toString();
   } catch {
     return;
   }
@@ -136,7 +136,6 @@ function extractEmails(text: string): string[] {
 }
 
 function extractCompanySizeToRange(text: string): string | null {
-  // 例）従業員数 23名 / 社員数：1,230人
   const m = text.match(/(従業員数|社員数)[：:\s]*([0-9,]+)\s*(名|人)/);
   if (!m) return null;
   const n = Number(m[2].replace(/,/g, ""));
@@ -183,7 +182,6 @@ async function findContactForm(
   );
   if (hit) return hit.href;
 
-  // 代表的なパスを試す
   const probes = [
     "/contact",
     "/contact-us",
@@ -203,13 +201,58 @@ async function findContactForm(
   return null;
 }
 
+/** 条件判定：厳格 */
+function meetsFilters(c: Candidate, filters: Filters): boolean {
+  const snippet = (c._snippet || "").toLowerCase();
+  const name = (c.company_name || "").toLowerCase();
+  const url = (c.website || "").toLowerCase();
+
+  // 都道府県：指定があれば交差必須
+  if (filters.prefectures && filters.prefectures.length) {
+    const prefs = c.prefectures || [];
+    if (!prefs.some((p) => filters.prefectures!.includes(p))) return false;
+  }
+
+  // 従業員規模：指定があれば一致必須
+  if (filters.employee_size_ranges && filters.employee_size_ranges.length) {
+    if (
+      !c.company_size ||
+      !filters.employee_size_ranges.includes(c.company_size)
+    )
+      return false;
+  }
+
+  // 業種：小分類優先。なければ大分類で判定
+  if (filters.industries_small && filters.industries_small.length) {
+    if (
+      !c.industry_small ||
+      !filters.industries_small.includes(c.industry_small)
+    )
+      return false;
+  } else if (filters.industries_large && filters.industries_large.length) {
+    if (
+      !c.industry_large ||
+      !filters.industries_large.includes(c.industry_large)
+    )
+      return false;
+  }
+
+  // キーワード：すべてAND
+  if (filters.keywords && filters.keywords.length) {
+    const kws = filters.keywords.map((k) => k.toLowerCase());
+    const hay = `${snippet} ${name} ${url}`;
+    if (!kws.every((k) => hay.includes(k))) return false;
+  }
+
+  return true;
+}
+
 async function verifyAndEnrich(c: Candidate): Promise<Candidate | null> {
   const site = normalizeUrl(c.website);
   if (!site) return null;
 
   try {
-    // GETで本文取得（HEADのみだとCDN誤判定がある）
-    const r = await fetchWithTimeout(site, {}, 10000);
+    const r = await fetchWithTimeout(site, {}, 12000);
     if (!r.ok) return null;
     const html = await r.text();
     const text = textFromHtml(html);
@@ -228,6 +271,7 @@ async function verifyAndEnrich(c: Candidate): Promise<Candidate | null> {
       prefectures: prefs.length ? prefs : c.prefectures ?? [],
       industry_large: c.industry_large ?? null,
       industry_small: c.industry_small ?? null,
+      _snippet: text.slice(0, 5000),
     };
   } catch {
     return null;
@@ -301,6 +345,7 @@ async function askOpenAIForCompanies(
   } catch {
     payload = {};
   }
+
   const items = Array.isArray(payload?.items) ? payload.items : [];
   const mapped: Candidate[] = items
     .map((x: any) => ({
@@ -316,7 +361,6 @@ async function askOpenAIForCompanies(
     }))
     .filter((c: Candidate) => c.company_name !== "" && !!c.website);
 
-  // 候補は多めに返してもらってもよいが、この時点では want*2 程度に抑える
   return mapped.slice(0, Math.max(want * 2, 40));
 }
 
@@ -349,7 +393,7 @@ export async function POST(req: Request) {
 
     const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-    // 既存の website セット（正規化キー）
+    // 既存website（正規化キー）
     const { data: existing, error: exErr } = await admin
       .from("form_prospects")
       .select("website")
@@ -365,48 +409,57 @@ export async function POST(req: Request) {
     );
 
     let verifiedPool: Candidate[] = [];
-    let rawPool: Candidate[] = []; // 検証失敗時のフォールバック候補
-    const MAX_ROUNDS = 8;
+    let rawPool: Candidate[] = [];
+    const MAX_ROUNDS = 10;
     const CONCURRENCY = 8;
 
     for (let round = 1; round <= MAX_ROUNDS; round++) {
-      const remain = Math.max(0, target - verifiedPool.length);
-      if (remain === 0) break;
+      const remainNeed = Math.max(0, target - verifiedPool.length);
+      if (remainNeed === 0) break;
 
-      // 1) LLMで候補取得（不足分ベース）
-      const llm = await askOpenAIForCompanies(filters, remain, {
+      const llm = await askOpenAIForCompanies(filters, remainNeed, {
         round,
-        remain,
+        remain: remainNeed,
       });
 
-      // 2) 既存・ラウンド内重複を除外（正規化キーで比較）
-      const step1 = dedupe(llm).filter(
+      // 重複/既存除外
+      const step1: Candidate[] = dedupe(llm).filter(
         (c: Candidate) =>
           !!c.website && !existingSet.has(normalizeKey(String(c.website)))
       );
 
-      // rawPool にも溜める（後で不足分フォールバック用）
       rawPool = dedupe([...rawPool, ...step1]);
 
-      // 3) 検証＆付加情報抽出（並列）
+      // 検証＆付加情報抽出
       for (let i = 0; i < step1.length; i += CONCURRENCY) {
         const slice: Candidate[] = step1.slice(i, i + CONCURRENCY);
         const chunk = await Promise.all(
           slice.map((v: Candidate) => verifyAndEnrich(v))
         );
-        verifiedPool = dedupe([
-          ...verifiedPool,
-          ...(chunk.filter((x): x is Candidate => !!x) as Candidate[]),
-        ]).slice(0, target);
+
+        // 厳密フィルタ
+        const ok = (
+          chunk.filter((x): x is Candidate => !!x) as Candidate[]
+        ).filter((c: Candidate) => meetsFilters(c, filters));
+
+        verifiedPool = dedupe([...verifiedPool, ...ok]).slice(0, target);
+        if (verifiedPool.length >= target) break;
       }
 
-      if (verifiedPool.length < target) await sleep(250);
+      if (verifiedPool.length < target) await sleep(300);
     }
 
-    // 4) まだ target に満たない場合はフォールバック（軽量 HEAD 到達性チェックして最低限で保存）
-    if (verifiedPool.length < target && rawPool.length) {
+    // 不足時のフォールバック：
+    // ※ 厳密条件がある場合はフォールバック無効（条件を満たす保証ができないため）
+    const hasStrict =
+      (filters.prefectures && filters.prefectures.length > 0) ||
+      (filters.employee_size_ranges &&
+        filters.employee_size_ranges.length > 0) ||
+      (filters.industries_small && filters.industries_small.length > 0) ||
+      (filters.industries_large && filters.industries_large.length > 0);
+
+    if (!hasStrict && verifiedPool.length < target && rawPool.length) {
       const need = target - verifiedPool.length;
-      // verifiedPool に無いものから順に試す
       const verifiedKeys = new Set(
         verifiedPool.map((c: Candidate) => normalizeKey(c.website || ""))
       );
@@ -422,17 +475,27 @@ export async function POST(req: Request) {
             5000
           );
           if (!r.ok) continue;
-          const fallbackCand: Candidate = {
+          const cand: Candidate = {
             company_name: c.company_name,
             website: normalizeUrl(c.website),
-            contact_email: undefined, // ← 型不整合を避ける
+            contact_email: null,
             contact_form_url: null,
             industry_large: c.industry_large ?? null,
             industry_small: c.industry_small ?? null,
             prefectures: c.prefectures ?? [],
             company_size: null,
           };
-          fallback.push(fallbackCand);
+          // キーワードのみ指定の場合、URL/社名スニペットで簡易判定
+          if (filters.keywords && filters.keywords.length) {
+            const hay = `${(cand.company_name || "").toLowerCase()} ${(
+              cand.website || ""
+            ).toLowerCase()}`;
+            const okKw = filters.keywords
+              .map((k) => k.toLowerCase())
+              .every((kw) => hay.includes(kw));
+            if (!okKw) continue;
+          }
+          fallback.push(cand);
         } catch {}
       }
       verifiedPool = dedupe([...verifiedPool, ...fallback]).slice(0, target);
@@ -448,11 +511,11 @@ export async function POST(req: Request) {
       });
     }
 
-    // INSERT（型注釈つきで map）
+    // INSERT
     const rows = toInsert.map((c: Candidate) => ({
       tenant_id: tenantId,
       company_name: c.company_name,
-      website: c.website!, // normalizeUrl 済み
+      website: c.website!,
       contact_form_url: c.contact_form_url ?? null,
       contact_email: c.contact_email ?? null,
       industry:
