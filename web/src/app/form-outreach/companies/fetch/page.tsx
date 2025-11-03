@@ -75,7 +75,7 @@ export default function ManualFetch() {
   const [countModalOpen, setCountModalOpen] = useState(false);
   const [fetchCount, setFetchCount] = useState<number>(60);
 
-  // 取り消し（選択削除）
+  // 取り消し（チェック削除）
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const allSelected = added.length > 0 && selectedIds.length === added.length;
 
@@ -133,6 +133,7 @@ export default function ManualFetch() {
   }, []);
 
   useEffect(() => {
+    // 追加結果の変化に合わせて選択状態をクリーンアップ
     setSelectedIds((prev) =>
       prev.filter((id) => added.some((r) => r.id === id))
     );
@@ -175,7 +176,7 @@ export default function ManualFetch() {
     setActiveIdx(-1);
 
     try {
-      // Step 1: 条件表示
+      // Step 0: 条件表示（即完了）
       startStep(0, [
         `取得件数: ${maxCount}件`,
         `都道府県: ${filters.prefectures.join(", ") || "全国"}`,
@@ -186,61 +187,64 @@ export default function ManualFetch() {
           filters.industries_small.slice(0, 10).join(", ") || "指定なし"
         }${filters.industries_small.length > 10 ? " …" : ""}`,
       ]);
-      await wait(200);
+      await wait(150);
       completeStep(0);
 
-      // Step 2: 候補生成（API起動）
-      startStep(1, ["候補生成（LLM）…"]);
-
-      const body = {
-        filters: {
-          prefectures: filters.prefectures,
-          employee_size_ranges: filters.employee_size_ranges,
-          keywords: filters.keywords,
-          industries_large: filters.industries_large,
-          industries_small: filters.industries_small,
-          max: maxCount,
-        },
-      };
-
-      // ★ Failed to fetch/ネットワーク一時停止に備えてリトライ
-      const r = await postWithRetry(
+      // Step 1: 候補生成（LLM） をバックグラウンドで開始 → すぐ完了扱いにし、以降の可視化ステップへ
+      startStep(1, ["候補生成（LLM）にクエリ送信…"]);
+      const apiPromise = postWithRetry(
         "/api/form-outreach/companies/fetch",
-        body,
         {
-          "x-tenant-id": tenantId,
+          filters: {
+            prefectures: filters.prefectures,
+            employee_size_ranges: filters.employee_size_ranges,
+            keywords: filters.keywords,
+            industries_large: filters.industries_large,
+            industries_small: filters.industries_small,
+            max: maxCount,
+          },
+        },
+        {
+          "x-tenant-id": tenantId!,
           "content-type": "application/json",
         }
-      );
-      completeStep(1);
+      )
+        // 即時catchを付けて「未処理のPromise拒否」を防止（後でawaitするときに再throw）
+        .catch((e) => {
+          // ログだけ記録しておく
+          setLogs((arr) => appendLog(arr, 1, [String(e?.message || e)]));
+          // ここでは握りつぶさず、再度エラーを投げる（await時に拾う）
+          throw e;
+        });
+      completeStep(1, ["送信完了：応答待ち"]);
 
-      // 中間ステップ（視覚的な進捗）
+      // 中間の可視化（API待ちの間に進む）
       startStep(2, ["重複チェック（DB）…"]);
-      await wait(250);
+      await wait(220);
       completeStep(2);
 
       startStep(3, ["到達性チェック（HTTP）…"]);
-      await wait(250);
+      await wait(220);
       completeStep(3);
 
       startStep(4, ["フォーム探索（/contact 等）…"]);
-      await wait(250);
+      await wait(220);
       completeStep(4);
 
       startStep(5, ["メール抽出（本文から）…"]);
-      await wait(250);
+      await wait(220);
       completeStep(5);
 
       startStep(6, ["属性抽出（規模/都道府県/業種）…"]);
-      await wait(250);
+      await wait(220);
       completeStep(6);
 
-      // Step 8: 保存（API結果を反映）
+      // Step 7: 保存（ここでだけAPIの結果を待つ）
       startStep(7, ["DBへ保存しています…"]);
-      const j: RunResult = await safeJson(r);
-      if (!("ok" in r) && !(r as any).ok) {
-        throw new Error(j?.error || "fetch failed");
-      }
+      const res = await apiPromise; // ここでネットワークエラーもcatchされる
+      const j: RunResult = await safeJson(res);
+      if (!res.ok) throw new Error(j?.error || "fetch failed");
+
       const rows = Array.isArray(j.rows) ? j.rows : [];
       setAdded(rows);
       localStorage.setItem(
@@ -253,10 +257,10 @@ export default function ManualFetch() {
       failAllSteps();
       const m = String(e?.message || e);
       const hint =
-        /ERR_NETWORK_IO_SUSPENDED|Failed to fetch|NetworkError|The user aborted a request/i.test(
+        /ERR_NETWORK_IO_SUSPENDED|Failed to fetch|NetworkError|aborted|Timeout|message channel closed/i.test(
           m
         )
-          ? "ネットワークが一時停止/切断されました。数秒後に再実行してください。"
+          ? "ネットワークが一時停止/切断されました。タブの省電力・拡張の干渉を避け、数秒後に再実行してください。"
           : "";
       setMsg(hint ? `${m}\n${hint}` : m);
     } finally {
@@ -311,7 +315,7 @@ export default function ManualFetch() {
     return { pref, size, kw, ind };
   }, [filters]);
 
-  // ステップ制御（フローチャートでアイコンを動かす）
+  // ステップ制御
   function startStep(idx: number, add: string[] = []) {
     setActiveIdx(idx);
     setS((arr) => arr.map((v, i) => (i === idx ? "running" : v)));
@@ -362,7 +366,7 @@ export default function ManualFetch() {
           </div>
         </div>
 
-        {/* フローチャート（画像イメージに寄せた横一列ノード＋矢印＋ポート） */}
+        {/* フローチャート */}
         <section className="rounded-2xl border border-neutral-200 p-4 mb-4">
           <div className="mb-3 flex items-center justify-between">
             <div className="text-sm font-medium text-neutral-800">フロー</div>
@@ -416,7 +420,7 @@ export default function ManualFetch() {
           </div>
         </section>
 
-        {/* 今回追加（横スクロール・選択削除） */}
+        {/* 今回追加（横スクロール・チェック削除） */}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden">
           <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 bg-neutral-50">
             <div className="text-sm font-medium text-neutral-800">
@@ -679,8 +683,6 @@ function FlowNode({
           </div>
         )}
       </div>
-
-      {/* 右ポートはコネクタ側で描画（FlowConnector） */}
     </div>
   );
 }
@@ -783,7 +785,7 @@ function appendLog(arr: string[][], idx: number, lines: string[]) {
   return next;
 }
 
-/** ネットワーク一時停止/502/504などを考慮したPOSTリトライ */
+/** ネットワーク一時停止/拡張干渉/502系に強いPOST（リトライ付き） */
 async function postWithRetry(
   url: string,
   body: unknown,
@@ -805,17 +807,16 @@ async function postWithRetry(
       } as RequestInit);
       clearTimeout(timeout);
       if (res.ok) return res;
-      // 502/504/524 などはリトライ
       if ([502, 503, 504].includes(res.status)) {
         await wait(300 * i);
         continue;
       }
-      return res; // 4xxなどは即返す
+      return res; // 4xx等はそのまま返す
     } catch (e: any) {
       lastErr = e;
       const m = String(e?.message || e);
       if (
-        /ERR_NETWORK_IO_SUSPENDED|Failed to fetch|NetworkError|aborted|Timeout/i.test(
+        /ERR_NETWORK_IO_SUSPENDED|Failed to fetch|NetworkError|aborted|Timeout|message channel closed/i.test(
           m
         ) &&
         i < attempts
