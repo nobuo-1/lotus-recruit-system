@@ -1,13 +1,12 @@
 // web/src/app/form-outreach/companies/fetch/page.tsx
 "use client";
-
 import React, { useEffect, useMemo, useState } from "react";
 import AppHeader from "@/components/AppHeader";
 import Link from "next/link";
 import { CheckCircle, XCircle, Loader2, Play, ChevronDown } from "lucide-react";
 
-const LS_KEY = "fo_manual_fetch_latest"; // 1日キャッシュ
-const LS_FETCH_COUNT = "fo_manual_fetch_count"; // 最終実行件数を保存
+const LS_KEY = "fo_manual_fetch_latest";
+const LS_FETCH_COUNT = "fo_manual_fetch_count";
 
 type StepState = "idle" | "running" | "done" | "error";
 
@@ -17,8 +16,12 @@ type AddedRow = {
   company_name: string | null;
   website: string | null;
   contact_email: string | null;
-  job_site_source?: string | null; // APIの返却名に合わせる
-  source_site?: string | null; // 後方互換
+  contact_form_url?: string | null;
+  industry?: string | null;
+  company_size?: string | null;
+  prefectures?: string[] | null;
+  job_site_source?: string | null;
+  source_site?: string | null;
   created_at: string | null;
 };
 
@@ -32,8 +35,8 @@ type Filters = {
   prefectures: string[];
   employee_size_ranges: string[];
   keywords: string[];
-  industries_large: string[]; // 大分類
-  industries_small: string[]; // 小分類
+  industries_large: string[];
+  industries_small: string[];
   updated_at?: string | null;
 };
 
@@ -41,17 +44,24 @@ export default function ManualFetch() {
   const [tenantId, setTenantId] = useState<string | null>(null);
 
   const [msg, setMsg] = useState("");
-  const [s1, setS1] = useState<StepState>("idle"); // 収集
-  const [s2, setS2] = useState<StepState>("idle"); // 解析
-  const [s3, setS3] = useState<StepState>("idle"); // 保存
+  // 8フロー
+  const [s, setS] = useState<StepState[]>(Array(8).fill("idle"));
+  const [logs, setLogs] = useState<string[][]>(
+    Array(8)
+      .fill([])
+      .map(() => [])
+  );
 
-  const [log1, setLog1] = useState<string[]>([]);
-  const [log2, setLog2] = useState<string[]>([]);
-  const [log3, setLog3] = useState<string[]>([]);
-
-  const [open1, setOpen1] = useState(false);
-  const [open2, setOpen2] = useState(false);
-  const [open3, setOpen3] = useState(false);
+  const [open, setOpen] = useState<boolean[]>([
+    true,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+  ]);
 
   const [added, setAdded] = useState<AddedRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -65,25 +75,20 @@ export default function ManualFetch() {
     updated_at: null,
   });
 
-  // ▼ 実行前の件数指定モーダル
   const [countModalOpen, setCountModalOpen] = useState(false);
   const [fetchCount, setFetchCount] = useState<number>(60);
 
-  // 初期ロード：テナントとフィルタ、1日キャッシュ、最終件数
   useEffect(() => {
     (async () => {
       try {
-        // テナント
+        // tenant
         let meRes = await fetch("/api/me/tenant", { cache: "no-store" });
-        if (!meRes.ok) {
-          // 一部環境の末尾スラ対策
-          const meRes2 = await fetch("/api/me/tenant/", { cache: "no-store" });
-          meRes = meRes2;
-        }
+        if (!meRes.ok)
+          meRes = await fetch("/api/me/tenant/", { cache: "no-store" });
         const me = await safeJson(meRes);
         setTenantId(me?.tenant_id ?? me?.profile?.tenant_id ?? null);
 
-        // フィルタ
+        // filters
         const fRes = await fetch("/api/form-outreach/settings/filters", {
           cache: "no-store",
           headers: me?.tenant_id
@@ -92,7 +97,6 @@ export default function ManualFetch() {
         });
         const fj = await safeJson(fRes);
         const incoming = fj?.filters ?? {};
-
         setFilters({
           prefectures: Array.isArray(incoming.prefectures)
             ? incoming.prefectures
@@ -104,7 +108,6 @@ export default function ManualFetch() {
           industries_large: Array.isArray(incoming.industries_large)
             ? incoming.industries_large
             : [],
-          // 後方互換（旧: industries / job_titles からも拾う）
           industries_small: Array.isArray(incoming.industries_small)
             ? incoming.industries_small
             : Array.isArray(incoming.industries)
@@ -113,32 +116,25 @@ export default function ManualFetch() {
           updated_at: incoming.updated_at ?? null,
         });
 
-        // 1日キャッシュ
         const raw = localStorage.getItem(LS_KEY);
         if (raw) {
           const obj = JSON.parse(raw);
           const ts = obj?.ts ? new Date(obj.ts).getTime() : 0;
-          if (Date.now() - ts < 24 * 60 * 60 * 1000) {
-            setAdded(obj.rows ?? []);
-          } else {
-            localStorage.removeItem(LS_KEY);
-          }
+          if (Date.now() - ts < 24 * 60 * 60 * 1000) setAdded(obj.rows ?? []);
+          else localStorage.removeItem(LS_KEY);
         }
 
-        // 最終実行件数
         const lastCount = Number(localStorage.getItem(LS_FETCH_COUNT));
-        if (Number.isFinite(lastCount) && lastCount > 0) {
+        if (Number.isFinite(lastCount) && lastCount > 0)
           setFetchCount(Math.max(10, Math.min(2000, lastCount)));
-        }
       } catch (e: any) {
         setMsg(String(e?.message || e));
       }
     })();
   }, []);
 
-  const anyRunning = s1 === "running" || s2 === "running" || s3 === "running";
+  const anyRunning = s.some((x) => x === "running");
 
-  // 実行ボタン → 先に件数モーダルを開く
   const openCountModal = () => {
     if (anyRunning || loading) return;
     if (!tenantId) {
@@ -148,12 +144,29 @@ export default function ManualFetch() {
     setCountModalOpen(true);
   };
 
-  // モーダルから実行
   const confirmAndRun = async () => {
     setCountModalOpen(false);
-    // 値を保存
     localStorage.setItem(LS_FETCH_COUNT, String(fetchCount));
     await run(fetchCount);
+  };
+
+  /** ステップ状態更新ヘルパ（未定義エラー解消 & 画面更新一括制御） */
+  const setStep = (idx: number, state: StepState, addLogs: string[] = []) => {
+    setS((arr) => arr.map((v, i) => (i === idx ? state : v)));
+    if (addLogs.length) {
+      setLogs((arr) => {
+        const next = arr.map((v) => v.slice());
+        next[idx].push(...addLogs);
+        return next;
+      });
+    }
+  };
+  const bump = async (idx: number) => {
+    await wait(250);
+    setStep(idx, "done");
+  };
+  const failAll = () => {
+    setS((arr) => arr.map((v) => (v === "running" ? "error" : v)));
   };
 
   const run = async (maxCount: number) => {
@@ -162,49 +175,35 @@ export default function ManualFetch() {
       setMsg("テナントが解決できませんでした。ログインを確認してください。");
       return;
     }
+
     setMsg("");
     setLoading(true);
-    setS1("running");
-    setS2("idle");
-    setS3("idle");
     setAdded([]);
-    setLog1([]);
-    setLog2([]);
-    setLog3([]);
+    setS(Array(8).fill("idle"));
+    setLogs(
+      Array(8)
+        .fill([])
+        .map(() => [])
+    );
+    setOpen([true, true, false, false, false, false, false, false]);
 
     try {
-      // ステップ1: 収集（検索クエリの表示）
-      setOpen1(true);
-      setLog1((v) => [
-        ...v,
+      // Step 1: 条件表示
+      setStep(0, "running", [
         `取得件数: ${maxCount}件`,
         `都道府県: ${filters.prefectures.join(", ") || "全国"}`,
         `規模: ${filters.employee_size_ranges.join(", ") || "指定なし"}`,
-        `キーワード: ${filters.keywords.join(", ") || "指定なし"}`,
+        `KW: ${filters.keywords.join(", ") || "指定なし"}`,
         `業種(大): ${filters.industries_large.join(", ") || "指定なし"}`,
         `業種(小): ${
           filters.industries_small.slice(0, 10).join(", ") || "指定なし"
         }${filters.industries_small.length > 10 ? " …" : ""}`,
       ]);
-      await wait(300);
-      setS1("done");
+      await wait(250);
+      setStep(0, "done");
 
-      // ステップ2: 解析（見せ方上ログ）
-      setOpen2(true);
-      setS2("running");
-      setLog2((v) => [
-        ...v,
-        "候補サイトのタイトル/メール/採用・問い合わせリンク解析…",
-      ]);
-      await wait(300);
-
-      // ステップ3: 保存（API実行）
-      setS2("done");
-      setOpen3(true);
-      setS3("running");
-      setLog3((v) => [...v, "DBへ保存しています…"]);
-
-      const r = await fetch("/api/form-outreach/companies/fetch", {
+      // ここでAPIを先行起動
+      const apiPromise = fetch("/api/form-outreach/companies/fetch", {
         method: "POST",
         headers: {
           "x-tenant-id": tenantId,
@@ -222,23 +221,43 @@ export default function ManualFetch() {
         }),
       });
 
+      // Step 2〜7 を段階表示（裏でAPIが進行）
+      setStep(1, "running", ["候補生成（LLM）…"]);
+      await bump(1);
+
+      setStep(2, "running", ["既存DBと重複チェック…"]);
+      await bump(2);
+
+      setStep(3, "running", ["到達性チェック（HTTP）…"]);
+      await bump(3);
+
+      setStep(4, "running", ["お問い合わせフォーム探索（/contact 等）…"]);
+      await bump(4);
+
+      setStep(5, "running", ["メール抽出（本文から抽出）…"]);
+      await bump(5);
+
+      setStep(6, "running", ["属性抽出（従業員規模/都道府県）…"]);
+      await bump(6);
+
+      // Step 8: 保存（APIの結果反映）
+      setOpen((o) => o.map((v, i) => (i <= 6 ? true : v)));
+      setStep(7, "running", ["DBへ保存しています…"]);
+      const r = await apiPromise;
       const j: RunResult = await safeJson(r);
       if (!r.ok) throw new Error(j?.error || "fetch failed");
 
-      setS3("done");
       const rows = j.rows ?? [];
       setAdded(rows);
-
       localStorage.setItem(
         LS_KEY,
         JSON.stringify({ ts: new Date().toISOString(), rows })
       );
-      setLog3((v) => [...v, `保存完了：追加 ${j.inserted ?? rows.length} 件`]);
+
+      setStep(7, "done", [`保存完了：追加 ${j.inserted ?? rows.length} 件`]);
       setMsg(`実行完了：追加 ${j.inserted ?? rows.length} 件`);
     } catch (e: any) {
-      setS1((v) => (v === "running" ? "error" : v));
-      setS2((v) => (v === "running" ? "error" : v));
-      setS3((v) => (v === "running" ? "error" : v));
+      failAll();
       setMsg(String(e?.message || e));
     } finally {
       setLoading(false);
@@ -246,8 +265,7 @@ export default function ManualFetch() {
   };
 
   const cancelAdditions = async () => {
-    if (!tenantId) return;
-    if (added.length === 0) return;
+    if (!tenantId || added.length === 0) return;
     const ids = added.map((r) => r.id);
     try {
       const r = await fetch("/api/form-outreach/companies/cancel-additions", {
@@ -268,7 +286,7 @@ export default function ManualFetch() {
     }
   };
 
-  /** ========= フィルタ要約（改行位置を固定） ========= */
+  /** サマリ（固定改行でボタンが1行維持） */
   const summaryParts = useMemo(() => {
     const pref = filters.prefectures.length
       ? filters.prefectures.join(" / ")
@@ -294,7 +312,6 @@ export default function ManualFetch() {
       <AppHeader showBack />
       <main className="mx-auto max-w-6xl p-6">
         <div className="mb-4 flex items-start justify-between gap-3">
-          {/* 左：テキスト（強制改行ポイントを挿入） */}
           <div className="min-w-0">
             <h1 className="text-2xl font-semibold text-neutral-900">
               企業リスト手動取得
@@ -315,8 +332,6 @@ export default function ManualFetch() {
               <span className="opacity-80">業種={summaryParts.ind}</span>
             </p>
           </div>
-
-          {/* 右：ボタン（常に1行で表示） */}
           <div className="shrink-0 whitespace-nowrap">
             <Link
               href="/form-outreach/companies"
@@ -327,7 +342,7 @@ export default function ManualFetch() {
           </div>
         </div>
 
-        {/* ワークフロー可視化 */}
+        {/* 8フロー */}
         <section className="rounded-2xl border border-neutral-200 p-4 mb-4">
           <div className="mb-3 flex items-center justify-between">
             <div className="text-sm font-medium text-neutral-800">フロー</div>
@@ -350,34 +365,32 @@ export default function ManualFetch() {
           </div>
 
           <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-            <StepCard
-              title="収集（スクレイピング）"
-              state={s1}
-              open={open1}
-              onToggle={() => setOpen1((v) => !v)}
-            >
-              <Logs items={log1} />
-            </StepCard>
-            <StepCard
-              title="解析（正規化・抽出）"
-              state={s2}
-              open={open2}
-              onToggle={() => setOpen2((v) => !v)}
-            >
-              <Logs items={log2} />
-            </StepCard>
-            <StepCard
-              title="保存（DBへ反映）"
-              state={s3}
-              open={open3}
-              onToggle={() => setOpen3((v) => !v)}
-            >
-              <Logs items={log3} />
-            </StepCard>
+            {[
+              "条件読み込み/表示",
+              "候補生成（LLM）",
+              "重複チェック（DB）",
+              "到達性チェック（HTTP）",
+              "フォーム探索",
+              "メール抽出",
+              "属性抽出（規模/都道府県）",
+              "保存（DB）",
+            ].map((title, idx) => (
+              <StepCard
+                key={idx}
+                title={title}
+                state={s[idx]}
+                open={open[idx]}
+                onToggle={() =>
+                  setOpen((o) => o.map((v, i) => (i === idx ? !v : v)))
+                }
+              >
+                <Logs items={logs[idx]} />
+              </StepCard>
+            ))}
           </div>
         </section>
 
-        {/* 直近追加（1日だけ保持） */}
+        {/* 直近追加 */}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden">
           <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 bg-neutral-50">
             <div className="text-sm font-medium text-neutral-800">
@@ -400,6 +413,10 @@ export default function ManualFetch() {
                 <th className="px-3 py-3 text-left">企業名</th>
                 <th className="px-3 py-3 text-left">サイトURL</th>
                 <th className="px-3 py-3 text-left">メール</th>
+                <th className="px-3 py-3 text-left">フォーム</th>
+                <th className="px-3 py-3 text-left">規模</th>
+                <th className="px-3 py-3 text-left">都道府県</th>
+                <th className="px-3 py-3 text-left">業種</th>
                 <th className="px-3 py-3 text-left">取得元</th>
                 <th className="px-3 py-3 text-left">取得日時</th>
               </tr>
@@ -423,6 +440,26 @@ export default function ManualFetch() {
                   </td>
                   <td className="px-3 py-2">{c.contact_email || "-"}</td>
                   <td className="px-3 py-2">
+                    {c.contact_form_url ? (
+                      <a
+                        href={c.contact_form_url}
+                        target="_blank"
+                        className="text-indigo-700 hover:underline"
+                      >
+                        あり
+                      </a>
+                    ) : (
+                      "なし"
+                    )}
+                  </td>
+                  <td className="px-3 py-2">{c.company_size || "-"}</td>
+                  <td className="px-3 py-2">
+                    {Array.isArray(c.prefectures) && c.prefectures.length
+                      ? c.prefectures.join(" / ")
+                      : "-"}
+                  </td>
+                  <td className="px-3 py-2">{c.industry || "-"}</td>
+                  <td className="px-3 py-2">
                     {c.job_site_source || c.source_site || "-"}
                   </td>
                   <td className="px-3 py-2">
@@ -435,7 +472,7 @@ export default function ManualFetch() {
               {added.length === 0 && (
                 <tr>
                   <td
-                    colSpan={5}
+                    colSpan={9}
                     className="px-4 py-10 text-center text-neutral-400"
                   >
                     新規追加はありません
@@ -453,7 +490,7 @@ export default function ManualFetch() {
         )}
       </main>
 
-      {/* ▼ 実行件数モーダル */}
+      {/* 件数モーダル（既存デザイン維持） */}
       {countModalOpen && (
         <CountModal
           defaultValue={fetchCount}
@@ -468,6 +505,7 @@ export default function ManualFetch() {
   );
 }
 
+/** ----- UI helpers ----- */
 function StepCard({
   title,
   state,
@@ -522,7 +560,6 @@ function StepCard({
     </div>
   );
 }
-
 function Logs({ items }: { items: string[] }) {
   if (!items.length)
     return (
@@ -538,22 +575,19 @@ function Logs({ items }: { items: string[] }) {
     </div>
   );
 }
-
 function wait(ms: number) {
   return new Promise((res) => setTimeout(res, ms));
 }
-
-// 404でHTMLが返っても安全に処理
 async function safeJson(res: Response) {
   try {
-    const text = await res.text();
-    return text ? JSON.parse(text) : {};
+    const t = await res.text();
+    return t ? JSON.parse(t) : {};
   } catch {
     return {};
   }
 }
 
-/** 実行件数指定モーダル */
+/** 件数指定モーダル（デザイン維持） */
 function CountModal({
   defaultValue,
   onCloseAction,
@@ -564,13 +598,10 @@ function CountModal({
   onApplyAction: (n: number) => void;
 }) {
   const [n, setN] = useState<number>(defaultValue ?? 60);
-
-  const clamp = (v: number) => Math.max(10, Math.min(2000, Math.floor(v)));
-
+  const clampVal = (v: number) => Math.max(10, Math.min(2000, Math.floor(v)));
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
       <div className="w-[520px] max-w-[96vw] rounded-2xl bg-white shadow-xl border border-neutral-200 overflow-hidden">
-        {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200">
           <div className="font-semibold">実行件数の指定</div>
           <button
@@ -580,8 +611,6 @@ function CountModal({
             閉じる
           </button>
         </div>
-
-        {/* Body */}
         <div className="p-4 space-y-3">
           <p className="text-sm text-neutral-700">
             収集する企業数を指定してください（10〜2000件）。
@@ -593,7 +622,7 @@ function CountModal({
               max={2000}
               step={10}
               value={n}
-              onChange={(e) => setN(clamp(Number(e.target.value)))}
+              onChange={(e) => setN(clampVal(Number(e.target.value)))}
               className="w-full"
             />
             <input
@@ -602,7 +631,7 @@ function CountModal({
               max={2000}
               step={10}
               value={n}
-              onChange={(e) => setN(clamp(Number(e.target.value)))}
+              onChange={(e) => setN(clampVal(Number(e.target.value)))}
               className="w-28 rounded-lg border border-neutral-300 px-3 py-2 text-sm"
             />
           </div>
@@ -610,8 +639,6 @@ function CountModal({
             ※ 大きい値を指定すると完了まで時間がかかる可能性があります。
           </p>
         </div>
-
-        {/* Footer（他モーダルと同系統） */}
         <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-neutral-200">
           <button
             onClick={() => setN(60)}

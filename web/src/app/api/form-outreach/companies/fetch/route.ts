@@ -5,7 +5,7 @@ export const runtime = "nodejs";
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-// ===== 型 =====
+/** ---------- Types ---------- */
 type Filters = {
   prefectures?: string[];
   employee_size_ranges?: string[];
@@ -18,103 +18,261 @@ type Filters = {
 type Candidate = {
   company_name: string;
   website?: string;
-  contact_email?: string;
-  industry_large?: string;
-  industry_small?: string;
-  prefecture?: string;
+  contact_email?: string | null; // ← null 許容
+  contact_form_url?: string | null;
+  industry_large?: string | null;
+  industry_small?: string | null;
+  prefectures?: string[]; // 複数
+  company_size?: string | null; // レンジ
 };
 
-// ===== 環境変数チェック =====
+type AskBatchHint = {
+  round: number;
+  remain: number;
+};
+
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY; // 必須（未設定なら400返す）
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-// ===== Helpers =====
+/** ---------- Utils ---------- */
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const clamp = (n: any, min: number, max: number) =>
+  Math.max(min, Math.min(max, Math.floor(Number(n) || 0)));
 
-function clampInt(n: any, min: number, max: number) {
-  const v = Math.floor(Number(n));
-  if (!Number.isFinite(v)) return min;
-  return Math.max(min, Math.min(max, v));
-}
+// 末尾スラ除去 + 小文字化で同値化（DBの一意制約と整合）
+const normalizeKey = (u: string) => u.trim().toLowerCase().replace(/\/$/, "");
+
+const JP_PREFS = [
+  "北海道",
+  "青森県",
+  "岩手県",
+  "宮城県",
+  "秋田県",
+  "山形県",
+  "福島県",
+  "茨城県",
+  "栃木県",
+  "群馬県",
+  "埼玉県",
+  "千葉県",
+  "東京都",
+  "神奈川県",
+  "新潟県",
+  "富山県",
+  "石川県",
+  "福井県",
+  "山梨県",
+  "長野県",
+  "岐阜県",
+  "静岡県",
+  "愛知県",
+  "三重県",
+  "滋賀県",
+  "京都府",
+  "大阪府",
+  "兵庫県",
+  "奈良県",
+  "和歌山県",
+  "鳥取県",
+  "島根県",
+  "岡山県",
+  "広島県",
+  "山口県",
+  "徳島県",
+  "香川県",
+  "愛媛県",
+  "高知県",
+  "福岡県",
+  "佐賀県",
+  "長崎県",
+  "熊本県",
+  "大分県",
+  "宮崎県",
+  "鹿児島県",
+  "沖縄県",
+];
+
 function normalizeUrl(u?: string): string | undefined {
-  if (!u) return undefined;
+  if (!u) return;
   try {
     const raw = u.trim();
-    if (!raw) return undefined;
-    const hasScheme = /^https?:\/\//i.test(raw);
-    const url = new URL(hasScheme ? raw : `https://${raw}`);
-    // 余計なクエリは排除
+    const url = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
     url.hash = "";
-    return url.toString();
+    return url.toString(); // 末尾の / は残る場合がある（キー側で normalizeKey する）
   } catch {
-    return undefined;
+    return;
   }
 }
-function extractEmails(text: string): string[] {
-  // ゆるいメール抽出（日本サイトの簡易対策）
-  const re = /[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}(?:\.[A-Z]{2,})?/gi;
-  const found = text.match(re) ?? [];
-  // よくあるno-reply等のノイズは後で弾くならここで
-  return Array.from(new Set(found));
-}
+
 async function fetchWithTimeout(
   url: string,
   init: RequestInit = {},
   ms = 8000
 ) {
-  const ctrl = new AbortController();
-  const id = setTimeout(() => ctrl.abort(), ms);
+  const ctl = new AbortController();
+  const id = setTimeout(() => ctl.abort(), ms);
   try {
-    return await fetch(url, { ...init, signal: ctrl.signal });
+    return await fetch(url, { ...init, signal: ctl.signal });
   } finally {
     clearTimeout(id);
   }
 }
 
-// OpenAIにJSONを厳格出力させる
+function textFromHtml(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .slice(0, 200_000);
+}
+
+function extractEmails(text: string): string[] {
+  const re = /[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}(?:\.[A-Z]{2,})?/gi;
+  return Array.from(new Set(text.match(re) ?? [])).filter(
+    (e) => !/no[-_. ]?reply|do[-_. ]?not[-_. ]?reply/i.test(e)
+  );
+}
+
+function extractCompanySizeToRange(text: string): string | null {
+  // 例）従業員数 23名 / 社員数：1,230人
+  const m = text.match(/(従業員数|社員数)[：:\s]*([0-9,]+)\s*(名|人)/);
+  if (!m) return null;
+  const n = Number(m[2].replace(/,/g, ""));
+  if (!Number.isFinite(n)) return null;
+  if (n <= 9) return "1-9";
+  if (n <= 49) return "10-49";
+  if (n <= 249) return "50-249";
+  return "250+";
+}
+
+function extractPrefectures(text: string): string[] {
+  const set = new Set<string>();
+  for (const p of JP_PREFS) if (text.includes(p)) set.add(p);
+  return Array.from(set);
+}
+
+function resolveLinks(
+  html: string,
+  base: string
+): { href: string; label: string }[] {
+  const out: { href: string; label: string }[] = [];
+  const re = /<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html))) {
+    try {
+      const href = new URL(m[1], base).toString();
+      const label = m[2]
+        .replace(/<[^>]*>/g, " ")
+        .trim()
+        .slice(0, 120);
+      out.push({ href, label });
+    } catch {}
+  }
+  return out;
+}
+
+async function findContactForm(
+  url: string,
+  html: string
+): Promise<string | null> {
+  const links = resolveLinks(html, url);
+  const hit = links.find(({ href, label }) =>
+    /contact|inquiry|お問い合わせ|お問合せ|問合せ/i.test(href + " " + label)
+  );
+  if (hit) return hit.href;
+
+  // 代表的なパスを試す
+  const probes = [
+    "/contact",
+    "/contact-us",
+    "/inquiry",
+    "/inquiries",
+    "/お問い合わせ",
+    "/お問合せ",
+    "/問合せ",
+  ];
+  for (const p of probes) {
+    try {
+      const u = new URL(p, url).toString();
+      const r = await fetchWithTimeout(u, { method: "HEAD" }, 5000);
+      if (r.ok) return u;
+    } catch {}
+  }
+  return null;
+}
+
+async function verifyAndEnrich(c: Candidate): Promise<Candidate | null> {
+  const site = normalizeUrl(c.website);
+  if (!site) return null;
+
+  try {
+    // GETで本文取得（HEADのみだとCDN誤判定がある）
+    const r = await fetchWithTimeout(site, {}, 10000);
+    if (!r.ok) return null;
+    const html = await r.text();
+    const text = textFromHtml(html);
+
+    const emails = extractEmails(text);
+    const contact_form_url = await findContactForm(site, html);
+    const size = extractCompanySizeToRange(text);
+    const prefs = extractPrefectures(text);
+
+    return {
+      company_name: c.company_name,
+      website: site,
+      contact_email: emails[0] ?? null,
+      contact_form_url,
+      company_size: size ?? c.company_size ?? null,
+      prefectures: prefs.length ? prefs : c.prefectures ?? [],
+      industry_large: c.industry_large ?? null,
+      industry_small: c.industry_small ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function dedupe(cands: Candidate[]): Candidate[] {
+  const seen = new Set<string>();
+  const out: Candidate[] = [];
+  for (const c of cands) {
+    const key = `${normalizeKey(c.website || "")}__${(
+      c.company_name || ""
+    ).toLowerCase()}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(c);
+    }
+  }
+  return out;
+}
+
+/** ---------- OpenAI ---------- */
 async function askOpenAIForCompanies(
   filters: Filters,
-  limit: number
+  want: number,
+  hint: AskBatchHint
 ): Promise<Candidate[]> {
-  if (!OPENAI_API_KEY) {
-    throw new Error(
-      "OPENAI_API_KEY is not set. 環境変数 OPENAI_API_KEY を設定してください。"
-    );
-  }
+  if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is not set");
 
   const sys =
-    "You are a diligent Japanese business research assistant. " +
-    "Return STRICT JSON only. Do not include any commentary.";
-
-  // モデルにJSONで返させる（items配列のみ）
-  const user = {
-    role: "user",
-    content: [
-      {
-        type: "text",
-        text: `以下の条件に合致する日本の企業候補をできるだけ実在の中小〜中堅企業から厳選して返してください。
-必ず homepage は有効なURL(https://...) とし、重複は避けてください。
-JSONのみを返し、フォーマットは {"items":[{company_name, website, prefecture?, industry_large?, industry_small?}, ...]} としてください。
+    "You are a diligent Japanese business research assistant. Output STRICT JSON only, no commentary.";
+  const prompt = `次の条件に当てはまる日本の企業候補を返してください。中小〜中堅企業も多めに含め、重複は避けてください。
+必ず https:// から始まる homepage URL を含めてください。
+出力は JSON のみで、フォーマットは {"items":[{company_name, website, prefectures?, industry_large?, industry_small?}]}。
 
 条件:
 - 都道府県: ${
-          filters.prefectures?.length ? filters.prefectures.join(", ") : "全国"
-        }
+    filters.prefectures?.length ? filters.prefectures.join(", ") : "全国"
+  }
 - 従業員規模レンジ: ${filters.employee_size_ranges?.join(", ") || "指定なし"}
-- キーワード: ${filters.keywords?.join(", ") || "指定なし"}
+- 任意キーワード: ${filters.keywords?.join(", ") || "指定なし"}
 - 業種(大分類): ${filters.industries_large?.join(", ") || "指定なし"}
 - 業種(小分類): ${filters.industries_small?.join(", ") || "指定なし"}
-- 数: 最大${limit}社（なるべく満たす）
-
-制約:
-- items配列の要素は { "company_name": "...", "website": "https://...", "prefecture": "...", "industry_large":"...", "industry_small":"..." } のみ。
-- websiteは必須。http/httpsのスキームを必ず含める。
-- 大手/上場ばかりは避ける（中小・地域企業も混ぜる）。
-- JSON以外の文字列は一切出力しないこと。`,
-      },
-    ],
-  } as const;
+- ラウンド: ${hint.round} / 追加で最低 ${hint.remain} 社は新規に見つけること
+- 大手や上場だけに偏らないこと`;
 
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -124,217 +282,197 @@ JSONのみを返し、フォーマットは {"items":[{company_name, website, pr
     },
     body: JSON.stringify({
       model: "gpt-4o-mini",
-      response_format: { type: "json_object" },
       temperature: 0.2,
-      messages: [{ role: "system", content: sys }, user],
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: sys },
+        { role: "user", content: prompt },
+      ],
     }),
   });
 
-  const text = await res.text();
-  // APIエラー
-  if (!res.ok) {
-    throw new Error(`OpenAI API error: ${res.status} ${text}`);
-  }
-
-  let data: any = {};
+  const txt = await res.text();
+  if (!res.ok) throw new Error(`OpenAI error ${res.status}: ${txt}`);
+  let payload: any = {};
   try {
-    const j = JSON.parse(text);
-    const content = j?.choices?.[0]?.message?.content || "{}";
-    data = JSON.parse(content);
+    const j = JSON.parse(txt);
+    const content = j?.choices?.[0]?.message?.content ?? "{}";
+    payload = JSON.parse(content);
   } catch {
-    // まれに直接JSONが入っている場合
-    try {
-      data = JSON.parse(text);
-    } catch {
-      data = {};
-    }
+    payload = {};
   }
-
-  const items = Array.isArray(data?.items) ? data.items : [];
+  const items = Array.isArray(payload?.items) ? payload.items : [];
   const mapped: Candidate[] = items
     .map((x: any) => ({
       company_name: String(x?.company_name || "").trim(),
       website: normalizeUrl(x?.website),
-      prefecture: typeof x?.prefecture === "string" ? x.prefecture : undefined,
       industry_large:
-        typeof x?.industry_large === "string" ? x.industry_large : undefined,
+        typeof x?.industry_large === "string" ? x.industry_large : null,
       industry_small:
-        typeof x?.industry_small === "string" ? x.industry_small : undefined,
+        typeof x?.industry_small === "string" ? x.industry_small : null,
+      prefectures: Array.isArray(x?.prefectures)
+        ? x.prefectures.filter((p: any) => typeof p === "string")
+        : [],
     }))
-    .filter((c: Candidate) => !!c.company_name && !!c.website);
+    .filter((c: Candidate) => c.company_name !== "" && !!c.website);
 
-  // 最大数まで
-  return mapped.slice(0, limit);
+  // 候補は多めに返してもらってもよいが、この時点では want*2 程度に抑える
+  return mapped.slice(0, Math.max(want * 2, 40));
 }
 
-async function verifyAndEnrich(c: Candidate): Promise<Candidate | null> {
-  const site = normalizeUrl(c.website);
-  if (!site) return null;
-
-  try {
-    // まずHEADで存在確認（落ちるサイトもあるのでGETへフォールバック）
-    let ok = false;
-
-    try {
-      const rHead = await fetchWithTimeout(site, { method: "HEAD" }, 7000);
-      ok = rHead.ok;
-    } catch {
-      ok = false;
-    }
-
-    if (!ok) {
-      const rGet = await fetchWithTimeout(site, {}, 9000);
-      ok = rGet.ok;
-      if (!ok) return null;
-
-      const html = await rGet.text();
-      const emails = extractEmails(html);
-      const mail = emails.find(
-        (e) => !/noreply|no-reply|do[-_.]?not[-_.]?reply/i.test(e)
-      );
-      return {
-        ...c,
-        website: site,
-        contact_email: mail,
-      };
-    }
-
-    // HEADがokでも一度だけ本文GETしてメール抽出（軽く待機）
-    await sleep(200);
-    const r = await fetchWithTimeout(site, {}, 9000);
-    const html = (await r.text()).slice(0, 500_000); // 過大なページ対策
-    const emails = extractEmails(html);
-    const mail = emails.find(
-      (e) => !/noreply|no-reply|do[-_.]?not[-_.]?reply/i.test(e)
-    );
-    return {
-      ...c,
-      website: site,
-      contact_email: mail,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function dedupeByWebsiteAndName(arr: Candidate[]): Candidate[] {
-  const seen = new Set<string>();
-  const out: Candidate[] = [];
-  for (const c of arr) {
-    const key = `${(c.website || "").toLowerCase()}__${c.company_name}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      out.push(c);
-    }
-  }
-  return out;
-}
-
-// ===== Handler =====
+/** ---------- Handler ---------- */
 export async function POST(req: Request) {
   try {
-    const tenantId = req.headers.get("x-tenant-id") || "";
-    if (!tenantId) {
-      return NextResponse.json(
-        { error: "x-tenant-id required" },
-        { status: 400 }
-      );
-    }
     if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
       return NextResponse.json(
-        { error: "Supabase service role is not configured." },
+        { error: "Supabase service role not configured" },
         { status: 500 }
       );
     }
     if (!OPENAI_API_KEY) {
       return NextResponse.json(
-        { error: "OPENAI_API_KEY 未設定のため収集できません。" },
+        { error: "OPENAI_API_KEY 未設定です" },
         { status: 400 }
       );
     }
 
+    const tenantId = req.headers.get("x-tenant-id") || "";
+    if (!tenantId)
+      return NextResponse.json(
+        { error: "x-tenant-id required" },
+        { status: 400 }
+      );
+
     const body = await req.json().catch(() => ({}));
     const filters: Filters = body?.filters ?? {};
-    const limit = clampInt(filters?.max ?? 60, 10, 2000);
+    const target = clamp(filters.max ?? 60, 10, 2000);
 
-    // 1) OpenAIで候補生成（最大limit社）
-    let candidates = await askOpenAIForCompanies(filters, limit);
-
-    // 候補が少ない場合は少し待ってリトライ（最大2回）
-    for (let i = 0; i < 2 && candidates.length < Math.min(20, limit); i++) {
-      await sleep(300);
-      const extra = await askOpenAIForCompanies(filters, limit);
-      const merged = dedupeByWebsiteAndName([...candidates, ...extra]);
-      candidates = merged.slice(0, limit);
-    }
-
-    // 2) サイト存在確認 & メール抽出（並列過多を防ぐ）
-    const concurrency = 8;
-    const verified: Candidate[] = [];
-    for (let i = 0; i < candidates.length; i += concurrency) {
-      const slice = candidates.slice(i, i + concurrency);
-      const chunk = await Promise.all(slice.map((c) => verifyAndEnrich(c)));
-      for (const x of chunk) if (x) verified.push(x);
-    }
-
-    const clean = dedupeByWebsiteAndName(verified).slice(0, limit);
-
-    // 3) 既存のwebsiteはスキップ
     const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-    const { data: existing, error: existErr } = await admin
+
+    // 既存の website セット（正規化キー）
+    const { data: existing, error: exErr } = await admin
       .from("form_prospects")
       .select("website")
       .eq("tenant_id", tenantId);
-
-    if (existErr) {
-      return NextResponse.json({ error: existErr.message }, { status: 500 });
-    }
+    if (exErr)
+      return NextResponse.json({ error: exErr.message }, { status: 500 });
 
     const existingSet = new Set(
       (existing || [])
-        .map((r: any) => String(r.website || "").toLowerCase())
-        .filter(Boolean)
+        .map((r: any) => String(r.website || ""))
+        .filter((u: string) => !!u)
+        .map((u: string) => normalizeKey(u))
     );
 
-    const toInsert = clean.filter(
-      (c) => !!c.website && !existingSet.has(String(c.website).toLowerCase())
-    );
+    let verifiedPool: Candidate[] = [];
+    let rawPool: Candidate[] = []; // 検証失敗時のフォールバック候補
+    const MAX_ROUNDS = 8;
+    const CONCURRENCY = 8;
 
-    // 空なら即返す
+    for (let round = 1; round <= MAX_ROUNDS; round++) {
+      const remain = Math.max(0, target - verifiedPool.length);
+      if (remain === 0) break;
+
+      // 1) LLMで候補取得（不足分ベース）
+      const llm = await askOpenAIForCompanies(filters, remain, {
+        round,
+        remain,
+      });
+
+      // 2) 既存・ラウンド内重複を除外（正規化キーで比較）
+      const step1 = dedupe(llm).filter(
+        (c: Candidate) =>
+          !!c.website && !existingSet.has(normalizeKey(String(c.website)))
+      );
+
+      // rawPool にも溜める（後で不足分フォールバック用）
+      rawPool = dedupe([...rawPool, ...step1]);
+
+      // 3) 検証＆付加情報抽出（並列）
+      for (let i = 0; i < step1.length; i += CONCURRENCY) {
+        const slice: Candidate[] = step1.slice(i, i + CONCURRENCY);
+        const chunk = await Promise.all(
+          slice.map((v: Candidate) => verifyAndEnrich(v))
+        );
+        verifiedPool = dedupe([
+          ...verifiedPool,
+          ...(chunk.filter((x): x is Candidate => !!x) as Candidate[]),
+        ]).slice(0, target);
+      }
+
+      if (verifiedPool.length < target) await sleep(250);
+    }
+
+    // 4) まだ target に満たない場合はフォールバック（軽量 HEAD 到達性チェックして最低限で保存）
+    if (verifiedPool.length < target && rawPool.length) {
+      const need = target - verifiedPool.length;
+      // verifiedPool に無いものから順に試す
+      const verifiedKeys = new Set(
+        verifiedPool.map((c: Candidate) => normalizeKey(c.website || ""))
+      );
+      const fallback: Candidate[] = [];
+      for (const c of rawPool) {
+        if (fallback.length >= need) break;
+        const k = normalizeKey(c.website || "");
+        if (!k || existingSet.has(k) || verifiedKeys.has(k)) continue;
+        try {
+          const r = await fetchWithTimeout(
+            c.website!,
+            { method: "HEAD" },
+            5000
+          );
+          if (!r.ok) continue;
+          const fallbackCand: Candidate = {
+            company_name: c.company_name,
+            website: normalizeUrl(c.website),
+            contact_email: undefined, // ← 型不整合を避ける
+            contact_form_url: null,
+            industry_large: c.industry_large ?? null,
+            industry_small: c.industry_small ?? null,
+            prefectures: c.prefectures ?? [],
+            company_size: null,
+          };
+          fallback.push(fallbackCand);
+        } catch {}
+      }
+      verifiedPool = dedupe([...verifiedPool, ...fallback]).slice(0, target);
+    }
+
+    const toInsert: Candidate[] = verifiedPool.slice(0, target);
+
     if (toInsert.length === 0) {
       return NextResponse.json({
         inserted: 0,
         rows: [],
-        note: "新規追加対象がありません（既存と重複／到達不可サイト）",
+        note: "新規追加できる企業が見つかりませんでした",
       });
     }
 
-    // 4) INSERT（新規のみ）
-    const rows = toInsert.map((c) => ({
+    // INSERT（型注釈つきで map）
+    const rows = toInsert.map((c: Candidate) => ({
       tenant_id: tenantId,
       company_name: c.company_name,
-      website: c.website,
-      contact_form_url: null,
-      contact_email: c.contact_email || null,
+      website: c.website!, // normalizeUrl 済み
+      contact_form_url: c.contact_form_url ?? null,
+      contact_email: c.contact_email ?? null,
       industry:
         [c.industry_large, c.industry_small].filter(Boolean).join(" / ") ||
         null,
-      company_size: null,
-      job_site_source: "llm+web", // 取得元識別
+      company_size: c.company_size ?? null,
+      job_site_source: "llm+web",
       status: "new",
-      // created_at/updated_atはDBのdefault now()想定
+      prefectures: c.prefectures ?? [], // text[]
     }));
 
     const { data: inserted, error: insErr } = await admin
       .from("form_prospects")
       .insert(rows)
       .select(
-        "id, tenant_id, company_name, website, contact_email, job_site_source, created_at"
+        "id, tenant_id, company_name, website, contact_email, contact_form_url, industry, company_size, job_site_source, prefectures, created_at"
       );
 
-    if (insErr) {
+    if (insErr)
       return NextResponse.json({ error: insErr.message }, { status: 500 });
-    }
 
     return NextResponse.json({
       inserted: inserted?.length || 0,

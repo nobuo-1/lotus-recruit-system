@@ -1,21 +1,21 @@
 // web/src/app/form-outreach/companies/page.tsx
 "use client";
-
 import React, { useEffect, useMemo, useState } from "react";
 import AppHeader from "@/components/AppHeader";
 import Link from "next/link";
-
-const TENANT_ID = "175b1a9d-3f85-482d-9323-68a44d214424";
 
 type Company = {
   id: string;
   tenant_id: string | null;
   company_name: string | null;
-  website: string | null; // ← form_prospects.website を使う
+  website: string | null;
   contact_form_url: string | null;
   contact_email: string | null;
-  source_site: string | null; // 表示のみ（フィルタは削除）
-  created_at: string | null; // 取得日時
+  industry: string | null;
+  company_size: string | null;
+  prefectures: string[] | null;
+  job_site_source: string | null;
+  created_at: string | null;
 };
 
 function ellipsizeUrl(u: string, max = 54) {
@@ -26,16 +26,23 @@ function ellipsizeUrl(u: string, max = 54) {
   return `${u.slice(0, head)}…${u.slice(-tail)}`;
 }
 
+const SIZE_OPTS = ["1-9", "10-49", "50-249", "250+"] as const;
+
 export default function CompaniesPage() {
+  const [tenantId, setTenantId] = useState<string | null>(null);
   const [rows, setRows] = useState<Company[]>([]);
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(false);
 
-  // 独立フィルタ
+  // フィルタ
   const [showFilters, setShowFilters] = useState(true);
   const [q, setQ] = useState("");
-  const [formFilter, setFormFilter] = useState<"" | "has" | "none">(""); // ★ 追加
+  const [formFilter, setFormFilter] = useState<"" | "has" | "none">("");
   const [emailFilter, setEmailFilter] = useState<"" | "has" | "none">("");
+  const [sizeFilter, setSizeFilter] = useState<string[]>([]);
+  const [prefFilter, setPrefFilter] = useState<string>(""); // カンマ区切り
+  const [industryQ, setIndustryQ] = useState<string>("");
+
   const [dateFrom, setDateFrom] = useState<string>("");
   const [dateTo, setDateTo] = useState<string>("");
   const [sortKey, setSortKey] = useState<"created_at" | "company_name">(
@@ -46,8 +53,15 @@ export default function CompaniesPage() {
   const load = async () => {
     setMsg("");
     try {
+      let meRes = await fetch("/api/me/tenant", { cache: "no-store" });
+      if (!meRes.ok)
+        meRes = await fetch("/api/me/tenant/", { cache: "no-store" });
+      const me = await meRes.json().catch(() => ({}));
+      const tId = me?.tenant_id ?? me?.profile?.tenant_id ?? null;
+      setTenantId(tId);
+
       const r = await fetch("/api/form-outreach/companies", {
-        headers: { "x-tenant-id": TENANT_ID },
+        headers: tId ? { "x-tenant-id": String(tId) } : undefined,
         cache: "no-store",
       });
       const j = await r.json();
@@ -67,6 +81,10 @@ export default function CompaniesPage() {
     const qq = q.trim().toLowerCase();
     const df = dateFrom ? new Date(dateFrom) : null;
     const dt = dateTo ? new Date(dateTo) : null;
+    const prefList = prefFilter
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
 
     let arr = rows.filter((r) => {
       if (qq) {
@@ -76,19 +94,33 @@ export default function CompaniesPage() {
           (r.contact_email || "").toLowerCase().includes(qq);
         if (!hit) return false;
       }
-      // ★ フォーム有無
       if (formFilter === "has" && !(r.contact_form_url || "").trim())
         return false;
       if (formFilter === "none" && (r.contact_form_url || "").trim())
         return false;
 
-      // メール有無
       if (emailFilter === "has" && !(r.contact_email || "").trim())
         return false;
       if (emailFilter === "none" && (r.contact_email || "").trim())
         return false;
 
-      // 取得日時
+      if (
+        sizeFilter.length &&
+        (!r.company_size || !sizeFilter.includes(r.company_size))
+      )
+        return false;
+
+      if (prefList.length) {
+        const set = new Set((r.prefectures || []).map(String));
+        const ok = prefList.some((p) => set.has(p));
+        if (!ok) return false;
+      }
+
+      if (industryQ.trim()) {
+        const iq = industryQ.trim().toLowerCase();
+        if (!(r.industry || "").toLowerCase().includes(iq)) return false;
+      }
+
       if (df || dt) {
         const created = r.created_at ? new Date(r.created_at) : null;
         if (!created) return false;
@@ -117,27 +149,19 @@ export default function CompaniesPage() {
       return 0;
     });
     return arr;
-  }, [rows, q, formFilter, emailFilter, dateFrom, dateTo, sortKey, sortDir]);
-
-  const fetchNow = async () => {
-    if (loading) return;
-    setLoading(true);
-    setMsg("");
-    try {
-      const r = await fetch("/api/form-outreach/companies/fetch-now", {
-        method: "POST",
-        headers: { "x-tenant-id": TENANT_ID },
-      });
-      const j = await r.json();
-      if (!r.ok) throw new Error(j?.error || "fetch-now failed");
-      await load();
-      setMsg(`取り込み: 追加 ${j.inserted ?? 0} / スキップ ${j.skipped ?? 0}`);
-    } catch (e: any) {
-      setMsg(String(e?.message || e));
-    } finally {
-      setLoading(false);
-    }
-  };
+  }, [
+    rows,
+    q,
+    formFilter,
+    emailFilter,
+    sizeFilter,
+    prefFilter,
+    industryQ,
+    dateFrom,
+    dateTo,
+    sortKey,
+    sortDir,
+  ]);
 
   return (
     <>
@@ -149,8 +173,10 @@ export default function CompaniesPage() {
               企業一覧
             </h1>
             <p className="text-sm text-neutral-500">
-              列・フィルタを整理（フォーム有無追加／サイトURLは website
-              を表示／取得日時でソート可）
+              新しい列とフィルタを追加（フォーム有無／規模／都道府県／業種）
+            </p>
+            <p className="text-xs text-neutral-500 mt-1">
+              テナント: <span className="font-mono">{tenantId ?? "-"}</span>
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -172,7 +198,7 @@ export default function CompaniesPage() {
 
         {showFilters && (
           <section className="rounded-2xl border border-neutral-200 p-4 mb-4">
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-6">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-8">
               <div className="md:col-span-2">
                 <div className="mb-1 text-xs text-neutral-600">キーワード</div>
                 <input
@@ -183,7 +209,6 @@ export default function CompaniesPage() {
                 />
               </div>
 
-              {/* ★ フォーム有無 */}
               <div>
                 <div className="mb-1 text-xs text-neutral-600">
                   フォーム有無
@@ -212,7 +237,63 @@ export default function CompaniesPage() {
                 </select>
               </div>
 
-              <div>
+              <div className="md:col-span-2">
+                <div className="mb-1 text-xs text-neutral-600">従業員規模</div>
+                <div className="flex flex-wrap gap-2">
+                  {SIZE_OPTS.map((opt) => {
+                    const on = sizeFilter.includes(opt);
+                    return (
+                      <label
+                        key={opt}
+                        className={`text-xs inline-flex items-center gap-2 rounded-lg border px-2 py-1 ${
+                          on
+                            ? "border-indigo-300 bg-indigo-50 text-indigo-800"
+                            : "border-neutral-300"
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={on}
+                          onChange={(e) =>
+                            setSizeFilter((arr) =>
+                              e.target.checked
+                                ? [...arr, opt]
+                                : arr.filter((x) => x !== opt)
+                            )
+                          }
+                        />
+                        {opt}
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="md:col-span-2">
+                <div className="mb-1 text-xs text-neutral-600">
+                  都道府県（カンマ区切り）
+                </div>
+                <input
+                  className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
+                  placeholder="例: 大阪府, 東京都"
+                  value={prefFilter}
+                  onChange={(e) => setPrefFilter(e.target.value)}
+                />
+              </div>
+
+              <div className="md:col-span-2">
+                <div className="mb-1 text-xs text-neutral-600">
+                  業種（あいまい検索）
+                </div>
+                <input
+                  className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
+                  placeholder="例: SaaS / 受託 / 製造"
+                  value={industryQ}
+                  onChange={(e) => setIndustryQ(e.target.value)}
+                />
+              </div>
+
+              <div className="md:col-span-2">
                 <div className="mb-1 text-xs text-neutral-600">
                   取得日時(From)
                 </div>
@@ -223,7 +304,7 @@ export default function CompaniesPage() {
                   onChange={(e) => setDateFrom(e.target.value)}
                 />
               </div>
-              <div>
+              <div className="md:col-span-2">
                 <div className="mb-1 text-xs text-neutral-600">
                   取得日時(To)
                 </div>
@@ -261,12 +342,16 @@ export default function CompaniesPage() {
         )}
 
         <section className="rounded-2xl border border-neutral-200 overflow-hidden">
-          <table className="min-w-[900px] w-full text-sm">
+          <table className="min-w-[1100px] w-full text-sm">
             <thead className="bg-neutral-50 text-neutral-600">
               <tr>
                 <th className="px-3 py-3 text-left">社名</th>
                 <th className="px-3 py-3 text-left">サイトURL</th>
                 <th className="px-3 py-3 text-left">メール</th>
+                <th className="px-3 py-3 text-left">フォーム</th>
+                <th className="px-3 py-3 text-left">規模</th>
+                <th className="px-3 py-3 text-left">都道府県</th>
+                <th className="px-3 py-3 text-left">業種</th>
                 <th className="px-3 py-3 text-left">取得元</th>
                 <th className="px-3 py-3 text-left">取得日時</th>
               </tr>
@@ -289,7 +374,27 @@ export default function CompaniesPage() {
                     )}
                   </td>
                   <td className="px-3 py-2">{c.contact_email || "-"}</td>
-                  <td className="px-3 py-2">{c.source_site || "-"}</td>
+                  <td className="px-3 py-2">
+                    {c.contact_form_url ? (
+                      <a
+                        href={c.contact_form_url}
+                        target="_blank"
+                        className="text-indigo-700 hover:underline"
+                      >
+                        あり
+                      </a>
+                    ) : (
+                      "なし"
+                    )}
+                  </td>
+                  <td className="px-3 py-2">{c.company_size || "-"}</td>
+                  <td className="px-3 py-2">
+                    {Array.isArray(c.prefectures) && c.prefectures.length
+                      ? c.prefectures.join(" / ")
+                      : "-"}
+                  </td>
+                  <td className="px-3 py-2">{c.industry || "-"}</td>
+                  <td className="px-3 py-2">{c.job_site_source || "-"}</td>
                   <td className="px-3 py-2">
                     {c.created_at
                       ? c.created_at.replace("T", " ").replace("Z", "")
@@ -300,7 +405,7 @@ export default function CompaniesPage() {
               {filtered.length === 0 && (
                 <tr>
                   <td
-                    colSpan={5}
+                    colSpan={9}
                     className="px-4 py-10 text-center text-neutral-400"
                   >
                     対象がありません
