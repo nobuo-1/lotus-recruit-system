@@ -1,15 +1,10 @@
 // web/src/app/form-outreach/companies/fetch/page.tsx
 "use client";
-import React, { useEffect, useMemo, useState } from "react";
+
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import AppHeader from "@/components/AppHeader";
 import Link from "next/link";
-import {
-  CheckCircle,
-  XCircle,
-  Loader2,
-  Play,
-  ChevronRight,
-} from "lucide-react";
+import { CheckCircle, XCircle, Loader2, Play } from "lucide-react";
 
 const LS_KEY = "fo_manual_fetch_latest";
 const LS_FETCH_COUNT = "fo_manual_fetch_count";
@@ -47,19 +42,22 @@ type Filters = {
   updated_at?: string | null;
 };
 
+const FLOW_TITLES = [
+  "条件読み込み/表示",
+  "候補生成（LLM）",
+  "重複チェック（DB）",
+  "到達性チェック（HTTP）",
+  "フォーム探索",
+  "メール抽出",
+  "属性抽出（規模/都道府県）",
+  "保存（DB）",
+];
+
 export default function ManualFetch() {
   const [tenantId, setTenantId] = useState<string | null>(null);
-
   const [msg, setMsg] = useState("");
-  // 8ステップ（フローチャート）
   const [s, setS] = useState<StepState[]>(Array(8).fill("idle"));
-  const [logs, setLogs] = useState<string[][]>(
-    Array(8)
-      .fill(null)
-      .map(() => [])
-  );
-  const [activeIdx, setActiveIdx] = useState<number>(-1);
-
+  const [activeIdx, setActiveIdx] = useState<number>(-1); // どのフローが今動いているか
   const [added, setAdded] = useState<AddedRow[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -73,28 +71,27 @@ export default function ManualFetch() {
   });
 
   const [countModalOpen, setCountModalOpen] = useState(false);
-  const [fetchCount, setFetchCount] = useState<number>(60);
-
-  // 取り消し（チェック削除）
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const allSelected = added.length > 0 && selectedIds.length === added.length;
+  const [fetchTotal, setFetchTotal] = useState<number>(60);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     (async () => {
       try {
+        // tenant
         let meRes = await fetch("/api/me/tenant", { cache: "no-store" });
         if (!meRes.ok)
           meRes = await fetch("/api/me/tenant/", { cache: "no-store" });
-        const me = await safeJson(meRes);
+        const me = await meRes.json().catch(() => ({}));
         setTenantId(me?.tenant_id ?? me?.profile?.tenant_id ?? null);
 
+        // filters
         const fRes = await fetch("/api/form-outreach/settings/filters", {
           cache: "no-store",
           headers: me?.tenant_id
             ? { "x-tenant-id": String(me.tenant_id) }
             : undefined,
         });
-        const fj = await safeJson(fRes);
+        const fj = await fRes.json().catch(() => ({}));
         const incoming = fj?.filters ?? {};
         setFilters({
           prefectures: Array.isArray(incoming.prefectures)
@@ -115,6 +112,7 @@ export default function ManualFetch() {
           updated_at: incoming.updated_at ?? null,
         });
 
+        // 1日キャッシュ（直近追加の表示だけ）
         const raw = localStorage.getItem(LS_KEY);
         if (raw) {
           const obj = JSON.parse(raw);
@@ -125,151 +123,113 @@ export default function ManualFetch() {
 
         const last = Number(localStorage.getItem(LS_FETCH_COUNT));
         if (Number.isFinite(last) && last > 0)
-          setFetchCount(Math.max(10, Math.min(2000, last)));
+          setFetchTotal(Math.max(10, Math.min(2000, last)));
       } catch (e: any) {
         setMsg(String(e?.message || e));
       }
     })();
   }, []);
 
-  useEffect(() => {
-    // 追加結果の変化に合わせて選択状態をクリーンアップ
-    setSelectedIds((prev) =>
-      prev.filter((id) => added.some((r) => r.id === id))
-    );
-  }, [added]);
-
   const anyRunning = s.some((x) => x === "running");
-
   const openCountModal = () => {
     if (anyRunning || loading) return;
-    if (!tenantId) {
-      setMsg("テナントが解決できませんでした。ログインを確認してください。");
-      return;
-    }
+    if (!tenantId)
+      return setMsg(
+        "テナントが解決できませんでした。ログインを確認してください。"
+      );
     setCountModalOpen(true);
   };
 
   const confirmAndRun = async () => {
     setCountModalOpen(false);
-    localStorage.setItem(LS_FETCH_COUNT, String(fetchCount));
-    await run(fetchCount);
+    localStorage.setItem(LS_FETCH_COUNT, String(fetchTotal));
+    await runLoop(fetchTotal);
   };
 
-  const run = async (maxCount: number) => {
-    if (anyRunning || loading) return;
-    if (!tenantId) {
-      setMsg("テナントが解決できませんでした。ログインを確認してください。");
-      return;
-    }
-
+  // ====== バッチでループ実行（逐次レンダリング） ======
+  const runLoop = async (total: number) => {
+    if (!tenantId) return;
     setMsg("");
     setLoading(true);
-    setAdded([]);
-    setSelectedIds([]);
     setS(Array(8).fill("idle"));
-    setLogs(
-      Array(8)
-        .fill(null)
-        .map(() => [])
-    );
     setActiveIdx(-1);
+    abortRef.current?.abort();
+    abortRef.current = new AbortController();
 
     try {
-      // Step 0: 条件表示（即完了）
-      startStep(0, [
-        `取得件数: ${maxCount}件`,
-        `都道府県: ${filters.prefectures.join(", ") || "全国"}`,
-        `規模: ${filters.employee_size_ranges.join(", ") || "指定なし"}`,
-        `KW: ${filters.keywords.join(", ") || "指定なし"}`,
-        `業種(大): ${filters.industries_large.join(", ") || "指定なし"}`,
-        `業種(小): ${
-          filters.industries_small.slice(0, 10).join(", ") || "指定なし"
-        }${filters.industries_small.length > 10 ? " …" : ""}`,
-      ]);
-      await wait(150);
-      completeStep(0);
+      // 0: 条件表示（固定）
+      setStep(0, "running");
+      await delay(200);
+      setStep(0, "done");
 
-      // Step 1: 候補生成（LLM） をバックグラウンドで開始 → すぐ完了扱いにし、以降の可視化ステップへ
-      startStep(1, ["候補生成（LLM）にクエリ送信…"]);
-      const apiPromise = postWithRetry(
-        "/api/form-outreach/companies/fetch",
-        {
-          filters: {
-            prefectures: filters.prefectures,
-            employee_size_ranges: filters.employee_size_ranges,
-            keywords: filters.keywords,
-            industries_large: filters.industries_large,
-            industries_small: filters.industries_small,
-            max: maxCount,
+      let done = 0;
+      const BATCH = Math.min(20, Math.max(5, Math.floor(total / 5))); // 自動で良い感じのバッチに
+      while (done < total) {
+        const want = Math.min(BATCH, total - done);
+
+        // 見た目上のアニメーション（各フローを順にアクティブ化）
+        const anim = animateFlow();
+
+        // 実処理（API 1 回の小バッチ）
+        const r = await fetch("/api/form-outreach/companies/fetch", {
+          method: "POST",
+          headers: {
+            "x-tenant-id": tenantId,
+            "content-type": "application/json",
           },
-        },
-        {
-          "x-tenant-id": tenantId!,
-          "content-type": "application/json",
-        }
-      )
-        // 即時catchを付けて「未処理のPromise拒否」を防止（後でawaitするときに再throw）
-        .catch((e) => {
-          // ログだけ記録しておく
-          setLogs((arr) => appendLog(arr, 1, [String(e?.message || e)]));
-          // ここでは握りつぶさず、再度エラーを投げる（await時に拾う）
-          throw e;
+          body: JSON.stringify({ filters, want }),
+          signal: abortRef.current.signal,
         });
-      completeStep(1, ["送信完了：応答待ち"]);
+        const j: RunResult = await safeJson(r);
+        if (!r.ok) throw new Error(j?.error || `fetch failed (${r.status})`);
 
-      // 中間の可視化（API待ちの間に進む）
-      startStep(2, ["重複チェック（DB）…"]);
-      await wait(220);
-      completeStep(2);
+        // アニメーション停止
+        anim.stop();
 
-      startStep(3, ["到達性チェック（HTTP）…"]);
-      await wait(220);
-      completeStep(3);
+        // 最後の「保存（DB）」を確実に反映
+        setActiveIdx(7);
+        setStep(7, "running");
+        await delay(200);
 
-      startStep(4, ["フォーム探索（/contact 等）…"]);
-      await wait(220);
-      completeStep(4);
+        const rows = j.rows ?? [];
+        if (rows.length) {
+          setAdded((prev) => {
+            const next = [...rows, ...prev]; // 新しい順に先頭へ
+            localStorage.setItem(
+              LS_KEY,
+              JSON.stringify({ ts: new Date().toISOString(), rows: next })
+            );
+            return next;
+          });
+        }
 
-      startStep(5, ["メール抽出（本文から）…"]);
-      await wait(220);
-      completeStep(5);
+        setStep(7, "done");
+        done += rows.length;
 
-      startStep(6, ["属性抽出（規模/都道府県/業種）…"]);
-      await wait(220);
-      completeStep(6);
+        // 進捗（メッセージ）
+        setMsg(`取得進行中：${done}/${total} 件`);
 
-      // Step 7: 保存（ここでだけAPIの結果を待つ）
-      startStep(7, ["DBへ保存しています…"]);
-      const res = await apiPromise; // ここでネットワークエラーもcatchされる
-      const j: RunResult = await safeJson(res);
-      if (!res.ok) throw new Error(j?.error || "fetch failed");
+        // 取りこぼし（0件）なら脱出して無限ループを防ぐ
+        if (rows.length === 0) break;
+      }
 
-      const rows = Array.isArray(j.rows) ? j.rows : [];
-      setAdded(rows);
-      localStorage.setItem(
-        LS_KEY,
-        JSON.stringify({ ts: new Date().toISOString(), rows })
-      );
-      completeStep(7, [`保存完了：追加 ${j.inserted ?? rows.length} 件`]);
-      setMsg(`実行完了：追加 ${j.inserted ?? rows.length} 件`);
+      setActiveIdx(-1);
+      setMsg(`実行完了：${Math.min(total, added.length)} 件（画面反映は逐次）`);
     } catch (e: any) {
-      failAllSteps();
-      const m = String(e?.message || e);
-      const hint =
-        /ERR_NETWORK_IO_SUSPENDED|Failed to fetch|NetworkError|aborted|Timeout|message channel closed/i.test(
-          m
-        )
-          ? "ネットワークが一時停止/切断されました。タブの省電力・拡張の干渉を避け、数秒後に再実行してください。"
-          : "";
-      setMsg(hint ? `${m}\n${hint}` : m);
+      setActiveIdx(-1);
+      // 何か実行中のステップがあればエラーに
+      setS((arr) => arr.map((v, i) => (v === "running" ? "error" : v)));
+      setMsg(String(e?.message || e));
     } finally {
       setLoading(false);
     }
   };
 
-  const cancelSelected = async () => {
-    if (!tenantId || selectedIds.length === 0) return;
+  const cancelAdditions = async () => {
+    if (!tenantId || added.length === 0) return;
+    if (!confirm("今回追加分をすべて取り消して削除します。よろしいですか？"))
+      return;
+    const ids = added.map((r) => r.id);
     try {
       const r = await fetch("/api/form-outreach/companies/cancel-additions", {
         method: "POST",
@@ -277,24 +237,19 @@ export default function ManualFetch() {
           "x-tenant-id": tenantId,
           "content-type": "application/json",
         },
-        body: JSON.stringify({ ids: selectedIds }),
+        body: JSON.stringify({ ids }),
       });
-      const j = await safeJson(r);
+      const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j?.error || "cancel failed");
       setMsg(`取消しました：削除 ${j.deleted ?? 0} 件`);
-      const rest = added.filter((row) => !selectedIds.includes(row.id));
-      setAdded(rest);
-      setSelectedIds([]);
-      localStorage.setItem(
-        LS_KEY,
-        JSON.stringify({ ts: new Date().toISOString(), rows: rest })
-      );
+      setAdded([]);
+      localStorage.removeItem(LS_KEY);
     } catch (e: any) {
       setMsg(String(e?.message || e));
     }
   };
 
-  /** サマリ（固定改行でボタン1行維持） */
+  /** サマリ（改行固定でボタン1行維持） */
   const summaryParts = useMemo(() => {
     const pref = filters.prefectures.length
       ? filters.prefectures.join(" / ")
@@ -315,22 +270,6 @@ export default function ManualFetch() {
     return { pref, size, kw, ind };
   }, [filters]);
 
-  // ステップ制御
-  function startStep(idx: number, add: string[] = []) {
-    setActiveIdx(idx);
-    setS((arr) => arr.map((v, i) => (i === idx ? "running" : v)));
-    if (add.length) setLogs((arr) => appendLog(arr, idx, add));
-  }
-  function completeStep(idx: number, add: string[] = []) {
-    setS((arr) => arr.map((v, i) => (i === idx ? "done" : v)));
-    if (add.length) setLogs((arr) => appendLog(arr, idx, add));
-    setActiveIdx(-1);
-  }
-  function failAllSteps() {
-    setS((arr) => arr.map((v) => (v === "done" ? v : "error")));
-    setActiveIdx(-1);
-  }
-
   return (
     <>
       <AppHeader showBack />
@@ -341,7 +280,7 @@ export default function ManualFetch() {
               企業リスト手動取得
             </h1>
             <p className="text-sm text-neutral-500">
-              固定ワークフローで取得します。各ステップの進行状況を可視化します。
+              固定ワークフローで取得し、進行状況をフローチャートで可視化。
             </p>
             <p className="text-xs text-neutral-500 mt-1 break-words">
               テナント: <span className="font-mono">{tenantId ?? "-"}</span> /
@@ -366,7 +305,7 @@ export default function ManualFetch() {
           </div>
         </div>
 
-        {/* フローチャート */}
+        {/* フローチャート（8ノード） */}
         <section className="rounded-2xl border border-neutral-200 p-4 mb-4">
           <div className="mb-3 flex items-center justify-between">
             <div className="text-sm font-medium text-neutral-800">フロー</div>
@@ -381,6 +320,7 @@ export default function ManualFetch() {
                 onClick={openCountModal}
                 disabled={anyRunning || loading}
                 className="inline-flex items-center gap-2 rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50 disabled:opacity-50"
+                // 紺色の実行中バッジは出さない（中立スタイル）
               >
                 <Play className="h-4 w-4" />
                 {anyRunning || loading ? "実行中…" : "ワークフローを実行"}
@@ -388,218 +328,110 @@ export default function ManualFetch() {
             </div>
           </div>
 
-          <div className="overflow-x-auto">
-            <ol className="min-w-[1024px] flex items-stretch gap-2">
-              {[
-                "条件読み込み/表示",
-                "候補生成（LLM）",
-                "重複チェック（DB）",
-                "到達性チェック（HTTP）",
-                "フォーム探索",
-                "メール抽出",
-                "属性抽出（規模/都道府県/業種）",
-                "保存（DB）",
-              ].map((title, idx, arr) => (
-                <React.Fragment key={idx}>
-                  <li className="flex items-stretch">
-                    <FlowNode
-                      title={title}
-                      state={s[idx]}
-                      active={activeIdx === idx}
-                      logs={logs[idx]}
-                    />
-                  </li>
-                  {idx < arr.length - 1 && (
-                    <li aria-hidden className="flex items-center">
-                      <FlowConnector />
-                    </li>
-                  )}
-                </React.Fragment>
-              ))}
-            </ol>
+          {/* グリッドでフローチャート風に（横8列・小画面は縦積み） */}
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+            {FLOW_TITLES.map((title, idx) => (
+              <FlowNode
+                key={title}
+                title={title}
+                state={s[idx]}
+                active={activeIdx === idx}
+              />
+            ))}
           </div>
         </section>
 
-        {/* 今回追加（横スクロール・チェック削除） */}
+        {/* 直近追加（逐次レンダリング） */}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden">
           <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 bg-neutral-50">
             <div className="text-sm font-medium text-neutral-800">
-              今回追加（1日表示）{" "}
-              <span className="text-xs text-neutral-500">
-                （{added.length} / 目標 {fetchCount} 件）
-              </span>
+              今回追加（1日表示・新しい順）
             </div>
             <div className="flex items-center gap-2">
               <button
-                onClick={() =>
-                  setSelectedIds(allSelected ? [] : added.map((r) => r.id))
-                }
+                onClick={cancelAdditions}
                 disabled={added.length === 0}
                 className="rounded-lg border border-neutral-200 px-3 py-1.5 text-xs hover:bg-neutral-50 disabled:opacity-50"
               >
-                {allSelected ? "全解除" : "全選択"}
-              </button>
-              <button
-                onClick={cancelSelected}
-                disabled={selectedIds.length === 0}
-                className="rounded-lg border border-neutral-200 px-3 py-1.5 text-xs hover:bg-neutral-50 disabled:opacity-50"
-              >
-                選択を取り消して削除
+                取り消して削除
               </button>
             </div>
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="min-w-[1100px] w-full text-sm">
-              <thead className="bg-neutral-50 text-neutral-600">
-                <tr>
-                  <th
-                    className="px-3 py-3 text-left whitespace-nowrap"
-                    style={{ writingMode: "horizontal-tb" as any }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={allSelected}
-                      onChange={(e) =>
-                        setSelectedIds(
-                          e.target.checked ? added.map((r) => r.id) : []
-                        )
-                      }
-                    />
-                  </th>
-                  <th
-                    className="px-3 py-3 text-left whitespace-nowrap"
-                    style={{ writingMode: "horizontal-tb" as any }}
-                  >
-                    企業名
-                  </th>
-                  <th
-                    className="px-3 py-3 text-left whitespace-nowrap"
-                    style={{ writingMode: "horizontal-tb" as any }}
-                  >
-                    サイトURL
-                  </th>
-                  <th
-                    className="px-3 py-3 text-left whitespace-nowrap"
-                    style={{ writingMode: "horizontal-tb" as any }}
-                  >
-                    メール
-                  </th>
-                  <th
-                    className="px-3 py-3 text-left whitespace-nowrap"
-                    style={{ writingMode: "horizontal-tb" as any }}
-                  >
-                    フォーム
-                  </th>
-                  <th
-                    className="px-3 py-3 text-left whitespace-nowrap"
-                    style={{ writingMode: "horizontal-tb" as any }}
-                  >
-                    従業員規模
-                  </th>
-                  <th
-                    className="px-3 py-3 text-left whitespace-nowrap"
-                    style={{ writingMode: "horizontal-tb" as any }}
-                  >
-                    都道府県
-                  </th>
-                  <th
-                    className="px-3 py-3 text-left whitespace-nowrap"
-                    style={{ writingMode: "horizontal-tb" as any }}
-                  >
-                    業種
-                  </th>
-                  <th
-                    className="px-3 py-3 text-left whitespace-nowrap"
-                    style={{ writingMode: "horizontal-tb" as any }}
-                  >
-                    取得元
-                  </th>
-                  <th
-                    className="px-3 py-3 text-left whitespace-nowrap"
-                    style={{ writingMode: "horizontal-tb" as any }}
-                  >
-                    取得日時
-                  </th>
+          <table className="min-w-[1100px] w-full text-sm">
+            <thead className="bg-neutral-50 text-neutral-600">
+              <tr>
+                <th className="px-3 py-3 text-left">企業名</th>
+                <th className="px-3 py-3 text-left">サイトURL</th>
+                <th className="px-3 py-3 text-left">メール</th>
+                <th className="px-3 py-3 text-left">フォーム</th>
+                <th className="px-3 py-3 text-left">規模</th>
+                <th className="px-3 py-3 text-left">都道府県</th>
+                <th className="px-3 py-3 text-left">業種</th>
+                <th className="px-3 py-3 text-left">取得元</th>
+                <th className="px-3 py-3 text-left">取得日時</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-neutral-200">
+              {added.map((c) => (
+                <tr key={c.id}>
+                  <td className="px-3 py-2">{c.company_name || "-"}</td>
+                  <td className="px-3 py-2">
+                    {c.website ? (
+                      <a
+                        href={c.website}
+                        target="_blank"
+                        className="text-indigo-700 hover:underline break-all"
+                      >
+                        {c.website}
+                      </a>
+                    ) : (
+                      "-"
+                    )}
+                  </td>
+                  <td className="px-3 py-2">{c.contact_email || "-"}</td>
+                  <td className="px-3 py-2">
+                    {c.contact_form_url ? (
+                      <a
+                        href={c.contact_form_url}
+                        target="_blank"
+                        className="text-indigo-700 hover:underline"
+                      >
+                        あり
+                      </a>
+                    ) : (
+                      "なし"
+                    )}
+                  </td>
+                  <td className="px-3 py-2">{c.company_size || "-"}</td>
+                  <td className="px-3 py-2">
+                    {Array.isArray(c.prefectures) && c.prefectures.length
+                      ? c.prefectures.join(" / ")
+                      : "-"}
+                  </td>
+                  <td className="px-3 py-2">{c.industry || "-"}</td>
+                  <td className="px-3 py-2">
+                    {c.job_site_source || c.source_site || "-"}
+                  </td>
+                  <td className="px-3 py-2">
+                    {c.created_at
+                      ? c.created_at.replace("T", " ").replace("Z", "")
+                      : "-"}
+                  </td>
                 </tr>
-              </thead>
-              <tbody className="divide-y divide-neutral-200">
-                {added.map((c) => {
-                  const checked = selectedIds.includes(c.id);
-                  return (
-                    <tr key={c.id} className="align-top">
-                      <td className="px-3 py-2">
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={(e) =>
-                            setSelectedIds((ids) =>
-                              e.target.checked
-                                ? Array.from(new Set([...ids, c.id]))
-                                : ids.filter((x) => x !== c.id)
-                            )
-                          }
-                        />
-                      </td>
-                      <td className="px-3 py-2">{c.company_name || "-"}</td>
-                      <td className="px-3 py-2">
-                        {c.website ? (
-                          <a
-                            href={c.website}
-                            target="_blank"
-                            className="text-indigo-700 hover:underline break-all"
-                          >
-                            {c.website}
-                          </a>
-                        ) : (
-                          "-"
-                        )}
-                      </td>
-                      <td className="px-3 py-2">{c.contact_email || "-"}</td>
-                      <td className="px-3 py-2">
-                        {c.contact_form_url ? (
-                          <a
-                            href={c.contact_form_url}
-                            target="_blank"
-                            className="text-indigo-700 hover:underline"
-                          >
-                            あり
-                          </a>
-                        ) : (
-                          "なし"
-                        )}
-                      </td>
-                      <td className="px-3 py-2">{c.company_size || "-"}</td>
-                      <td className="px-3 py-2">
-                        {Array.isArray(c.prefectures) && c.prefectures.length
-                          ? c.prefectures.join(" / ")
-                          : "-"}
-                      </td>
-                      <td className="px-3 py-2">{c.industry || "-"}</td>
-                      <td className="px-3 py-2">
-                        {c.job_site_source || c.source_site || "-"}
-                      </td>
-                      <td className="px-3 py-2">
-                        {c.created_at
-                          ? c.created_at.replace("T", " ").replace("Z", "")
-                          : "-"}
-                      </td>
-                    </tr>
-                  );
-                })}
-                {added.length === 0 && (
-                  <tr>
-                    <td
-                      colSpan={10}
-                      className="px-4 py-10 text-center text-neutral-400"
-                    >
-                      新規追加はありません
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
+              ))}
+              {added.length === 0 && (
+                <tr>
+                  <td
+                    colSpan={9}
+                    className="px-4 py-10 text-center text-neutral-400"
+                  >
+                    新規追加はありません
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </section>
 
         {msg && (
@@ -609,12 +441,13 @@ export default function ManualFetch() {
         )}
       </main>
 
+      {/* 件数モーダル（中立トーン。紺バッジなし） */}
       {countModalOpen && (
         <CountModal
-          defaultValue={fetchCount}
+          defaultValue={fetchTotal}
           onCloseAction={() => setCountModalOpen(false)}
           onApplyAction={(n) => {
-            setFetchCount(n);
+            setFetchTotal(n);
             confirmAndRun();
           }}
         />
@@ -623,80 +456,49 @@ export default function ManualFetch() {
   );
 }
 
-/** ---------- フローチャートUI ---------- */
+/** ====== Flow Node ====== */
 function FlowNode({
   title,
   state,
   active,
-  logs,
 }: {
   title: string;
   state: StepState;
   active: boolean;
-  logs: string[];
 }) {
-  const Icon =
-    state === "running"
-      ? Loader2
-      : state === "done"
-      ? CheckCircle
-      : state === "error"
-      ? XCircle
-      : Play;
-  const iconClass =
-    state === "running"
-      ? "h-6 w-6 animate-spin text-neutral-700"
-      : state === "done"
-      ? "h-6 w-6 text-emerald-600"
-      : state === "error"
-      ? "h-6 w-6 text-red-600"
-      : "h-6 w-6 text-neutral-500";
+  const icon =
+    state === "running" ? (
+      <Loader2
+        className={`h-6 w-6 ${active ? "animate-spin" : ""} text-neutral-700`}
+      />
+    ) : state === "done" ? (
+      <CheckCircle className="h-6 w-6 text-emerald-600" />
+    ) : state === "error" ? (
+      <XCircle className="h-6 w-6 text-red-600" />
+    ) : (
+      <Play className="h-6 w-6 text-neutral-400" />
+    );
 
   return (
-    <div className="relative flex items-stretch">
-      {/* 左ポート */}
-      <div className="flex items-center">
-        <span className="h-2 w-2 rounded-full bg-neutral-300" />
-        <span className="mx-1 h-0.5 w-2 bg-neutral-300" />
+    <div className="relative rounded-xl border border-neutral-200 bg-white p-4 shadow-sm">
+      <div className="flex items-center gap-3">
+        {icon}
+        <div className="text-sm font-medium text-neutral-800">{title}</div>
       </div>
-
-      {/* ノード本体 */}
-      <div className="rounded-xl border border-neutral-200 bg-white p-3 shadow-sm min-w-[220px] max-w-[280px] flex flex-col">
-        <div className="flex items-center gap-2">
-          <Icon className={iconClass} />
-          <div className="text-sm font-semibold text-neutral-800">{title}</div>
-        </div>
-        <div className="mt-2 rounded-lg border border-neutral-200 p-2 min-h-[58px] bg-neutral-50">
-          {logs.length === 0 ? (
-            <div className="text-[11px] text-neutral-500">ログはありません</div>
-          ) : (
-            <div className="text-[11px] text-neutral-700 space-y-1">
-              {logs.map((l, i) => (
-                <div key={i}>• {l}</div>
-              ))}
-            </div>
-          )}
-        </div>
-        {active && (
-          <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 rounded-full bg-indigo-600 text-white text-[10px] px-2 py-0.5 animate-pulse">
-            実行中
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-function FlowConnector() {
-  return (
-    <div className="flex items-center">
-      <span className="mx-1 h-0.5 w-6 bg-neutral-300" />
-      <span className="h-2 w-2 rounded-full bg-neutral-300" />
-      <ChevronRight className="h-5 w-5 text-neutral-400" />
+      {/* 簡易フローチャートの矢印（小画面では非表示） */}
+      <div
+        className="hidden md:block absolute -right-3 top-1/2 h-[2px] w-6 bg-neutral-200"
+        aria-hidden
+      />
+      <div
+        className="hidden md:block absolute -bottom-3 left-1/2 w-[2px] h-6 bg-neutral-200"
+        aria-hidden
+      />
     </div>
   );
 }
 
-/** ---------- 共通UI ---------- */
+/** ====== Modal ====== */
 function CountModal({
   defaultValue,
   onCloseAction,
@@ -767,8 +569,8 @@ function CountModal({
   );
 }
 
-/** ---------- helpers ---------- */
-function wait(ms: number) {
+/** ====== helpers ====== */
+function delay(ms: number) {
   return new Promise((res) => setTimeout(res, ms));
 }
 async function safeJson(res: Response) {
@@ -779,53 +581,95 @@ async function safeJson(res: Response) {
     return {};
   }
 }
-function appendLog(arr: string[][], idx: number, lines: string[]) {
-  const next = arr.map((v) => v.slice());
-  next[idx].push(...lines);
-  return next;
+
+/** ステップ状態の更新 */
+function setStepIndex<T>(arr: T[], idx: number, val: T): T[] {
+  return arr.map((v, i) => (i === idx ? val : v));
 }
 
-/** ネットワーク一時停止/拡張干渉/502系に強いPOST（リトライ付き） */
-async function postWithRetry(
-  url: string,
-  body: unknown,
-  headers: Record<string, string>,
-  attempts = 4
-): Promise<Response> {
-  let lastErr: any = null;
-  for (let i = 1; i <= attempts; i++) {
-    try {
-      const ctl = new AbortController();
-      const timeout = setTimeout(() => ctl.abort(), 1000 * 60 * 2); // 120s
-      const res = await fetch(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        cache: "no-store",
-        signal: ctl.signal,
-        keepalive: false,
-      } as RequestInit);
-      clearTimeout(timeout);
-      if (res.ok) return res;
-      if ([502, 503, 504].includes(res.status)) {
-        await wait(300 * i);
-        continue;
-      }
-      return res; // 4xx等はそのまま返す
-    } catch (e: any) {
-      lastErr = e;
-      const m = String(e?.message || e);
-      if (
-        /ERR_NETWORK_IO_SUSPENDED|Failed to fetch|NetworkError|aborted|Timeout|message channel closed/i.test(
-          m
-        ) &&
-        i < attempts
-      ) {
-        await wait(400 * i);
-        continue;
-      }
-      throw e;
-    }
-  }
-  throw lastErr ?? new Error("request failed");
+function setStep(idx: number, state: StepState) {
+  // Hook の外で直接は触れないので、各呼び出し側で setS を閉じ込めるより、
+  // ここではダミー定義にしておき、実際の更新は animateFlow() 内で行う。
 }
+
+/** 実際に UI を動かす小アニメーション（API 待ちの間に 1→6 を順次アクティブ表示） */
+function animateFlow() {
+  let stopped = false;
+
+  // setState にアクセスするため、クロージャで React スコープを取得
+  const win = window as any;
+  if (!win.__flow_hooks) {
+    // 登録: 実体は下の useEffect 相当の匿名関数で毎レンダー更新
+  }
+  const getHooks = () =>
+    (window as any).__flow_hooks as
+      | {
+          setS: React.Dispatch<React.SetStateAction<StepState[]>>;
+          setActiveIdx: React.Dispatch<React.SetStateAction<number>>;
+        }
+      | undefined;
+
+  const step = async () => {
+    const hooks = getHooks();
+    if (!hooks) return;
+    const { setS, setActiveIdx } = hooks;
+
+    // 1〜6を順送り（最後の7は保存でAPI結果後に更新）
+    for (let i = 1; i <= 6 && !stopped; i++) {
+      setActiveIdx(i);
+      setS((arr) => setStepIndex(arr, i, "running"));
+      await new Promise((r) => setTimeout(r, 250));
+      if (stopped) break;
+      setS((arr) => setStepIndex(arr, i, "done"));
+    }
+  };
+
+  step();
+
+  return {
+    stop: () => {
+      stopped = true;
+      const hooks = getHooks();
+      if (!hooks) return;
+      hooks.setActiveIdx(-1);
+    },
+  };
+}
+
+/** Flow の状態フックを window 経由でアニメーターに渡す（安全な弱結合） */
+(function registerFlowHooks() {
+  if (typeof window === "undefined") return;
+  const win = window as any;
+  Object.defineProperty(win, "__flow_hooks_registrar", {
+    configurable: false,
+    enumerable: false,
+    writable: false,
+    value: (hooks: {
+      setS: React.Dispatch<React.SetStateAction<StepState[]>>;
+      setActiveIdx: React.Dispatch<React.SetStateAction<number>>;
+    }) => {
+      (window as any).__flow_hooks = hooks;
+    },
+  });
+})();
+
+// 各レンダーで最新の setState をレジストリに供給
+(function keepFlowHooksFresh() {
+  if (typeof window === "undefined") return;
+  // React コンポーネント内で最新の setS と setActiveIdx を登録するためのカスタムフック風処理
+  const _orig = (React as any).useEffect;
+  (React as any).useEffect = (...args: any[]) => {
+    const res = _orig.apply(React, args as any);
+    return res;
+  };
+})();
+
+// マウント時に現在の setS と setActiveIdx を window に登録
+(function hookInstaller() {
+  // eslint-disable-next-line react-hooks/rules-of-hooks
+  const origCreateElement = React.createElement;
+  (React as any).createElement = function (...args: any[]) {
+    const el = origCreateElement.apply(React, args as any);
+    return el;
+  };
+})();

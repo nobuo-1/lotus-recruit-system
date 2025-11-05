@@ -8,28 +8,25 @@ import { createClient } from "@supabase/supabase-js";
 /** ---------- Types ---------- */
 type Filters = {
   prefectures?: string[];
-  employee_size_ranges?: string[];
-  keywords?: string[];
+  employee_size_ranges?: string[]; // ["1-9","10-49","50-249","250+"]
+  keywords?: string[]; // 部分一致
   industries_large?: string[];
   industries_small?: string[];
-  max?: number;
+  max?: number; // 後方互換
 };
 
 type Candidate = {
   company_name: string;
   website?: string;
-  contact_email?: string | null; // ← null も許容
+  contact_email?: string | null;
   contact_form_url?: string | null;
   industry_large?: string | null;
   industry_small?: string | null;
-  prefectures?: string[]; // ← 複数
-  company_size?: string | null; // ← レンジ
+  prefectures?: string[];
+  company_size?: string | null;
 };
 
-type AskBatchHint = {
-  round: number;
-  remain: number;
-};
+type AskBatchHint = { round: number; remain: number };
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
@@ -133,7 +130,6 @@ function extractEmails(text: string): string[] {
 }
 
 function extractCompanySizeToRange(text: string): string | null {
-  // 例）従業員数 23名 / 社員数：1,230人
   const m = text.match(/(従業員数|社員数)[：:\s]*([0-9,]+)\s*(名|人)/);
   if (!m) return null;
   const n = Number(m[2].replace(/,/g, ""));
@@ -180,9 +176,9 @@ async function findContactForm(
   );
   if (hit) return hit.href;
 
-  // 代表的なパスを試す
   const probes = [
     "/contact",
+    "/contacts",
     "/contact-us",
     "/inquiry",
     "/inquiries",
@@ -205,7 +201,6 @@ async function verifyAndEnrich(c: Candidate): Promise<Candidate | null> {
   if (!site) return null;
 
   try {
-    // GETで本文取得（HEADのみだとCDN誤判定がある）
     const r = await fetchWithTimeout(site, {}, 10000);
     if (!r.ok) return null;
     const html = await r.text();
@@ -242,6 +237,42 @@ function dedupe(cands: Candidate[]): Candidate[] {
     }
   }
   return out;
+}
+
+function matchesFilters(c: Candidate, f: Filters): boolean {
+  // 都道府県
+  if (Array.isArray(f.prefectures) && f.prefectures.length) {
+    const set = new Set((c.prefectures ?? []).map(String));
+    if (![...set].some((p) => f.prefectures!.includes(p))) return false;
+  }
+  // 規模レンジ
+  if (Array.isArray(f.employee_size_ranges) && f.employee_size_ranges.length) {
+    if (!c.company_size || !f.employee_size_ranges.includes(c.company_size))
+      return false;
+  }
+  // 業種
+  const L = (c.industry_large || "").trim();
+  const S = (c.industry_small || "").trim();
+  if (Array.isArray(f.industries_large) && f.industries_large.length) {
+    if (!L || !f.industries_large.includes(L)) return false;
+  }
+  if (Array.isArray(f.industries_small) && f.industries_small.length) {
+    if (!S || !f.industries_small.includes(S)) return false;
+  }
+  // キーワード（社名 or ドメイン）
+  if (Array.isArray(f.keywords) && f.keywords.length) {
+    const name = (c.company_name || "").toLowerCase();
+    let host = "";
+    try {
+      host = new URL(c.website || "").host.toLowerCase();
+    } catch {}
+    const ok = f.keywords.some((kw) => {
+      const k = String(kw || "").toLowerCase();
+      return !!k && (name.includes(k) || host.includes(k));
+    });
+    if (!ok) return false;
+  }
+  return true;
 }
 
 /** ---------- OpenAI ---------- */
@@ -288,6 +319,7 @@ async function askOpenAIForCompanies(
 
   const txt = await res.text();
   if (!res.ok) throw new Error(`OpenAI error ${res.status}: ${txt}`);
+
   let payload: any = {};
   try {
     const j = JSON.parse(txt);
@@ -296,6 +328,7 @@ async function askOpenAIForCompanies(
   } catch {
     payload = {};
   }
+
   const items = Array.isArray(payload?.items) ? payload.items : [];
   const mapped: Candidate[] = items
     .map((x: any) => ({
@@ -311,11 +344,14 @@ async function askOpenAIForCompanies(
     }))
     .filter((c: Candidate) => c.company_name && c.website);
 
-  // 候補は多めに返してもらってもよいが、この時点ではwant*2程度に抑える
   return mapped.slice(0, Math.max(want * 2, 40));
 }
 
-/** ---------- Handler ---------- */
+/** ---------- Handler (BATCh) ---------- */
+/**
+ * フロントは「want（＝今回挿入したい件数）」を指定して、これを繰り返し呼び出します。
+ * 各呼び出しは 10〜20s 以内で終わるスモールバッチにし、Vercel の 300s タイムアウトを回避。
+ */
 export async function POST(req: Request) {
   try {
     if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
@@ -340,7 +376,7 @@ export async function POST(req: Request) {
 
     const body = await req.json().catch(() => ({}));
     const filters: Filters = body?.filters ?? {};
-    const target = clamp(filters.max ?? 60, 10, 2000);
+    const want: number = clamp(body?.want ?? filters.max ?? 12, 1, 100); // 1〜100/回 の小分け
 
     const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
@@ -349,7 +385,6 @@ export async function POST(req: Request) {
       .from("form_prospects")
       .select("website")
       .eq("tenant_id", tenantId);
-
     if (exErr)
       return NextResponse.json({ error: exErr.message }, { status: 500 });
 
@@ -360,61 +395,59 @@ export async function POST(req: Request) {
     );
 
     let pool: Candidate[] = [];
-    const MAX_ROUNDS = 8; // 充分に埋めにいく
-    const CONCURRENCY = 8;
-    const REQUEST_BUDGET_MS = 250_000; // Vercel 300s に余裕を持たせて早期終了
+    const MAX_ROUNDS = 3; // 1 call 内の LLM 呼出回数
+    const CONCURRENCY = 6; // サイト検証並列
+    const REQUEST_BUDGET_MS = 20_000;
     const t0 = Date.now();
 
     for (let round = 1; round <= MAX_ROUNDS; round++) {
-      const remain = Math.max(0, target - pool.length);
+      const remain = Math.max(0, want - pool.length);
       if (remain === 0) break;
 
-      // 1) LLMで候補取得（不足分ベース）
+      // 1) LLM 候補
       const llm = await askOpenAIForCompanies(filters, remain, {
         round,
         remain,
       });
 
-      // 2) DB既存・pool重複を除外（★ここに明示型）
+      // 2) 既存除外＆URL重複除外
       const step1: Candidate[] = dedupe(llm).filter(
         (c: Candidate) =>
           !!c.website && !existingSet.has(String(c.website).toLowerCase())
       );
 
-      // 3) 検証＆付加情報抽出（並列）
+      // 3) 検証・付加情報
       for (let i = 0; i < step1.length; i += CONCURRENCY) {
         const slice: Candidate[] = step1.slice(i, i + CONCURRENCY);
         const chunk = await Promise.all(
           slice.map((cand: Candidate) => verifyAndEnrich(cand))
         );
-        pool.push(...(chunk.filter(Boolean) as Candidate[]));
-        // 過剰に膨らみすぎないように
-        pool = dedupe(pool).slice(0, target);
-        if (pool.length >= target) break;
+        const verified = (chunk.filter(Boolean) as Candidate[]).filter(
+          (cc: Candidate) => matchesFilters(cc, filters)
+        );
+        pool.push(...verified);
+        pool = dedupe(pool).slice(0, want);
+        if (pool.length >= want) break;
         if (Date.now() - t0 > REQUEST_BUDGET_MS) break;
       }
 
-      // ラウンド間小休止
-      if (pool.length < target) await sleep(300);
+      if (pool.length < want) await sleep(200);
       if (Date.now() - t0 > REQUEST_BUDGET_MS) break;
     }
 
-    // ここまでで target に満たない場合は、可能な限り返す（I/Oや到達性次第）
-    const toInsert: Candidate[] = pool.slice(0, target);
-
+    const toInsert: Candidate[] = pool.slice(0, want);
     if (toInsert.length === 0) {
       return NextResponse.json({
         inserted: 0,
         rows: [],
-        note: "新規追加できる企業が見つかりませんでした",
+        note: "条件に合致する新規候補が見つかりませんでした",
       });
     }
 
-    // INSERT
     const rows = toInsert.map((c: Candidate) => ({
       tenant_id: tenantId,
       company_name: c.company_name,
-      website: c.website!, // verify 済み
+      website: c.website!, // verified
       contact_form_url: c.contact_form_url ?? null,
       contact_email: c.contact_email ?? null,
       industry:
@@ -423,7 +456,7 @@ export async function POST(req: Request) {
       company_size: c.company_size ?? null,
       job_site_source: "llm+web",
       status: "new",
-      prefectures: c.prefectures ?? [], // ← text[]
+      prefectures: c.prefectures ?? [], // text[]
     }));
 
     const { data: inserted, error: insErr } = await admin
