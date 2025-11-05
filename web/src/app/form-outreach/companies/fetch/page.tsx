@@ -1,6 +1,5 @@
 // web/src/app/form-outreach/companies/fetch/page.tsx
 "use client";
-
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import AppHeader from "@/components/AppHeader";
 import Link from "next/link";
@@ -57,7 +56,7 @@ export default function ManualFetch() {
   const [tenantId, setTenantId] = useState<string | null>(null);
   const [msg, setMsg] = useState("");
   const [s, setS] = useState<StepState[]>(Array(8).fill("idle"));
-  const [activeIdx, setActiveIdx] = useState<number>(-1); // どのフローが今動いているか
+  const [activeIdx, setActiveIdx] = useState<number>(-1);
   const [added, setAdded] = useState<AddedRow[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -77,14 +76,12 @@ export default function ManualFetch() {
   useEffect(() => {
     (async () => {
       try {
-        // tenant
         let meRes = await fetch("/api/me/tenant", { cache: "no-store" });
         if (!meRes.ok)
           meRes = await fetch("/api/me/tenant/", { cache: "no-store" });
         const me = await meRes.json().catch(() => ({}));
         setTenantId(me?.tenant_id ?? me?.profile?.tenant_id ?? null);
 
-        // filters
         const fRes = await fetch("/api/form-outreach/settings/filters", {
           cache: "no-store",
           headers: me?.tenant_id
@@ -112,12 +109,11 @@ export default function ManualFetch() {
           updated_at: incoming.updated_at ?? null,
         });
 
-        // 1日キャッシュ（直近追加の表示だけ）
         const raw = localStorage.getItem(LS_KEY);
         if (raw) {
           const obj = JSON.parse(raw);
           const ts = obj?.ts ? new Date(obj.ts).getTime() : 0;
-          if (Date.now() - ts < 24 * 60 * 60 * 1000) setAdded(obj.rows ?? []);
+          if (Date.now() - ts < 24 * 3600 * 1000) setAdded(obj.rows ?? []);
           else localStorage.removeItem(LS_KEY);
         }
 
@@ -146,7 +142,7 @@ export default function ManualFetch() {
     await runLoop(fetchTotal);
   };
 
-  // ====== バッチでループ実行（逐次レンダリング） ======
+  /** 逐次保存 & 逐次レンダリング。必ず total 件を目指し、上限試行まで自動再試行 */
   const runLoop = async (total: number) => {
     if (!tenantId) return;
     setMsg("");
@@ -158,43 +154,53 @@ export default function ManualFetch() {
 
     try {
       // 0: 条件表示（固定）
-      setStep(0, "running");
+      setActiveIdx(0);
+      setS((a) => a.map((v, i) => (i === 0 ? "running" : "idle")));
       await delay(200);
-      setStep(0, "done");
+      setS((a) => a.map((v, i) => (i === 0 ? "done" : v)));
+      setActiveIdx(-1);
 
       let done = 0;
-      const BATCH = Math.min(20, Math.max(5, Math.floor(total / 5))); // 自動で良い感じのバッチに
-      while (done < total) {
+      let attempts = 0;
+      const MAX_ATTEMPTS = Math.ceil(total / 5) + 10; // 充分な再試行枠
+      const BATCH = Math.min(25, Math.max(8, Math.floor(total / 4))); // 自動バッチ
+
+      while (done < total && attempts < MAX_ATTEMPTS) {
+        attempts++;
         const want = Math.min(BATCH, total - done);
+        const seed = `${Date.now()}-${attempts}`;
 
-        // 見た目上のアニメーション（各フローを順にアクティブ化）
-        const anim = animateFlow();
+        // フローの擬似進行（API待ちの間、1→6を順回し）
+        const anim = animateSteps(setS, setActiveIdx);
 
-        // 実処理（API 1 回の小バッチ）
         const r = await fetch("/api/form-outreach/companies/fetch", {
           method: "POST",
           headers: {
             "x-tenant-id": tenantId,
             "content-type": "application/json",
           },
-          body: JSON.stringify({ filters, want }),
+          body: JSON.stringify({ filters, want, seed }),
           signal: abortRef.current.signal,
         });
         const j: RunResult = await safeJson(r);
+
+        // 保存（7）を明示
+        anim.stop();
+        setActiveIdx(7);
+        setS((a) =>
+          a.map((v, i) =>
+            i === 7 ? "running" : i <= 6 ? (a[i] === "idle" ? "done" : a[i]) : v
+          )
+        );
+        await delay(150);
+
         if (!r.ok) throw new Error(j?.error || `fetch failed (${r.status})`);
 
-        // アニメーション停止
-        anim.stop();
-
-        // 最後の「保存（DB）」を確実に反映
-        setActiveIdx(7);
-        setStep(7, "running");
-        await delay(200);
-
         const rows = j.rows ?? [];
+        // 逐次レンダリング（新しい順で上に積む）
         if (rows.length) {
           setAdded((prev) => {
-            const next = [...rows, ...prev]; // 新しい順に先頭へ
+            const next = [...rows, ...prev];
             localStorage.setItem(
               LS_KEY,
               JSON.stringify({ ts: new Date().toISOString(), rows: next })
@@ -203,21 +209,29 @@ export default function ManualFetch() {
           });
         }
 
-        setStep(7, "done");
-        done += rows.length;
+        const inc = Number.isFinite(j.inserted)
+          ? Number(j.inserted)
+          : rows.length;
+        done += inc;
 
-        // 進捗（メッセージ）
+        setS((a) => a.map((v, i) => (i === 7 ? "done" : v)));
+        setActiveIdx(-1);
         setMsg(`取得進行中：${done}/${total} 件`);
 
-        // 取りこぼし（0件）なら脱出して無限ループを防ぐ
-        if (rows.length === 0) break;
+        // 0件でも諦めずに再試行（ただし上限あり）
+        if (inc === 0) {
+          await delay(300);
+          continue;
+        }
       }
 
-      setActiveIdx(-1);
-      setMsg(`実行完了：${Math.min(total, added.length)} 件（画面反映は逐次）`);
+      setMsg(
+        done >= total
+          ? `実行完了：${done}/${total} 件保存`
+          : `完了（不足）：${done}/${total} 件。条件を厳格に満たす候補が不足しました。`
+      );
     } catch (e: any) {
       setActiveIdx(-1);
-      // 何か実行中のステップがあればエラーに
       setS((arr) => arr.map((v, i) => (v === "running" ? "error" : v)));
       setMsg(String(e?.message || e));
     } finally {
@@ -229,8 +243,8 @@ export default function ManualFetch() {
     if (!tenantId || added.length === 0) return;
     if (!confirm("今回追加分をすべて取り消して削除します。よろしいですか？"))
       return;
-    const ids = added.map((r) => r.id);
     try {
+      const ids = added.map((r) => r.id);
       const r = await fetch("/api/form-outreach/companies/cancel-additions", {
         method: "POST",
         headers: {
@@ -249,7 +263,6 @@ export default function ManualFetch() {
     }
   };
 
-  /** サマリ（改行固定でボタン1行維持） */
   const summaryParts = useMemo(() => {
     const pref = filters.prefectures.length
       ? filters.prefectures.join(" / ")
@@ -280,7 +293,7 @@ export default function ManualFetch() {
               企業リスト手動取得
             </h1>
             <p className="text-sm text-neutral-500">
-              固定ワークフローで取得し、進行状況をフローチャートで可視化。
+              進行をフローチャートで可視化。保存は逐次反映。紺色バッジは非表示。
             </p>
             <p className="text-xs text-neutral-500 mt-1 break-words">
               テナント: <span className="font-mono">{tenantId ?? "-"}</span> /
@@ -305,7 +318,7 @@ export default function ManualFetch() {
           </div>
         </div>
 
-        {/* フローチャート（8ノード） */}
+        {/* フローチャート */}
         <section className="rounded-2xl border border-neutral-200 p-4 mb-4">
           <div className="mb-3 flex items-center justify-between">
             <div className="text-sm font-medium text-neutral-800">フロー</div>
@@ -320,7 +333,6 @@ export default function ManualFetch() {
                 onClick={openCountModal}
                 disabled={anyRunning || loading}
                 className="inline-flex items-center gap-2 rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50 disabled:opacity-50"
-                // 紺色の実行中バッジは出さない（中立スタイル）
               >
                 <Play className="h-4 w-4" />
                 {anyRunning || loading ? "実行中…" : "ワークフローを実行"}
@@ -328,7 +340,6 @@ export default function ManualFetch() {
             </div>
           </div>
 
-          {/* グリッドでフローチャート風に（横8列・小画面は縦積み） */}
           <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
             {FLOW_TITLES.map((title, idx) => (
               <FlowNode
@@ -341,11 +352,11 @@ export default function ManualFetch() {
           </div>
         </section>
 
-        {/* 直近追加（逐次レンダリング） */}
+        {/* 逐次レンダリングテーブル */}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden">
           <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 bg-neutral-50">
             <div className="text-sm font-medium text-neutral-800">
-              今回追加（1日表示・新しい順）
+              今回追加（新しい順）
             </div>
             <div className="flex items-center gap-2">
               <button
@@ -441,7 +452,6 @@ export default function ManualFetch() {
         )}
       </main>
 
-      {/* 件数モーダル（中立トーン。紺バッジなし） */}
       {countModalOpen && (
         <CountModal
           defaultValue={fetchTotal}
@@ -456,7 +466,6 @@ export default function ManualFetch() {
   );
 }
 
-/** ====== Flow Node ====== */
 function FlowNode({
   title,
   state,
@@ -485,7 +494,6 @@ function FlowNode({
         {icon}
         <div className="text-sm font-medium text-neutral-800">{title}</div>
       </div>
-      {/* 簡易フローチャートの矢印（小画面では非表示） */}
       <div
         className="hidden md:block absolute -right-3 top-1/2 h-[2px] w-6 bg-neutral-200"
         aria-hidden
@@ -498,7 +506,6 @@ function FlowNode({
   );
 }
 
-/** ====== Modal ====== */
 function CountModal({
   defaultValue,
   onCloseAction,
@@ -569,7 +576,7 @@ function CountModal({
   );
 }
 
-/** ====== helpers ====== */
+/** ===== helpers ===== */
 function delay(ms: number) {
   return new Promise((res) => setTimeout(res, ms));
 }
@@ -582,94 +589,30 @@ async function safeJson(res: Response) {
   }
 }
 
-/** ステップ状態の更新 */
-function setStepIndex<T>(arr: T[], idx: number, val: T): T[] {
-  return arr.map((v, i) => (i === idx ? val : v));
-}
-
-function setStep(idx: number, state: StepState) {
-  // Hook の外で直接は触れないので、各呼び出し側で setS を閉じ込めるより、
-  // ここではダミー定義にしておき、実際の更新は animateFlow() 内で行う。
-}
-
-/** 実際に UI を動かす小アニメーション（API 待ちの間に 1→6 を順次アクティブ表示） */
-function animateFlow() {
+/** API待機中に 1→6 を順に running→done で進める簡易アニメーション */
+function animateSteps(
+  setS: React.Dispatch<React.SetStateAction<StepState[]>>,
+  setActiveIdx: React.Dispatch<React.SetStateAction<number>>
+) {
   let stopped = false;
-
-  // setState にアクセスするため、クロージャで React スコープを取得
-  const win = window as any;
-  if (!win.__flow_hooks) {
-    // 登録: 実体は下の useEffect 相当の匿名関数で毎レンダー更新
-  }
-  const getHooks = () =>
-    (window as any).__flow_hooks as
-      | {
-          setS: React.Dispatch<React.SetStateAction<StepState[]>>;
-          setActiveIdx: React.Dispatch<React.SetStateAction<number>>;
-        }
-      | undefined;
-
-  const step = async () => {
-    const hooks = getHooks();
-    if (!hooks) return;
-    const { setS, setActiveIdx } = hooks;
-
-    // 1〜6を順送り（最後の7は保存でAPI結果後に更新）
-    for (let i = 1; i <= 6 && !stopped; i++) {
-      setActiveIdx(i);
-      setS((arr) => setStepIndex(arr, i, "running"));
-      await new Promise((r) => setTimeout(r, 250));
+  (async () => {
+    for (let i = 1; i <= 6; i++) {
       if (stopped) break;
-      setS((arr) => setStepIndex(arr, i, "done"));
+      setActiveIdx(i);
+      setS((a) =>
+        a.map((v, idx) =>
+          idx === i ? "running" : idx < i && v === "idle" ? "done" : v
+        )
+      );
+      await delay(220);
+      if (stopped) break;
+      setS((a) => a.map((v, idx) => (idx === i ? "done" : v)));
     }
-  };
-
-  step();
-
+  })();
   return {
     stop: () => {
       stopped = true;
-      const hooks = getHooks();
-      if (!hooks) return;
-      hooks.setActiveIdx(-1);
+      setActiveIdx(-1);
     },
   };
 }
-
-/** Flow の状態フックを window 経由でアニメーターに渡す（安全な弱結合） */
-(function registerFlowHooks() {
-  if (typeof window === "undefined") return;
-  const win = window as any;
-  Object.defineProperty(win, "__flow_hooks_registrar", {
-    configurable: false,
-    enumerable: false,
-    writable: false,
-    value: (hooks: {
-      setS: React.Dispatch<React.SetStateAction<StepState[]>>;
-      setActiveIdx: React.Dispatch<React.SetStateAction<number>>;
-    }) => {
-      (window as any).__flow_hooks = hooks;
-    },
-  });
-})();
-
-// 各レンダーで最新の setState をレジストリに供給
-(function keepFlowHooksFresh() {
-  if (typeof window === "undefined") return;
-  // React コンポーネント内で最新の setS と setActiveIdx を登録するためのカスタムフック風処理
-  const _orig = (React as any).useEffect;
-  (React as any).useEffect = (...args: any[]) => {
-    const res = _orig.apply(React, args as any);
-    return res;
-  };
-})();
-
-// マウント時に現在の setS と setActiveIdx を window に登録
-(function hookInstaller() {
-  // eslint-disable-next-line react-hooks/rules-of-hooks
-  const origCreateElement = React.createElement;
-  (React as any).createElement = function (...args: any[]) {
-    const el = origCreateElement.apply(React, args as any);
-    return el;
-  };
-})();

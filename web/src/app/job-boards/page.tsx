@@ -355,41 +355,88 @@ export default function JobBoardsPage() {
     <>
       <AppHeader showBack />
       <main className="mx-auto max-w-6xl p-6">
-        {/* タイトル＋ナビ */}
-        <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-          <div>
-            <h1 className="text-[26px] md:text-[24px] font-extrabold tracking-tight text-indigo-900">
-              転職サイトリサーチ
-            </h1>
-            <p className="mt-1 text-sm text-neutral-500">
-              サイト別の求人数／求職者数のトレンド（週次・月次）
-            </p>
-          </div>
-          <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
-            <Link
-              href="/job-boards/settings"
-              className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
-            >
-              通知設定
-            </Link>
-            <Link
-              href="/job-boards/destinations"
-              className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
-            >
-              送り先一覧
-            </Link>
-            <Link
-              href="/job-boards/runs"
-              className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
-            >
-              実行状況
-            </Link>
-            <Link
-              href="/job-boards/manual"
-              className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
-            >
-              手動実行
-            </Link>
+        {/* タイトル */}
+        <div className="mb-4">
+          <h1 className="text-[26px] md:text-[24px] font-extrabold tracking-tight text-indigo-900">
+            転職サイトリサーチ
+          </h1>
+          <p className="mt-1 text-sm text-neutral-500">
+            サイト別の求人数／求職者数のトレンド（週次・月次）
+          </p>
+        </div>
+
+        {/* 機能メニュー（フォーム営業トップ風） */}
+        <header className="mb-3">
+          <h2 className="text-2xl md:text-[24px] font-semibold text-neutral-900">
+            機能メニュー
+          </h2>
+        </header>
+        <div className="mb-6 rounded-2xl border border-neutral-200 p-5">
+          <div className="grid grid-cols-1 gap-7 md:grid-cols-3">
+            {/* 実行 */}
+            <section>
+              <h3 className="mb-2 text-lg font-semibold tracking-tight text-neutral-900 sm:text-xl">
+                実行
+              </h3>
+              <ul className="mt-1.5 space-y-1.5">
+                <li>
+                  <Link
+                    href="/job-boards/manual"
+                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
+                  >
+                    手動実行（件数取得）
+                  </Link>
+                </li>
+                <li>
+                  <Link
+                    href="/job-boards/runs"
+                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
+                  >
+                    実行状況
+                  </Link>
+                </li>
+              </ul>
+            </section>
+            {/* リスト/宛先 */}
+            <section>
+              <h3 className="mb-2 text-lg font-semibold tracking-tight text-neutral-900 sm:text-xl">
+                リスト
+              </h3>
+              <ul className="mt-1.5 space-y-1.5">
+                <li>
+                  <Link
+                    href="/job-boards/destinations"
+                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
+                  >
+                    送り先一覧
+                  </Link>
+                </li>
+              </ul>
+            </section>
+            {/* 設定 */}
+            <section>
+              <h3 className="mb-2 text-lg font-semibold tracking-tight text-neutral-900 sm:text-xl">
+                設定
+              </h3>
+              <ul className="mt-1.5 space-y-1.5">
+                <li>
+                  <Link
+                    href="/job-boards/settings"
+                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
+                  >
+                    通知設定
+                  </Link>
+                </li>
+                <li>
+                  <Link
+                    href="/job-boards/logins"
+                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
+                  >
+                    ログイン情報の登録
+                  </Link>
+                </li>
+              </ul>
+            </section>
           </div>
         </div>
 
