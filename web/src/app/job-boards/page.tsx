@@ -58,12 +58,12 @@ const SITE_OPTIONS: { value: string; label: string }[] = [
   { value: "womantype", label: "女の転職type" },
 ];
 
-// ✅ サイトごとの固定カラー
+// サイトごとの固定カラー
 const SITE_COLOR: Record<string, string> = {
-  doda: "#3B82F6", // blue-500
-  mynavi: "#10B981", // emerald-500
-  type: "#F59E0B", // amber-500
-  womantype: "#8B5CF6", // violet-500
+  doda: "#3B82F6",
+  mynavi: "#10B981",
+  type: "#F59E0B",
+  womantype: "#8B5CF6",
 };
 
 type ApiRow = {
@@ -75,6 +75,7 @@ type ApiRow = {
   age_band: string | null;
   employment_type: string | null;
   salary_band: string | null;
+  prefecture?: string | null;
   jobs_count: number | null;
   candidates_count: number | null;
 };
@@ -87,10 +88,9 @@ function labelOfMode(mode: Mode) {
 function allLabel(count: number, total: number) {
   return count === total ? `${total}(ALL)` : String(count);
 }
-const parseISO = (s?: string | null) => (s ? new Date(s) : null);
 
 export default function JobBoardsPage() {
-  // ===== グラフ側フィルタ（表とは独立） =====
+  // ===== グラフ側フィルタ =====
   const [modeChart, setModeChart] = useState<Mode>("weekly");
   const [rangeChart, setRangeChart] = useState<RangeW | RangeM>("26w");
   const [metricChart, setMetricChart] = useState<Metric>("jobs");
@@ -102,9 +102,10 @@ export default function JobBoardsPage() {
   const [ageChart, setAgeChart] = useState<string[]>([]);
   const [empChart, setEmpChart] = useState<string[]>([]);
   const [salChart, setSalChart] = useState<string[]>([]);
+  const [prefChart, setPrefChart] = useState<string[]>([]);
   const [showChartFilters, setShowChartFilters] = useState(true);
 
-  // ===== 表側フィルタ（独立） =====
+  // ===== 表側フィルタ =====
   const [modeTable, setModeTable] = useState<Mode>("weekly");
   const [rangeTable, setRangeTable] = useState<RangeW | RangeM>("26w");
   const [metricTable, setMetricTable] = useState<Metric>("jobs");
@@ -116,9 +117,10 @@ export default function JobBoardsPage() {
   const [ageTable, setAgeTable] = useState<string[]>([]);
   const [empTable, setEmpTable] = useState<string[]>([]);
   const [salTable, setSalTable] = useState<string[]>([]);
+  const [prefTable, setPrefTable] = useState<string[]>([]);
   const [showTableFilters, setShowTableFilters] = useState(true);
 
-  // ✅ 表だけの「任意期間」フィルタ（From/To）
+  // 任意期間（表のみ）
   const [tableFrom, setTableFrom] = useState<string>("");
   const [tableTo, setTableTo] = useState<string>("");
 
@@ -128,7 +130,7 @@ export default function JobBoardsPage() {
   const [msgChart, setMsgChart] = useState("");
   const [msgTable, setMsgTable] = useState("");
 
-  // API フェッチ（グラフ）
+  // API: グラフ
   useEffect(() => {
     (async () => {
       try {
@@ -144,6 +146,7 @@ export default function JobBoardsPage() {
             age: ageChart,
             emp: empChart,
             sal: salChart,
+            pref: prefChart, // ★ 追加
             range: rangeChart,
           }),
         });
@@ -166,9 +169,10 @@ export default function JobBoardsPage() {
     ageChart.join(","),
     empChart.join(","),
     salChart.join(","),
+    prefChart.join(","), // ★ 追加
   ]);
 
-  // API フェッチ（表）
+  // API: 表
   useEffect(() => {
     (async () => {
       try {
@@ -184,6 +188,7 @@ export default function JobBoardsPage() {
             age: ageTable,
             emp: empTable,
             sal: salTable,
+            pref: prefTable, // ★ 追加
             range: rangeTable,
           }),
         });
@@ -206,9 +211,10 @@ export default function JobBoardsPage() {
     ageTable.join(","),
     empTable.join(","),
     salTable.join(","),
+    prefTable.join(","), // ★ 追加
   ]);
 
-  // 折れ線グラフ用シリーズ
+  // 折れ線グラフシリーズ
   const dateKeyChart = modeChart === "weekly" ? "week_start" : "month_start";
   const seriesChart: SeriesPoint[] = useMemo(() => {
     const byDate: Record<string, Record<string, number>> = {};
@@ -236,18 +242,21 @@ export default function JobBoardsPage() {
   const tableAgg = useMemo(() => {
     const metricKey =
       metricTable === "jobs" ? "jobs_count" : "candidates_count";
-
     const fromD = tableFrom ? new Date(tableFrom) : null;
     const toD = tableTo ? new Date(tableTo) : null;
 
     const bySite: Record<string, number> = {};
     for (const r of rowsTable) {
-      // 期間フィルタ（任意）
       const dStr = (r as any)[dateKeyTable] as string | null | undefined;
       if (dStr) {
         const d = new Date(dStr);
         if (fromD && d < fromD) continue;
         if (toD && d > toD) continue;
+      }
+      // 都道府県フィルタ（表側）
+      if (prefTable.length) {
+        const p = (r.prefecture || "").trim();
+        if (!p || !prefTable.includes(p)) continue;
       }
       const key = r.site_key;
       const val = Number((r as any)[metricKey] ?? 0);
@@ -260,9 +269,17 @@ export default function JobBoardsPage() {
         total: bySite[s.value] ?? 0,
       }))
       .sort((a, b) => b.total - a.total);
-  }, [rowsTable, metricTable, sitesTable, tableFrom, tableTo, dateKeyTable]);
+  }, [
+    rowsTable,
+    metricTable,
+    sitesTable,
+    tableFrom,
+    tableTo,
+    dateKeyTable,
+    prefTable,
+  ]);
 
-  // 職種モーダル制御
+  // モーダル制御
   const [openChartCat, setOpenChartCat] = useState(false);
   const [openTableCat, setOpenTableCat] = useState(false);
 
@@ -322,33 +339,55 @@ export default function JobBoardsPage() {
     );
   }
 
-  // マスタ
-  const AGE_BANDS = [
-    "20歳以下",
-    "25歳以下",
-    "30歳以下",
-    "35歳以下",
-    "40歳以下",
-    "45歳以下",
-    "50歳以下",
-    "55歳以下",
-    "60歳以下",
-    "65歳以下",
-  ];
-  const EMP_TYPES = [
-    "正社員",
-    "契約社員",
-    "派遣社員",
-    "アルバイト",
-    "業務委託",
-  ];
-  const SALARY_BAND = [
-    "~300万",
-    "300~400万",
-    "400~500万",
-    "500~600万",
-    "600~800万",
-    "800万~",
+  // 都道府県
+  const PREFS = [
+    "北海道",
+    "青森県",
+    "岩手県",
+    "宮城県",
+    "秋田県",
+    "山形県",
+    "福島県",
+    "茨城県",
+    "栃木県",
+    "群馬県",
+    "埼玉県",
+    "千葉県",
+    "東京都",
+    "神奈川県",
+    "新潟県",
+    "富山県",
+    "石川県",
+    "福井県",
+    "山梨県",
+    "長野県",
+    "岐阜県",
+    "静岡県",
+    "愛知県",
+    "三重県",
+    "滋賀県",
+    "京都府",
+    "大阪府",
+    "兵庫県",
+    "奈良県",
+    "和歌山県",
+    "鳥取県",
+    "島根県",
+    "岡山県",
+    "広島県",
+    "山口県",
+    "徳島県",
+    "香川県",
+    "愛媛県",
+    "高知県",
+    "福岡県",
+    "佐賀県",
+    "長崎県",
+    "熊本県",
+    "大分県",
+    "宮崎県",
+    "鹿児島県",
+    "沖縄県",
   ];
 
   return (
@@ -440,7 +479,7 @@ export default function JobBoardsPage() {
           </div>
         </div>
 
-        {/* ====== KPI＋折れ線グラフ（ひとまとめ）====== */}
+        {/* ====== KPI＋折れ線グラフ ====== */}
         <section className="rounded-2xl border border-neutral-200 p-4">
           {/* KPI */}
           <div className="grid grid-cols-2 gap-4 md:grid-cols-4 mb-3">
@@ -459,7 +498,7 @@ export default function JobBoardsPage() {
             <KpiCard label="ビュー" value={labelOfMode(modeChart)} />
           </div>
 
-          {/* フィルタのトグル */}
+          {/* トグル */}
           <div className="mb-2">
             <button
               className="text-xs rounded-lg border border-neutral-300 px-2 py-1 hover:bg-neutral-50"
@@ -539,7 +578,7 @@ export default function JobBoardsPage() {
                 </div>
               </div>
 
-              {/* 職種（モーダル起動） */}
+              {/* 職種モーダル */}
               <div className="mb-2">
                 <div className="mb-1 text-xs font-medium text-neutral-600">
                   職種
@@ -553,7 +592,7 @@ export default function JobBoardsPage() {
                 </button>
               </div>
 
-              {/* 年齢層 / 雇用形態 / 年収帯 */}
+              {/* 年齢/雇用/年収 */}
               <div className="mb-2">
                 <div className="mb-1 text-xs font-medium text-neutral-600">
                   年齢層
@@ -561,7 +600,18 @@ export default function JobBoardsPage() {
                 <TagMulti
                   values={ageChart}
                   setValues={setAgeChart}
-                  options={AGE_BANDS}
+                  options={[
+                    "20歳以下",
+                    "25歳以下",
+                    "30歳以下",
+                    "35歳以下",
+                    "40歳以下",
+                    "45歳以下",
+                    "50歳以下",
+                    "55歳以下",
+                    "60歳以下",
+                    "65歳以下",
+                  ]}
                 />
               </div>
               <div className="mb-2">
@@ -571,23 +621,48 @@ export default function JobBoardsPage() {
                 <TagMulti
                   values={empChart}
                   setValues={setEmpChart}
-                  options={EMP_TYPES}
+                  options={[
+                    "正社員",
+                    "契約社員",
+                    "派遣社員",
+                    "アルバイト",
+                    "業務委託",
+                  ]}
                 />
               </div>
-              <div>
+              <div className="mb-2">
                 <div className="mb-1 text-xs font-medium text-neutral-600">
                   年収帯
                 </div>
                 <TagMulti
                   values={salChart}
                   setValues={setSalChart}
-                  options={SALARY_BAND}
+                  options={[
+                    "~300万",
+                    "300~400万",
+                    "400~500万",
+                    "500~600万",
+                    "600~800万",
+                    "800万~",
+                  ]}
+                />
+              </div>
+
+              {/* 都道府県（★追加） */}
+              <div>
+                <div className="mb-1 text-xs font-medium text-neutral-600">
+                  都道府県
+                </div>
+                <TagMulti
+                  values={prefChart}
+                  setValues={setPrefChart}
+                  options={PREFS}
                 />
               </div>
             </div>
           )}
 
-          {/* 折れ線グラフ */}
+          {/* グラフ */}
           <div className="h-64 mt-3">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={seriesChart}>
@@ -604,7 +679,7 @@ export default function JobBoardsPage() {
                       dataKey={s.value}
                       dot={false}
                       strokeWidth={2}
-                      stroke={SITE_COLOR[s.value] || "#64748B" /* slate-500 */}
+                      stroke={SITE_COLOR[s.value] || "#64748B"}
                       connectNulls
                     />
                   )
@@ -621,7 +696,7 @@ export default function JobBoardsPage() {
 
         {/* ====== サイト別合計（表） ====== */}
         <section className="mt-6 rounded-2xl border border-neutral-200 p-4">
-          {/* 表用 KPI（表の選択状態を反映） */}
+          {/* KPI */}
           <div className="grid grid-cols-2 gap-4 md:grid-cols-4 mb-3">
             <KpiCard
               label="対象サイト（表）"
@@ -638,7 +713,7 @@ export default function JobBoardsPage() {
             <KpiCard label="ビュー（表）" value={labelOfMode(modeTable)} />
           </div>
 
-          {/* フィルタのトグル */}
+          {/* トグル＋任意期間＋都道府県（追加） */}
           <div className="mb-2 flex flex-wrap items-center gap-2">
             <button
               className="text-xs rounded-lg border border-neutral-300 px-2 py-1 hover:bg-neutral-50"
@@ -647,7 +722,7 @@ export default function JobBoardsPage() {
               {showTableFilters ? "フィルタを隠す" : "フィルタを表示"}
             </button>
 
-            {/* ✅ 任意期間（From/To） */}
+            {/* 任意期間 */}
             <div className="flex items-center gap-2 text-xs">
               <span className="text-neutral-600">期間:</span>
               <input
@@ -672,6 +747,35 @@ export default function JobBoardsPage() {
                   }}
                 >
                   クリア
+                </button>
+              ) : null}
+            </div>
+
+            {/* 都道府県（表側） */}
+            <div className="flex items-center gap-2 text-xs">
+              <span className="text-neutral-600">都道府県:</span>
+              <select
+                multiple
+                value={prefTable}
+                onChange={(e) =>
+                  setPrefTable(
+                    Array.from(e.target.selectedOptions).map((o) => o.value)
+                  )
+                }
+                className="rounded-md border border-neutral-300 px-2 py-1"
+              >
+                {PREFS.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </select>
+              {prefTable.length ? (
+                <button
+                  className="rounded-md border border-neutral-300 px-2 py-1"
+                  onClick={() => setPrefTable([])}
+                >
+                  解除
                 </button>
               ) : null}
             </div>
@@ -762,7 +866,7 @@ export default function JobBoardsPage() {
                   </button>
                 </div>
 
-                {/* 年齢層など */}
+                {/* 年齢層・雇用・年収 */}
                 <div className="mb-2">
                   <div className="mb-1 text-xs font-medium text-neutral-600">
                     年齢層
@@ -770,7 +874,18 @@ export default function JobBoardsPage() {
                   <TagMulti
                     values={ageTable}
                     setValues={setAgeTable}
-                    options={AGE_BANDS}
+                    options={[
+                      "20歳以下",
+                      "25歳以下",
+                      "30歳以下",
+                      "35歳以下",
+                      "40歳以下",
+                      "45歳以下",
+                      "50歳以下",
+                      "55歳以下",
+                      "60歳以下",
+                      "65歳以下",
+                    ]}
                   />
                 </div>
                 <div className="mb-2">
@@ -780,7 +895,13 @@ export default function JobBoardsPage() {
                   <TagMulti
                     values={empTable}
                     setValues={setEmpTable}
-                    options={EMP_TYPES}
+                    options={[
+                      "正社員",
+                      "契約社員",
+                      "派遣社員",
+                      "アルバイト",
+                      "業務委託",
+                    ]}
                   />
                 </div>
                 <div>
@@ -790,7 +911,26 @@ export default function JobBoardsPage() {
                   <TagMulti
                     values={salTable}
                     setValues={setSalTable}
-                    options={SALARY_BAND}
+                    options={[
+                      "~300万",
+                      "300~400万",
+                      "400~500万",
+                      "500~600万",
+                      "600~800万",
+                      "800万~",
+                    ]}
+                  />
+                </div>
+
+                {/* 都道府県 */}
+                <div className="mt-2">
+                  <div className="mb-1 text-xs font-medium text-neutral-600">
+                    都道府県
+                  </div>
+                  <TagMulti
+                    values={prefTable}
+                    setValues={setPrefTable}
+                    options={PREFS}
                   />
                 </div>
               </div>
