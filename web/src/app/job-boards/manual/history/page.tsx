@@ -4,6 +4,18 @@
 import React, { useEffect, useState } from "react";
 import AppHeader from "@/components/AppHeader";
 
+/** Cookie から tenant_id を読む */
+function getTenantIdFromCookie(): string | null {
+  try {
+    const m = document.cookie.match(
+      /(?:^|;\s*)(x-tenant-id|tenant_id)=([^;]+)/i
+    );
+    return m ? decodeURIComponent(m[2]) : null;
+  } catch {
+    return null;
+  }
+}
+
 type Row = {
   id: string;
   created_at: string;
@@ -19,8 +31,13 @@ export default function ManualHistoryPage() {
   useEffect(() => {
     (async () => {
       try {
+        const tenant = getTenantIdFromCookie();
+        const headers: Record<string, string> = {};
+        if (tenant) headers["x-tenant-id"] = tenant;
+
         const r = await fetch("/api/job-boards/manual/history?limit=50", {
           cache: "no-store",
+          headers,
         });
         const j = await r.json();
         if (!r.ok || !j?.ok) throw new Error(j?.error || "fetch failed");

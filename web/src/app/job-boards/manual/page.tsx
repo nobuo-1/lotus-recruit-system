@@ -12,6 +12,18 @@ const JobCategoryModal = dynamic(
   { ssr: false }
 );
 
+/** =========== 共通: Cookieから tenant_id を読む =========== */
+function getTenantIdFromCookie(): string | null {
+  try {
+    const m = document.cookie.match(
+      /(?:^|;\s*)(x-tenant-id|tenant_id)=([^;]+)/i
+    );
+    return m ? decodeURIComponent(m[2]) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** =========================
  * 都道府県モーダル（共通）
  * ========================= */
@@ -350,9 +362,15 @@ export default function JobBoardsManualPage() {
     setMsg("");
     setRows([]);
     try {
+      const tenant = getTenantIdFromCookie(); // ← ヘッダー送信（なくてもAPI側でfallback）
+      const headers: Record<string, string> = {
+        "content-type": "application/json",
+      };
+      if (tenant) headers["x-tenant-id"] = tenant;
+
       const resp = await fetch("/api/job-boards/manual/run-batch", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers,
         body: JSON.stringify({
           sites,
           large,
@@ -361,14 +379,16 @@ export default function JobBoardsManualPage() {
           emp: emps,
           sal: sals,
           pref: prefs,
-          // 手動実行は job_board_counts へ保存せず、履歴テーブルへのみ保存
-          persist_to_counts: false,
+          want: 200,
+          saveMode: "history", // ← 履歴として保存
         }),
       });
       const j = await resp.json();
-      if (!resp.ok) throw new Error(j?.error || "run failed");
-      setRows((j?.added_items as ManualFetchRow[]) ?? []);
-      setMsg(j?.note || "");
+      if (!resp.ok || !j?.ok) throw new Error(j?.error || "run failed");
+
+      // ← プレビュー（サーバで履歴保存済み）
+      setRows((j?.preview as ManualFetchRow[]) ?? []);
+      setMsg(j?.note || (j?.history_id ? `履歴ID: ${j.history_id}` : ""));
     } catch (e: any) {
       setMsg(String(e?.message || e));
     } finally {
@@ -390,7 +410,7 @@ export default function JobBoardsManualPage() {
             </p>
           </div>
           <Link
-            href="/job-boards/history"
+            href="/job-boards/manual/history" // ← パス修正
             className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
           >
             手動実行履歴へ

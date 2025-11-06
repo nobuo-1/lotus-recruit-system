@@ -19,7 +19,8 @@ type RunBody = {
   sal?: string[];
   pref?: string[];
   want?: number;
-  saveMode?: "counts" | "history"; // ★ 履歴モード対応
+  saveMode?: "counts" | "history";
+  tenant_id?: string; // ← フォールバック用
 };
 
 type PreviewRow = {
@@ -36,7 +37,20 @@ type PreviewRow = {
   candidates_count: number | null;
 };
 
-/** 任意のサイトへ問い合わせて件数を返すためのスタブ（ここを既存実装に差し替え） */
+/** リクエストから tenant_id を解決（Header → Cookie → Body → "public"） */
+function resolveTenantId(req: Request, body?: any): string {
+  const h = req.headers.get("x-tenant-id");
+  if (h && h.trim()) return h.trim();
+
+  const cookie = req.headers.get("cookie") || "";
+  const m = cookie.match(/(?:^|;\s*)(x-tenant-id|tenant_id)=([^;]+)/i);
+  if (m) return decodeURIComponent(m[2]);
+
+  if (body?.tenant_id) return String(body.tenant_id);
+  return "public";
+}
+
+/** 任意のサイトへ問い合わせて件数を返すためのスタブ（実実装に差し替えポイント） */
 async function collectCountsForSite(args: {
   site: SiteKey;
   internal_large: string | null;
@@ -51,8 +65,7 @@ async function collectCountsForSite(args: {
     "site_key" | "site_category_code" | "site_category_label"
   > & { site_category_code: string | null; site_category_label: string | null }
 > {
-  // TODO: ここで実サイトの件数取得を行う
-  // 返り値は undefined を含めず、string|null / number|null を厳格に返す
+  // TODO: 実サイトの件数取得。null を許容し、undefined は返さないこと。
   return {
     site_category_code: null,
     site_category_label: null,
@@ -86,14 +99,10 @@ export async function POST(req: Request) {
         { status: 500 }
       );
     }
-    const tenantId = req.headers.get("x-tenant-id") || "";
-    if (!tenantId)
-      return NextResponse.json(
-        { ok: false, error: "x-tenant-id required" },
-        { status: 400 }
-      );
 
-    const body: RunBody = await req.json().catch(() => ({} as RunBody));
+    const body: RunBody = (await req.json().catch(() => ({}))) as RunBody;
+    const tenantId = resolveTenantId(req, body);
+
     const saveMode: "counts" | "history" =
       body?.saveMode === "history" ? "history" : "counts";
 
@@ -111,7 +120,7 @@ export async function POST(req: Request) {
 
     const want = Math.max(1, Math.min(500, Number(body?.want) || 50));
 
-    // 組み合わせ生成（空配列は「未指定＝null」を1つの値として扱う）
+    // 組み合わせ生成（空配列は「未指定＝null」扱い）
     const L = large.length ? large : [null];
     const S = small.length ? small : [null];
     const A = age.length ? age : [null];
@@ -120,7 +129,6 @@ export async function POST(req: Request) {
     const P = pref.length ? pref : [null];
 
     const combos = cartesian<string | null>([L, S, A, E, Sa, P]);
-    // want で上限
     const MAX_PER_SITE = Math.max(1, Math.floor(want / sites.length) || 1);
 
     const preview: PreviewRow[] = [];
@@ -164,8 +172,10 @@ export async function POST(req: Request) {
     const result_id = crypto.randomUUID();
 
     let saved = 0;
+    let history_id: string | null = null;
+
     if (saveMode === "counts") {
-      // job_board_counts にバルク保存（1000件チャンク）
+      // job_board_counts へ保存
       const rows = preview.map((r) => ({
         result_id,
         site_key: r.site_key,
@@ -194,17 +204,47 @@ export async function POST(req: Request) {
         }
         saved += data?.length ?? chunk.length;
       }
+    } else {
+      // 履歴として保存（job_board_manual_runs）
+      const { data, error } = await admin
+        .from("job_board_manual_runs")
+        .insert({
+          tenant_id: tenantId,
+          params: {
+            sites,
+            large,
+            small,
+            age,
+            emp,
+            sal,
+            pref,
+            want,
+          },
+          results: preview,
+          result_count: preview.length,
+        })
+        .select("id")
+        .single();
+      if (error) {
+        return NextResponse.json(
+          { ok: false, error: error.message },
+          { status: 500 }
+        );
+      }
+      history_id = data?.id ?? null;
     }
 
     return NextResponse.json({
       ok: true,
+      tenant_id: tenantId,
       result_id,
       saved: saveMode === "counts" ? saved : 0,
+      history_id,
       preview,
       note:
         saveMode === "counts"
           ? `保存完了 (${saved} 件)`
-          : "プレビューのみ（保存は履歴APIを使用）",
+          : `履歴として保存しました（${preview.length} 件）`,
     });
   } catch (e: any) {
     return NextResponse.json(

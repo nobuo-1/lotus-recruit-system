@@ -20,15 +20,27 @@ type PreviewRow = {
   candidates_count: number | null;
 };
 
+function resolveTenantId(req: Request, body?: any): string {
+  const h = req.headers.get("x-tenant-id");
+  if (h && h.trim()) return h.trim();
+
+  const cookie = req.headers.get("cookie") || "";
+  const m = cookie.match(/(?:^|;\s*)(x-tenant-id|tenant_id)=([^;]+)/i);
+  if (m) return decodeURIComponent(m[2]);
+
+  if (body?.tenant_id) return String(body.tenant_id);
+  return "public";
+}
+
 export async function GET(req: Request) {
   try {
     const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-    const tenantId = req.headers.get("x-tenant-id") || "";
     const url = new URL(req.url);
     const limit = Math.min(
       100,
       Math.max(1, Number(url.searchParams.get("limit")) || 20)
     );
+    const tenantId = resolveTenantId(req);
     const { data, error } = await admin
       .from("job_board_manual_runs")
       .select("id, created_at, tenant_id, params, result_count")
@@ -47,20 +59,15 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    const tenantId = req.headers.get("x-tenant-id") || "";
-    if (!tenantId)
-      return NextResponse.json(
-        { ok: false, error: "x-tenant-id required" },
-        { status: 400 }
-      );
-
     const body = await req.json().catch(() => ({}));
+    const tenantId = resolveTenantId(req, body);
+
     const params = body?.params ?? {};
     const results: PreviewRow[] = Array.isArray(body?.results)
       ? body.results
       : [];
-    const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+    const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
     const { data, error } = await admin
       .from("job_board_manual_runs")
       .insert({
@@ -69,10 +76,10 @@ export async function POST(req: Request) {
         results, // jsonb
         result_count: results.length,
       })
-      .select("id");
-
+      .select("id")
+      .single();
     if (error) throw error;
-    return NextResponse.json({ ok: true, id: data?.[0]?.id || null });
+    return NextResponse.json({ ok: true, id: data?.id || null });
   } catch (e: any) {
     return NextResponse.json(
       { ok: false, error: String(e?.message || e) },
