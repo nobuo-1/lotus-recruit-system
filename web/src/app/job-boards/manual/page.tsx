@@ -5,21 +5,13 @@ import React, { useEffect, useMemo, useState } from "react";
 import AppHeader from "@/components/AppHeader";
 import Link from "next/link";
 import dynamic from "next/dynamic";
+import { supabase } from "@/lib/supabaseClient";
 
-// 職種モーダル（合成キー対応版）
+// 職種モーダル（修正版）
 const JobCategoryModal = dynamic(
   () => import("@/components/job-boards/JobCategoryModal"),
   { ssr: false }
 );
-
-// ====== 小分類の合成キー変換ヘルパ ======
-const SEP = ":::";
-const decodeSmallKeysToNames = (keys: string[]) =>
-  Array.from(
-    new Set(
-      keys.map((k) => (k.includes(SEP) ? k.split(SEP)[1] : k)) // 後方互換
-    )
-  );
 
 /** =========================
  * 都道府県モーダル（共通）
@@ -282,8 +274,8 @@ type ManualFetchRow = {
   candidates_count: number | null;
 };
 
-/** ===== UUID ユーティリティ（x-tenant-id対策） ===== */
-function isValidUuid(v: string | null): v is string {
+/** ===== UUID / Tenant ユーティリティ ===== */
+function isValidUuid(v: string | null | undefined): v is string {
   if (!v) return false;
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
     v
@@ -299,13 +291,66 @@ function getTenantIdFromCookie(): string | null {
     return null;
   }
 }
+function setTenantCookies(id: string) {
+  try {
+    const secure =
+      typeof location !== "undefined" && location.protocol === "https:";
+    const base = `Path=/; Max-Age=${60 * 60 * 24 * 30}; SameSite=Lax;${
+      secure ? " Secure;" : ""
+    }`;
+    document.cookie = `x-tenant-id=${encodeURIComponent(id)}; ${base}`;
+    document.cookie = `tenant_id=${encodeURIComponent(id)}; ${base}`;
+  } catch {
+    /* noop */
+  }
+}
+
+/** Supabase セッションから tenant_id を引く（profiles.id = auth.uid() 想定） */
+async function resolveTenantIdViaSupabase(): Promise<string | null> {
+  try {
+    const { data: userData } = await supabase.auth.getUser();
+    const user = userData?.user;
+    if (!user?.id) return null;
+
+    // ★ ここが今回の修正ポイント：
+    // Supabase の戻り値に明示的な型を与えて 'never' 推論を防ぐ
+    type ProfileRow = { tenant_id: string | null };
+
+    const resp = await supabase
+      .from("profiles")
+      .select("tenant_id")
+      .eq("id", user.id)
+      .single();
+
+    // resp.data を安全にキャストして取り出す
+    const row = (resp.data as ProfileRow | null) ?? null;
+    if (!row) return null;
+
+    const tid = row.tenant_id;
+    if (isValidUuid(tid)) {
+      setTenantCookies(tid);
+      return tid;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Cookie → Supabase の順で解決し、見つかれば Cookie を整える */
+async function ensureTenantId(): Promise<string | null> {
+  const cookieTid = getTenantIdFromCookie();
+  if (isValidUuid(cookieTid)) return cookieTid;
+  const supaTid = await resolveTenantIdViaSupabase();
+  return isValidUuid(supaTid) ? supaTid : null;
+}
 
 export default function JobBoardsManualPage() {
   const [sites, setSites] = useState<string[]>(
     SITE_OPTIONS.map((s) => s.value)
   );
   const [large, setLarge] = useState<string[]>([]);
-  const [small, setSmall] = useState<string[]>([]); // ★合成キー
+  const [small, setSmall] = useState<string[]>([]);
   const [ages, setAges] = useState<string[]>([]);
   const [emps, setEmps] = useState<string[]>([]);
   const [sals, setSals] = useState<string[]>([]);
@@ -316,6 +361,13 @@ export default function JobBoardsManualPage() {
   const [running, setRunning] = useState(false);
   const [msg, setMsg] = useState("");
   const [rows, setRows] = useState<ManualFetchRow[]>([]);
+
+  // 初回に tenant_id を可能なら Cookie へ整備しておく
+  useEffect(() => {
+    void (async () => {
+      await ensureTenantId();
+    })();
+  }, []);
 
   const Chip: React.FC<{
     active: boolean;
@@ -377,7 +429,8 @@ export default function JobBoardsManualPage() {
     setMsg("");
     setRows([]);
     try {
-      const tenant = getTenantIdFromCookie();
+      // ここで最終的に tenant_id を確定させる
+      const tenant = await ensureTenantId();
       if (!isValidUuid(tenant)) {
         setRunning(false);
         setMsg(
@@ -395,8 +448,7 @@ export default function JobBoardsManualPage() {
         body: JSON.stringify({
           sites,
           large,
-          // ★合成キー → 小分類名へ変換して送る（後方互換）
-          small: decodeSmallKeysToNames(small),
+          small,
           age: ages,
           emp: emps,
           sal: sals,
@@ -425,7 +477,8 @@ export default function JobBoardsManualPage() {
       <main className="mx-auto max-w-6xl p-6">
         <div className="mb-4 flex items-center justify-between">
           <div>
-            <h1 className="text-[26px] md:text-[24px] font-extrabold tracking-tight text-indigo-900">
+            {/* 他ページと同トーン（黒）に統一 */}
+            <h1 className="text-2xl font-semibold text-neutral-900">
               転職サイト 手動実行
             </h1>
             <p className="mt-1 text-sm text-neutral-500">
@@ -474,7 +527,7 @@ export default function JobBoardsManualPage() {
             </div>
           </div>
 
-          {/* 職種（モーダル） */}
+          {/* 職種（同UIモーダル） */}
           <div>
             <div className="mb-1 text-xs font-medium text-neutral-600">
               職種
@@ -488,7 +541,7 @@ export default function JobBoardsManualPage() {
             </button>
           </div>
 
-          {/* 都道府県（モーダル） */}
+          {/* 都道府県（同UIモーダル） */}
           <div>
             <div className="mb-1 text-xs font-medium text-neutral-600">
               都道府県
@@ -626,11 +679,11 @@ export default function JobBoardsManualPage() {
       {openCat && (
         <JobCategoryModal
           large={large}
-          small={small} // ★合成キーのまま渡す
+          small={small}
           onCloseAction={() => setOpenCat(false)}
           onApplyAction={(L, S) => {
             setLarge(L);
-            setSmall(S); // ★合成キー保持
+            setSmall(S);
             setOpenCat(false);
           }}
         />
