@@ -6,11 +6,20 @@ import AppHeader from "@/components/AppHeader";
 import Link from "next/link";
 import dynamic from "next/dynamic";
 
-// 職種モーダル（修正版）
+// 職種モーダル（合成キー対応版）
 const JobCategoryModal = dynamic(
   () => import("@/components/job-boards/JobCategoryModal"),
   { ssr: false }
 );
+
+// ====== 小分類の合成キー変換ヘルパ ======
+const SEP = ":::";
+const decodeSmallKeysToNames = (keys: string[]) =>
+  Array.from(
+    new Set(
+      keys.map((k) => (k.includes(SEP) ? k.split(SEP)[1] : k)) // 後方互換
+    )
+  );
 
 /** =========================
  * 都道府県モーダル（共通）
@@ -296,7 +305,7 @@ export default function JobBoardsManualPage() {
     SITE_OPTIONS.map((s) => s.value)
   );
   const [large, setLarge] = useState<string[]>([]);
-  const [small, setSmall] = useState<string[]>([]);
+  const [small, setSmall] = useState<string[]>([]); // ★合成キー
   const [ages, setAges] = useState<string[]>([]);
   const [emps, setEmps] = useState<string[]>([]);
   const [sals, setSals] = useState<string[]>([]);
@@ -386,7 +395,8 @@ export default function JobBoardsManualPage() {
         body: JSON.stringify({
           sites,
           large,
-          small,
+          // ★合成キー → 小分類名へ変換して送る（後方互換）
+          small: decodeSmallKeysToNames(small),
           age: ages,
           emp: emps,
           sal: sals,
@@ -464,7 +474,7 @@ export default function JobBoardsManualPage() {
             </div>
           </div>
 
-          {/* 職種（同UIモーダル） */}
+          {/* 職種（モーダル） */}
           <div>
             <div className="mb-1 text-xs font-medium text-neutral-600">
               職種
@@ -478,7 +488,7 @@ export default function JobBoardsManualPage() {
             </button>
           </div>
 
-          {/* 都道府県（同UIモーダル） */}
+          {/* 都道府県（モーダル） */}
           <div>
             <div className="mb-1 text-xs font-medium text-neutral-600">
               都道府県
@@ -616,11 +626,11 @@ export default function JobBoardsManualPage() {
       {openCat && (
         <JobCategoryModal
           large={large}
-          small={small}
+          small={small} // ★合成キーのまま渡す
           onCloseAction={() => setOpenCat(false)}
           onApplyAction={(L, S) => {
             setLarge(L);
-            setSmall(S);
+            setSmall(S); // ★合成キー保持
             setOpenCat(false);
           }}
         />

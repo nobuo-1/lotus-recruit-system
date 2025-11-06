@@ -40,11 +40,20 @@ const Legend = dynamic(
   { ssr: false }
 );
 
-// 職種モーダル（バグ修正版）
+// 職種モーダル（合成キー対応版）
 const JobCategoryModal = dynamic(
   () => import("@/components/job-boards/JobCategoryModal"),
   { ssr: false }
 );
+
+// ====== 小分類の合成キー変換ヘルパ ======
+const SEP = ":::";
+const decodeSmallKeysToNames = (keys: string[]) =>
+  Array.from(
+    new Set(
+      keys.map((k) => (k.includes(SEP) ? k.split(SEP)[1] : k)) // 後方互換
+    )
+  );
 
 /** =========================
  * 都道府県モーダル（Filters画面と同UI）
@@ -319,7 +328,7 @@ export default function JobBoardsPage() {
     SITE_OPTIONS.map((s) => s.value)
   );
   const [largeChart, setLargeChart] = useState<string[]>([]);
-  const [smallChart, setSmallChart] = useState<string[]>([]);
+  const [smallChart, setSmallChart] = useState<string[]>([]); // ★合成キー
   const [ageChart, setAgeChart] = useState<string[]>([]);
   const [empChart, setEmpChart] = useState<string[]>([]);
   const [salChart, setSalChart] = useState<string[]>([]);
@@ -336,7 +345,7 @@ export default function JobBoardsPage() {
     SITE_OPTIONS.map((s) => s.value)
   );
   const [largeTable, setLargeTable] = useState<string[]>([]);
-  const [smallTable, setSmallTable] = useState<string[]>([]);
+  const [smallTable, setSmallTable] = useState<string[]>([]); // ★合成キー
   const [ageTable, setAgeTable] = useState<string[]>([]);
   const [empTable, setEmpTable] = useState<string[]>([]);
   const [salTable, setSalTable] = useState<string[]>([]);
@@ -381,7 +390,8 @@ export default function JobBoardsPage() {
             metric: metricChart,
             sites: sitesChart,
             large: largeChart,
-            small: smallChart,
+            // ★合成キー → 小分類名へ変換して送る（後方互換）
+            small: decodeSmallKeysToNames(smallChart),
             age: ageChart,
             emp: empChart,
             sal: salChart,
@@ -404,7 +414,7 @@ export default function JobBoardsPage() {
     rangeChart,
     sitesChart.join(","),
     largeChart.join(","),
-    smallChart.join(","),
+    smallChart.join(","), // ★
     ageChart.join(","),
     empChart.join(","),
     salChart.join(","),
@@ -423,7 +433,7 @@ export default function JobBoardsPage() {
             metric: metricTable,
             sites: sitesTable,
             large: largeTable,
-            small: smallTable,
+            small: decodeSmallKeysToNames(smallTable), // ★
             age: ageTable,
             emp: empTable,
             sal: salTable,
@@ -446,7 +456,7 @@ export default function JobBoardsPage() {
     rangeTable,
     sitesTable.join(","),
     largeTable.join(","),
-    smallTable.join(","),
+    smallTable.join(","), // ★
     ageTable.join(","),
     empTable.join(","),
     salTable.join(","),
@@ -475,8 +485,6 @@ export default function JobBoardsPage() {
       return row;
     });
   }, [rowsChart, dateKeyChart, metricChart]);
-
-  // 表（サイト合計）— 任意期間はこのページではカット（既存の期間UIがないため）
 
   // マスタ
   const AGE_BANDS = [
@@ -559,7 +567,7 @@ export default function JobBoardsPage() {
           </p>
         </div>
 
-        {/* 機能メニュー（フォーム営業と同様のリストUI） */}
+        {/* 機能メニュー */}
         <header className="mb-3">
           <h2 className="text-2xl md:text-[24px] font-semibold text-neutral-900">
             機能メニュー
@@ -659,7 +667,7 @@ export default function JobBoardsPage() {
             />
             <KpiCard
               label="職種（小）"
-              value={smallChart.length ? String(smallChart.length) : "すべて"}
+              value={smallChart.length ? String(smallChart.length) : "すべて"} // ★合成キー数を表示
             />
             <KpiCard
               label="都道府県"
@@ -786,7 +794,7 @@ export default function JobBoardsPage() {
                 </div>
               </div>
 
-              {/* 年齢層 / 雇用形態 / 年収帯（バッチ操作可） */}
+              {/* 年齢層 / 雇用形態 / 年収帯 */}
               <div className="mb-2">
                 <div className="mb-1 text-xs font-medium text-neutral-600">
                   年齢層
@@ -866,7 +874,7 @@ export default function JobBoardsPage() {
             />
             <KpiCard
               label="職種（小・表）"
-              value={smallTable.length ? String(smallTable.length) : "すべて"}
+              value={smallTable.length ? String(smallTable.length) : "すべて"} // ★
             />
             <KpiCard
               label="都道府県（表）"
@@ -1094,11 +1102,11 @@ export default function JobBoardsPage() {
         {openChartCat && (
           <JobCategoryModal
             large={largeChart}
-            small={smallChart}
+            small={smallChart} // ★合成キーのまま渡す
             onCloseAction={() => setOpenChartCat(false)}
             onApplyAction={(L, S) => {
               setLargeChart(L);
-              setSmallChart(S);
+              setSmallChart(S); // ★合成キー保持
               setOpenChartCat(false);
             }}
           />
@@ -1106,11 +1114,11 @@ export default function JobBoardsPage() {
         {openTableCat && (
           <JobCategoryModal
             large={largeTable}
-            small={smallTable}
+            small={smallTable} // ★
             onCloseAction={() => setOpenTableCat(false)}
             onApplyAction={(L, S) => {
               setLargeTable(L);
-              setSmallTable(S);
+              setSmallTable(S); // ★
               setOpenTableCat(false);
             }}
           />
