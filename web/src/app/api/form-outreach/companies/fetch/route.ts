@@ -24,6 +24,8 @@ type Candidate = {
   industry_small?: string | null;
   prefectures?: string[];
   company_size?: "1-9" | "10-49" | "50-249" | "250+" | null;
+  /** 本文から抽出できた実測の規模レンジ（LLM推定ではなくサイト実データに基づく） */
+  company_size_extracted?: "1-9" | "10-49" | "50-249" | "250+" | null;
 };
 
 type AskBatchHint = { round: number; remain: number; seed?: string };
@@ -182,12 +184,28 @@ function extractEmails(
   return arr;
 }
 
+/** 従業員数 → レンジ抽出（揺れ対応強化版） */
 function extractCompanySizeToRange(text: string): Candidate["company_size"] {
-  const t = text.replace(/[,，]/g, "");
-  const m = /(従業員|社員|規模)[^0-9]{0,6}([0-9]{1,6})\s*(名|人|以上)?/.exec(t);
+  // カンマ（半角/全角）と全角空白はノイズになりやすいので除去
+  const t = text.replace(/[,\uFF0C\u3000]/g, "");
+
+  // 代表的な揺れ例：
+  // 「従業員数 約35名」「社員 120人規模」「スタッフ 10名程度」「従業員 50名以上」「従業員 100人未満」
+  const re =
+    /(従業員|従業員数|社員|スタッフ)[^\d]{0,8}(約|およそ)?\s*([0-9]{1,6})\s*(名|人)\s*(規模|程度|前後|以上|超|未満|以下)?/i;
+
+  const m = re.exec(t);
   if (!m) return null;
-  const n = Number(m[2]);
-  if (!Number.isFinite(n)) return null;
+
+  let n = Number(m[3]);
+  if (!Number.isFinite(n) || n <= 0) return null;
+
+  const mod = (m[5] || "").toString();
+
+  // 「未満/以下」は上限のニュアンス → 1引いて近い下位バケットへ倒す
+  if (/未満|以下/.test(mod)) n = Math.max(0, n - 1);
+  // 「以上/超」は下限のニュアンスだが、算出バケットは通常の数値で十分
+
   if (n <= 9) return "1-9";
   if (n <= 49) return "10-49";
   if (n <= 249) return "50-249";
@@ -276,6 +294,7 @@ async function findContactForm(
   return null;
 }
 
+/** Web検証 + 付加情報の付与（実測 company_size_extracted を保持） */
 async function verifyAndEnrich(c: Candidate): Promise<Candidate | null> {
   const site = normalizeUrl(c.website);
   if (!site) return null;
@@ -293,7 +312,7 @@ async function verifyAndEnrich(c: Candidate): Promise<Candidate | null> {
 
     const emails = extractEmails(text, html, host);
     const contact_form_url = await findContactForm(site, html);
-    const size = extractCompanySizeToRange(text);
+    const sizeExtracted = extractCompanySizeToRange(text); // ← 実測を抽出
     const prefs = extractHQPrefecture(html, text);
     const ind = classifyIndustryFromText(text);
 
@@ -302,7 +321,9 @@ async function verifyAndEnrich(c: Candidate): Promise<Candidate | null> {
       website: site,
       contact_email: emails[0] ?? c.contact_email ?? null,
       contact_form_url,
-      company_size: size ?? c.company_size ?? null,
+      // 表示用の company_size は実測優先で一旦上書きするが、保存時にも実測優先で処理
+      company_size: sizeExtracted ?? c.company_size ?? null,
+      company_size_extracted: sizeExtracted ?? null, // ← 実測値を保持
       prefectures: (prefs.length ? prefs : c.prefectures ?? []).slice(0, 4),
       industry_large: c.industry_large ?? ind.large ?? null,
       industry_small: c.industry_small ?? ind.small ?? null,
@@ -325,16 +346,22 @@ function dedupe(cands: Candidate[]): Candidate[] {
   return out;
 }
 
-/** 厳格フィルタ（AND） */
+/** 厳格フィルタ（AND）
+ * - 規模レンジが指定されている場合：本文の実測（company_size_extracted）が必須。未検出や不一致は除外。
+ * - 規模レンジが未指定の場合：従来どおり（他条件のみ）。
+ */
 function matchesFilters(c: Candidate, f: Filters): boolean {
   if (f.prefectures?.length) {
     const set = new Set((c.prefectures ?? []).map(String));
     if (![...set].some((p) => f.prefectures!.includes(p))) return false;
   }
+
   if (f.employee_size_ranges?.length) {
-    if (!c.company_size || !f.employee_size_ranges.includes(c.company_size))
-      return false;
+    const ex = c.company_size_extracted ?? null;
+    if (!ex) return false; // 実測が取れていない場合は除外
+    if (!f.employee_size_ranges.includes(ex)) return false; // 実測がフィルタ不一致
   }
+
   if (f.industries_large?.length) {
     if (!c.industry_large || !f.industries_large.includes(c.industry_large))
       return false;
@@ -425,6 +452,7 @@ async function askOpenAIForCompanies(
       prefectures: Array.isArray(x?.prefectures)
         ? x.prefectures.filter((p: any) => typeof p === "string")
         : [],
+      // LLMの推定は参考値。最終判定・保存は実測優先。
       company_size: ((): Candidate["company_size"] => {
         const v = String(x?.company_size || "").trim();
         return (["1-9", "10-49", "50-249", "250+"] as const).includes(v as any)
@@ -548,7 +576,8 @@ export async function POST(req: Request) {
       industry:
         [c.industry_large, c.industry_small].filter(Boolean).join(" / ") ||
         null,
-      company_size: c.company_size ?? null,
+      // 実測があればそれを保存。なければ従来の company_size（LLM推定含む）を保存。
+      company_size: c.company_size_extracted ?? c.company_size ?? null,
       job_site_source: "llm+web",
       status: "new",
       prefectures: c.prefectures ?? [],

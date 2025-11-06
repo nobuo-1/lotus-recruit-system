@@ -40,11 +40,233 @@ const Legend = dynamic(
   { ssr: false }
 );
 
-// 職種モーダル
+// 職種モーダル（バグ修正版）
 const JobCategoryModal = dynamic(
   () => import("@/components/job-boards/JobCategoryModal"),
   { ssr: false }
 );
+
+/** =========================
+ * 都道府県モーダル（Filters画面と同UI）
+ * ========================= */
+const PREF_GROUPS: { label: string; items: string[] }[] = [
+  {
+    label: "北海道・東北",
+    items: [
+      "北海道",
+      "青森県",
+      "岩手県",
+      "宮城県",
+      "秋田県",
+      "山形県",
+      "福島県",
+    ],
+  },
+  {
+    label: "関東",
+    items: [
+      "茨城県",
+      "栃木県",
+      "群馬県",
+      "埼玉県",
+      "千葉県",
+      "東京都",
+      "神奈川県",
+    ],
+  },
+  {
+    label: "中部",
+    items: [
+      "新潟県",
+      "富山県",
+      "石川県",
+      "福井県",
+      "山梨県",
+      "長野県",
+      "岐阜県",
+      "静岡県",
+      "愛知県",
+    ],
+  },
+  {
+    label: "近畿",
+    items: [
+      "三重県",
+      "滋賀県",
+      "京都府",
+      "大阪府",
+      "兵庫県",
+      "奈良県",
+      "和歌山県",
+    ],
+  },
+  { label: "中国", items: ["鳥取県", "島根県", "岡山県", "広島県", "山口県"] },
+  { label: "四国", items: ["徳島県", "香川県", "愛媛県", "高知県"] },
+  {
+    label: "九州・沖縄",
+    items: [
+      "福岡県",
+      "佐賀県",
+      "長崎県",
+      "熊本県",
+      "大分県",
+      "宮崎県",
+      "鹿児島県",
+      "沖縄県",
+    ],
+  },
+];
+
+function PrefectureModal({
+  selected,
+  onCloseAction,
+  onApplyAction,
+}: {
+  selected: string[];
+  onCloseAction: () => void;
+  onApplyAction: (pref: string[]) => void;
+}) {
+  const [pref, setPref] = useState<string[]>(selected ?? []);
+  const [query, setQuery] = useState("");
+  useEffect(() => setPref(selected ?? []), [selected]);
+  const all = useMemo(() => PREF_GROUPS.flatMap((g) => g.items), []);
+  const nationalAll = pref.length === all.length;
+
+  const filteredGroups = useMemo(() => {
+    const q = query.trim();
+    if (!q) return PREF_GROUPS;
+    return PREF_GROUPS.map((g) => ({
+      ...g,
+      items: g.items.filter((x) => x.includes(q)),
+    })).filter((g) => g.items.length > 0);
+  }, [query]);
+
+  const toggleNational = (checked: boolean) => {
+    setPref(checked ? [...all] : []);
+  };
+  const regionAllChecked = (items: string[]) =>
+    items.every((x) => pref.includes(x)) && items.length > 0;
+  const toggleRegionAll = (items: string[], checked: boolean) => {
+    if (checked) setPref(Array.from(new Set([...pref, ...items])));
+    else setPref(pref.filter((x) => !items.includes(x)));
+  };
+  const toggleOne = (name: string, checked: boolean) => {
+    setPref((p) =>
+      checked ? Array.from(new Set([...p, name])) : p.filter((x) => x !== name)
+    );
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="w-[980px] max-w-[96vw] rounded-2xl bg-white shadow-xl border border-neutral-200 overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200">
+          <div className="font-semibold">都道府県選択</div>
+          <button
+            onClick={onCloseAction}
+            className="rounded-lg px-2 py-1 border border-neutral-300 hover:bg-neutral-50 text-sm"
+          >
+            閉じる
+          </button>
+        </div>
+
+        <div className="p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <label className="text-sm inline-flex items-center">
+              <input
+                type="checkbox"
+                className="mr-2"
+                checked={nationalAll}
+                onChange={(e) => toggleNational(e.target.checked)}
+              />
+              全国 すべて選択
+            </label>
+            <input
+              className="w-64 rounded-lg border border-neutral-300 px-3 py-2 text-sm"
+              placeholder="検索（例: 大阪、東）"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </div>
+
+          <div className="max-h-[520px] overflow-auto space-y-3">
+            {filteredGroups.map((g) => {
+              const regionAll = regionAllChecked(g.items);
+              return (
+                <div
+                  key={g.label}
+                  className="rounded-xl border border-neutral-200 p-3"
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-xs font-semibold text-neutral-700">
+                      {g.label}
+                    </div>
+                    <label className="text-xs inline-flex items-center">
+                      <input
+                        type="checkbox"
+                        className="mr-2"
+                        checked={regionAll}
+                        onChange={(e) =>
+                          toggleRegionAll(g.items, e.target.checked)
+                        }
+                      />
+                      この地方をすべて選択/解除
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-x-3 gap-y-2 text-sm">
+                    {g.items.map((name) => {
+                      const checked = pref.includes(name);
+                      return (
+                        <label
+                          key={name}
+                          className={`flex items-center gap-2 rounded-lg border px-3 py-2 ${
+                            checked
+                              ? "border-indigo-300 bg-indigo-50 text-indigo-800"
+                              : "border-neutral-200 bg-white text-neutral-800 hover:bg-neutral-50"
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(e) => toggleOne(name, e.target.checked)}
+                          />
+                          {name}
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+            {filteredGroups.length === 0 && (
+              <div className="text-xs text-neutral-400">
+                該当する都道府県がありません
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-neutral-200">
+          <button
+            onClick={() => setPref([])}
+            className="rounded-lg px-3 py-1 border border-neutral-300 text-sm hover:bg-neutral-50"
+          >
+            クリア
+          </button>
+          <button
+            onClick={() => onApplyAction(pref)}
+            className="rounded-lg px-3 py-1 border border-neutral-300 text-sm hover:bg-neutral-50"
+          >
+            適用して閉じる
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** =========================
+ * ページ本体
+ * ========================= */
 
 type Mode = "weekly" | "monthly";
 type RangeW = "12w" | "26w" | "52w";
@@ -58,7 +280,6 @@ const SITE_OPTIONS: { value: string; label: string }[] = [
   { value: "womantype", label: "女の転職type" },
 ];
 
-// サイトごとの固定カラー
 const SITE_COLOR: Record<string, string> = {
   doda: "#3B82F6",
   mynavi: "#10B981",
@@ -104,6 +325,8 @@ export default function JobBoardsPage() {
   const [salChart, setSalChart] = useState<string[]>([]);
   const [prefChart, setPrefChart] = useState<string[]>([]);
   const [showChartFilters, setShowChartFilters] = useState(true);
+  const [openChartCat, setOpenChartCat] = useState(false);
+  const [openChartPref, setOpenChartPref] = useState(false);
 
   // ===== 表側フィルタ =====
   const [modeTable, setModeTable] = useState<Mode>("weekly");
@@ -119,10 +342,8 @@ export default function JobBoardsPage() {
   const [salTable, setSalTable] = useState<string[]>([]);
   const [prefTable, setPrefTable] = useState<string[]>([]);
   const [showTableFilters, setShowTableFilters] = useState(true);
-
-  // 任意期間（表のみ）
-  const [tableFrom, setTableFrom] = useState<string>("");
-  const [tableTo, setTableTo] = useState<string>("");
+  const [openTableCat, setOpenTableCat] = useState(false);
+  const [openTablePref, setOpenTablePref] = useState(false);
 
   // ===== データ =====
   const [rowsChart, setRowsChart] = useState<ApiRow[]>([]);
@@ -130,7 +351,25 @@ export default function JobBoardsPage() {
   const [msgChart, setMsgChart] = useState("");
   const [msgTable, setMsgTable] = useState("");
 
-  // API: グラフ
+  // 共通Chip
+  const Chip: React.FC<{
+    active: boolean;
+    onClick: () => void;
+    label: string;
+  }> = ({ active, onClick, label }) => (
+    <button
+      onClick={onClick}
+      className={`px-2 py-1 text-xs rounded-full border ${
+        active
+          ? "bg-indigo-50 border-indigo-400 text-indigo-700"
+          : "border-neutral-300 text-neutral-700 hover:bg-neutral-50"
+      } mr-2 mb-2`}
+    >
+      {label}
+    </button>
+  );
+
+  // API フェッチ（グラフ）
   useEffect(() => {
     (async () => {
       try {
@@ -146,7 +385,7 @@ export default function JobBoardsPage() {
             age: ageChart,
             emp: empChart,
             sal: salChart,
-            pref: prefChart, // ★ 追加
+            pref: prefChart,
             range: rangeChart,
           }),
         });
@@ -169,10 +408,10 @@ export default function JobBoardsPage() {
     ageChart.join(","),
     empChart.join(","),
     salChart.join(","),
-    prefChart.join(","), // ★ 追加
+    prefChart.join(","),
   ]);
 
-  // API: 表
+  // API フェッチ（表）
   useEffect(() => {
     (async () => {
       try {
@@ -188,7 +427,7 @@ export default function JobBoardsPage() {
             age: ageTable,
             emp: empTable,
             sal: salTable,
-            pref: prefTable, // ★ 追加
+            pref: prefTable,
             range: rangeTable,
           }),
         });
@@ -211,10 +450,10 @@ export default function JobBoardsPage() {
     ageTable.join(","),
     empTable.join(","),
     salTable.join(","),
-    prefTable.join(","), // ★ 追加
+    prefTable.join(","),
   ]);
 
-  // 折れ線グラフシリーズ
+  // 折れ線グラフ用シリーズ
   const dateKeyChart = modeChart === "weekly" ? "week_start" : "month_start";
   const seriesChart: SeriesPoint[] = useMemo(() => {
     const byDate: Record<string, Record<string, number>> = {};
@@ -237,69 +476,36 @@ export default function JobBoardsPage() {
     });
   }, [rowsChart, dateKeyChart, metricChart]);
 
-  // 表（サイト合計）— 任意期間でクライアント絞り込み
-  const dateKeyTable = modeTable === "weekly" ? "week_start" : "month_start";
-  const tableAgg = useMemo(() => {
-    const metricKey =
-      metricTable === "jobs" ? "jobs_count" : "candidates_count";
-    const fromD = tableFrom ? new Date(tableFrom) : null;
-    const toD = tableTo ? new Date(tableTo) : null;
+  // 表（サイト合計）— 任意期間はこのページではカット（既存の期間UIがないため）
 
-    const bySite: Record<string, number> = {};
-    for (const r of rowsTable) {
-      const dStr = (r as any)[dateKeyTable] as string | null | undefined;
-      if (dStr) {
-        const d = new Date(dStr);
-        if (fromD && d < fromD) continue;
-        if (toD && d > toD) continue;
-      }
-      // 都道府県フィルタ（表側）
-      if (prefTable.length) {
-        const p = (r.prefecture || "").trim();
-        if (!p || !prefTable.includes(p)) continue;
-      }
-      const key = r.site_key;
-      const val = Number((r as any)[metricKey] ?? 0);
-      bySite[key] = (bySite[key] ?? 0) + (Number.isFinite(val) ? val : 0);
-    }
-    return SITE_OPTIONS.filter((s) => sitesTable.includes(s.value))
-      .map((s) => ({
-        site: s.label,
-        key: s.value,
-        total: bySite[s.value] ?? 0,
-      }))
-      .sort((a, b) => b.total - a.total);
-  }, [
-    rowsTable,
-    metricTable,
-    sitesTable,
-    tableFrom,
-    tableTo,
-    dateKeyTable,
-    prefTable,
-  ]);
-
-  // モーダル制御
-  const [openChartCat, setOpenChartCat] = useState(false);
-  const [openTableCat, setOpenTableCat] = useState(false);
-
-  // UIパーツ：Chip
-  const Chip: React.FC<{
-    active: boolean;
-    onClick: () => void;
-    label: string;
-  }> = ({ active, onClick, label }) => (
-    <button
-      onClick={onClick}
-      className={`px-2 py-1 text-xs rounded-full border ${
-        active
-          ? "bg-indigo-50 border-indigo-400 text-indigo-700"
-          : "border-neutral-300 text-neutral-700 hover:bg-neutral-50"
-      } mr-2 mb-2`}
-    >
-      {label}
-    </button>
-  );
+  // マスタ
+  const AGE_BANDS = [
+    "20歳以下",
+    "25歳以下",
+    "30歳以下",
+    "35歳以下",
+    "40歳以下",
+    "45歳以下",
+    "50歳以下",
+    "55歳以下",
+    "60歳以下",
+    "65歳以下",
+  ];
+  const EMP_TYPES = [
+    "正社員",
+    "契約社員",
+    "派遣社員",
+    "アルバイト",
+    "業務委託",
+  ];
+  const SALARY_BAND = [
+    "~300万",
+    "300~400万",
+    "400~500万",
+    "500~600万",
+    "600~800万",
+    "800万~",
+  ];
 
   // 共通タグ選択
   function TagMulti({
@@ -339,158 +545,58 @@ export default function JobBoardsPage() {
     );
   }
 
-  // 都道府県
-  const PREFS = [
-    "北海道",
-    "青森県",
-    "岩手県",
-    "宮城県",
-    "秋田県",
-    "山形県",
-    "福島県",
-    "茨城県",
-    "栃木県",
-    "群馬県",
-    "埼玉県",
-    "千葉県",
-    "東京都",
-    "神奈川県",
-    "新潟県",
-    "富山県",
-    "石川県",
-    "福井県",
-    "山梨県",
-    "長野県",
-    "岐阜県",
-    "静岡県",
-    "愛知県",
-    "三重県",
-    "滋賀県",
-    "京都府",
-    "大阪府",
-    "兵庫県",
-    "奈良県",
-    "和歌山県",
-    "鳥取県",
-    "島根県",
-    "岡山県",
-    "広島県",
-    "山口県",
-    "徳島県",
-    "香川県",
-    "愛媛県",
-    "高知県",
-    "福岡県",
-    "佐賀県",
-    "長崎県",
-    "熊本県",
-    "大分県",
-    "宮崎県",
-    "鹿児島県",
-    "沖縄県",
-  ];
-
   return (
     <>
       <AppHeader showBack />
       <main className="mx-auto max-w-6xl p-6">
-        {/* タイトル */}
-        <div className="mb-4">
-          <h1 className="text-[26px] md:text-[24px] font-extrabold tracking-tight text-indigo-900">
-            転職サイトリサーチ
-          </h1>
-          <p className="mt-1 text-sm text-neutral-500">
-            サイト別の求人数／求職者数のトレンド（週次・月次）
-          </p>
-        </div>
-
-        {/* 機能メニュー（フォーム営業トップ風） */}
-        <header className="mb-3">
-          <h2 className="text-2xl md:text-[24px] font-semibold text-neutral-900">
-            機能メニュー
-          </h2>
-        </header>
-        <div className="mb-6 rounded-2xl border border-neutral-200 p-5">
-          <div className="grid grid-cols-1 gap-7 md:grid-cols-3">
-            {/* 実行 */}
-            <section>
-              <h3 className="mb-2 text-lg font-semibold tracking-tight text-neutral-900 sm:text-xl">
-                実行
-              </h3>
-              <ul className="mt-1.5 space-y-1.5">
-                <li>
-                  <Link
-                    href="/job-boards/manual"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    手動実行（件数取得）
-                  </Link>
-                </li>
-                <li>
-                  <Link
-                    href="/job-boards/runs"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    実行状況
-                  </Link>
-                </li>
-              </ul>
-            </section>
-            {/* リスト/宛先 */}
-            <section>
-              <h3 className="mb-2 text-lg font-semibold tracking-tight text-neutral-900 sm:text-xl">
-                リスト
-              </h3>
-              <ul className="mt-1.5 space-y-1.5">
-                <li>
-                  <Link
-                    href="/job-boards/destinations"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    送り先一覧
-                  </Link>
-                </li>
-                <li>
-                  <Link
-                    href="/job-boards/manual/history"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    手動実行履歴
-                  </Link>
-                </li>
-              </ul>
-            </section>
-            {/* 設定 */}
-            <section>
-              <h3 className="mb-2 text-lg font-semibold tracking-tight text-neutral-900 sm:text-xl">
-                設定
-              </h3>
-              <ul className="mt-1.5 space-y-1.5">
-                <li>
-                  <Link
-                    href="/job-boards/settings"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    通知設定
-                  </Link>
-                </li>
-                <li>
-                  <Link
-                    href="/job-boards/logins"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    ログイン情報の登録
-                  </Link>
-                </li>
-              </ul>
-            </section>
+        {/* タイトル＋メニュー */}
+        <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+          <div>
+            <h1 className="text-[26px] md:text-[24px] font-extrabold tracking-tight text-indigo-900">
+              転職サイトリサーチ
+            </h1>
+            <p className="mt-1 text-sm text-neutral-500">
+              サイト別の求人数／求職者数のトレンド（週次・月次）
+            </p>
+          </div>
+          <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+            <Link
+              href="/job-boards/settings"
+              className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
+            >
+              通知設定
+            </Link>
+            <Link
+              href="/job-boards/destinations"
+              className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
+            >
+              送り先一覧
+            </Link>
+            <Link
+              href="/job-boards/runs"
+              className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
+            >
+              実行状況
+            </Link>
+            <Link
+              href="/job-boards/manual"
+              className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
+            >
+              手動実行
+            </Link>
+            <Link
+              href="/job-boards/history"
+              className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
+            >
+              手動実行履歴
+            </Link>
           </div>
         </div>
 
         {/* ====== KPI＋折れ線グラフ ====== */}
         <section className="rounded-2xl border border-neutral-200 p-4">
           {/* KPI */}
-          <div className="grid grid-cols-2 gap-4 md:grid-cols-4 mb-3">
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-5 mb-3">
             <KpiCard
               label="対象サイト"
               value={allLabel(sitesChart.length, SITE_OPTIONS.length)}
@@ -503,10 +609,14 @@ export default function JobBoardsPage() {
               label="職種（小）"
               value={smallChart.length ? String(smallChart.length) : "すべて"}
             />
+            <KpiCard
+              label="都道府県"
+              value={prefChart.length ? String(prefChart.length) : "全国"}
+            />
             <KpiCard label="ビュー" value={labelOfMode(modeChart)} />
           </div>
 
-          {/* トグル */}
+          {/* フィルタのトグル */}
           <div className="mb-2">
             <button
               className="text-xs rounded-lg border border-neutral-300 px-2 py-1 hover:bg-neutral-50"
@@ -586,7 +696,7 @@ export default function JobBoardsPage() {
                 </div>
               </div>
 
-              {/* 職種モーダル */}
+              {/* 職種（モーダル） */}
               <div className="mb-2">
                 <div className="mb-1 text-xs font-medium text-neutral-600">
                   職種
@@ -600,7 +710,31 @@ export default function JobBoardsPage() {
                 </button>
               </div>
 
-              {/* 年齢/雇用/年収 */}
+              {/* 都道府県（モーダル） */}
+              <div className="mb-2">
+                <div className="mb-1 text-xs font-medium text-neutral-600">
+                  都道府県
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    className="px-2 py-1 text-xs rounded-lg border border-neutral-300 hover:bg-neutral-50"
+                    onClick={() => setOpenChartPref(true)}
+                  >
+                    選択（{prefChart.length ? `${prefChart.length}件` : "全国"}
+                    ）
+                  </button>
+                  {prefChart.length > 0 && (
+                    <button
+                      className="px-2 py-1 text-xs rounded-lg border border-neutral-300 hover:bg-neutral-50"
+                      onClick={() => setPrefChart([])}
+                    >
+                      クリア
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* 年齢層 / 雇用形態 / 年収帯（バッチ操作可） */}
               <div className="mb-2">
                 <div className="mb-1 text-xs font-medium text-neutral-600">
                   年齢層
@@ -608,18 +742,7 @@ export default function JobBoardsPage() {
                 <TagMulti
                   values={ageChart}
                   setValues={setAgeChart}
-                  options={[
-                    "20歳以下",
-                    "25歳以下",
-                    "30歳以下",
-                    "35歳以下",
-                    "40歳以下",
-                    "45歳以下",
-                    "50歳以下",
-                    "55歳以下",
-                    "60歳以下",
-                    "65歳以下",
-                  ]}
+                  options={AGE_BANDS}
                 />
               </div>
               <div className="mb-2">
@@ -629,48 +752,23 @@ export default function JobBoardsPage() {
                 <TagMulti
                   values={empChart}
                   setValues={setEmpChart}
-                  options={[
-                    "正社員",
-                    "契約社員",
-                    "派遣社員",
-                    "アルバイト",
-                    "業務委託",
-                  ]}
+                  options={EMP_TYPES}
                 />
               </div>
-              <div className="mb-2">
+              <div>
                 <div className="mb-1 text-xs font-medium text-neutral-600">
                   年収帯
                 </div>
                 <TagMulti
                   values={salChart}
                   setValues={setSalChart}
-                  options={[
-                    "~300万",
-                    "300~400万",
-                    "400~500万",
-                    "500~600万",
-                    "600~800万",
-                    "800万~",
-                  ]}
-                />
-              </div>
-
-              {/* 都道府県（★追加） */}
-              <div>
-                <div className="mb-1 text-xs font-medium text-neutral-600">
-                  都道府県
-                </div>
-                <TagMulti
-                  values={prefChart}
-                  setValues={setPrefChart}
-                  options={PREFS}
+                  options={SALARY_BAND}
                 />
               </div>
             </div>
           )}
 
-          {/* グラフ */}
+          {/* 折れ線グラフ */}
           <div className="h-64 mt-3">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={seriesChart}>
@@ -704,8 +802,8 @@ export default function JobBoardsPage() {
 
         {/* ====== サイト別合計（表） ====== */}
         <section className="mt-6 rounded-2xl border border-neutral-200 p-4">
-          {/* KPI */}
-          <div className="grid grid-cols-2 gap-4 md:grid-cols-4 mb-3">
+          {/* 表用 KPI */}
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-5 mb-3">
             <KpiCard
               label="対象サイト（表）"
               value={allLabel(sitesTable.length, SITE_OPTIONS.length)}
@@ -718,10 +816,14 @@ export default function JobBoardsPage() {
               label="職種（小・表）"
               value={smallTable.length ? String(smallTable.length) : "すべて"}
             />
+            <KpiCard
+              label="都道府県（表）"
+              value={prefTable.length ? String(prefTable.length) : "全国"}
+            />
             <KpiCard label="ビュー（表）" value={labelOfMode(modeTable)} />
           </div>
 
-          {/* トグル＋任意期間＋都道府県（追加） */}
+          {/* フィルタのトグル */}
           <div className="mb-2 flex flex-wrap items-center gap-2">
             <button
               className="text-xs rounded-lg border border-neutral-300 px-2 py-1 hover:bg-neutral-50"
@@ -729,64 +831,6 @@ export default function JobBoardsPage() {
             >
               {showTableFilters ? "フィルタを隠す" : "フィルタを表示"}
             </button>
-
-            {/* 任意期間 */}
-            <div className="flex items-center gap-2 text-xs">
-              <span className="text-neutral-600">期間:</span>
-              <input
-                type="date"
-                value={tableFrom}
-                onChange={(e) => setTableFrom(e.target.value)}
-                className="rounded-md border border-neutral-300 px-2 py-1"
-              />
-              <span>〜</span>
-              <input
-                type="date"
-                value={tableTo}
-                onChange={(e) => setTableTo(e.target.value)}
-                className="rounded-md border border-neutral-300 px-2 py-1"
-              />
-              {tableFrom || tableTo ? (
-                <button
-                  className="rounded-md border border-neutral-300 px-2 py-1"
-                  onClick={() => {
-                    setTableFrom("");
-                    setTableTo("");
-                  }}
-                >
-                  クリア
-                </button>
-              ) : null}
-            </div>
-
-            {/* 都道府県（表側） */}
-            <div className="flex items-center gap-2 text-xs">
-              <span className="text-neutral-600">都道府県:</span>
-              <select
-                multiple
-                value={prefTable}
-                onChange={(e) =>
-                  setPrefTable(
-                    Array.from(e.target.selectedOptions).map((o) => o.value)
-                  )
-                }
-                className="rounded-md border border-neutral-300 px-2 py-1"
-              >
-                {PREFS.map((p) => (
-                  <option key={p} value={p}>
-                    {p}
-                  </option>
-                ))}
-              </select>
-              {prefTable.length ? (
-                <button
-                  className="rounded-md border border-neutral-300 px-2 py-1"
-                  onClick={() => setPrefTable([])}
-                >
-                  解除
-                </button>
-              ) : null}
-            </div>
           </div>
 
           {showTableFilters && (
@@ -874,7 +918,31 @@ export default function JobBoardsPage() {
                   </button>
                 </div>
 
-                {/* 年齢層・雇用・年収 */}
+                {/* 都道府県（モーダル） */}
+                <div className="mb-2">
+                  <div className="mb-1 text-xs font-medium text-neutral-600">
+                    都道府県
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      className="px-2 py-1 text-xs rounded-lg border border-neutral-300 hover:bg-neutral-50"
+                      onClick={() => setOpenTablePref(true)}
+                    >
+                      選択（
+                      {prefTable.length ? `${prefTable.length}件` : "全国"}）
+                    </button>
+                    {prefTable.length > 0 && (
+                      <button
+                        className="px-2 py-1 text-xs rounded-lg border border-neutral-300 hover:bg-neutral-50"
+                        onClick={() => setPrefTable([])}
+                      >
+                        クリア
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* 年齢層など */}
                 <div className="mb-2">
                   <div className="mb-1 text-xs font-medium text-neutral-600">
                     年齢層
@@ -882,18 +950,7 @@ export default function JobBoardsPage() {
                   <TagMulti
                     values={ageTable}
                     setValues={setAgeTable}
-                    options={[
-                      "20歳以下",
-                      "25歳以下",
-                      "30歳以下",
-                      "35歳以下",
-                      "40歳以下",
-                      "45歳以下",
-                      "50歳以下",
-                      "55歳以下",
-                      "60歳以下",
-                      "65歳以下",
-                    ]}
+                    options={AGE_BANDS}
                   />
                 </div>
                 <div className="mb-2">
@@ -903,13 +960,7 @@ export default function JobBoardsPage() {
                   <TagMulti
                     values={empTable}
                     setValues={setEmpTable}
-                    options={[
-                      "正社員",
-                      "契約社員",
-                      "派遣社員",
-                      "アルバイト",
-                      "業務委託",
-                    ]}
+                    options={EMP_TYPES}
                   />
                 </div>
                 <div>
@@ -919,33 +970,14 @@ export default function JobBoardsPage() {
                   <TagMulti
                     values={salTable}
                     setValues={setSalTable}
-                    options={[
-                      "~300万",
-                      "300~400万",
-                      "400~500万",
-                      "500~600万",
-                      "600~800万",
-                      "800万~",
-                    ]}
-                  />
-                </div>
-
-                {/* 都道府県 */}
-                <div className="mt-2">
-                  <div className="mb-1 text-xs font-medium text-neutral-600">
-                    都道府県
-                  </div>
-                  <TagMulti
-                    values={prefTable}
-                    setValues={setPrefTable}
-                    options={PREFS}
+                    options={SALARY_BAND}
                   />
                 </div>
               </div>
             </>
           )}
 
-          {/* 表 */}
+          {/* 表（サイト別合計） */}
           <div className="overflow-x-auto rounded-xl border border-neutral-200 mt-3">
             <table className="min-w-[760px] w-full text-sm">
               <thead className="bg-neutral-50 text-neutral-600">
@@ -957,22 +989,45 @@ export default function JobBoardsPage() {
                 </tr>
               </thead>
               <tbody>
-                {tableAgg.map((r) => (
-                  <tr key={r.key} className="border-t border-neutral-200">
-                    <td className="px-3 py-3">{r.site}</td>
-                    <td className="px-3 py-3">{r.total}</td>
-                  </tr>
-                ))}
-                {tableAgg.length === 0 && (
-                  <tr>
-                    <td
-                      colSpan={2}
-                      className="px-4 py-8 text-center text-neutral-400"
-                    >
-                      データがありません
-                    </td>
-                  </tr>
-                )}
+                {(() => {
+                  const metricKey =
+                    metricTable === "jobs" ? "jobs_count" : "candidates_count";
+                  const bySite: Record<string, number> = {};
+                  for (const r of rowsTable) {
+                    const key = r.site_key;
+                    const val = Number((r as any)[metricKey] ?? 0);
+                    bySite[key] =
+                      (bySite[key] ?? 0) + (Number.isFinite(val) ? val : 0);
+                  }
+                  const sorted = SITE_OPTIONS.filter((s) =>
+                    sitesTable.includes(s.value)
+                  )
+                    .map((s) => ({
+                      site: s.label,
+                      key: s.value,
+                      total: bySite[s.value] ?? 0,
+                    }))
+                    .sort((a, b) => b.total - a.total);
+
+                  if (sorted.length === 0) {
+                    return (
+                      <tr>
+                        <td
+                          colSpan={2}
+                          className="px-4 py-8 text-center text-neutral-400"
+                        >
+                          データがありません
+                        </td>
+                      </tr>
+                    );
+                  }
+                  return sorted.map((r) => (
+                    <tr key={r.key} className="border-t border-neutral-200">
+                      <td className="px-3 py-3">{r.site}</td>
+                      <td className="px-3 py-3">{r.total}</td>
+                    </tr>
+                  ));
+                })()}
               </tbody>
             </table>
           </div>
@@ -983,29 +1038,48 @@ export default function JobBoardsPage() {
           )}
         </section>
 
-        {/* 職種モーダル（グラフ用） */}
+        {/* モーダル */}
         {openChartCat && (
           <JobCategoryModal
             large={largeChart}
             small={smallChart}
             onCloseAction={() => setOpenChartCat(false)}
-            onApplyAction={(L: string[], S: string[]) => {
+            onApplyAction={(L, S) => {
               setLargeChart(L);
               setSmallChart(S);
               setOpenChartCat(false);
             }}
           />
         )}
-        {/* 職種モーダル（表用） */}
         {openTableCat && (
           <JobCategoryModal
             large={largeTable}
             small={smallTable}
             onCloseAction={() => setOpenTableCat(false)}
-            onApplyAction={(L: string[], S: string[]) => {
+            onApplyAction={(L, S) => {
               setLargeTable(L);
               setSmallTable(S);
               setOpenTableCat(false);
+            }}
+          />
+        )}
+        {openChartPref && (
+          <PrefectureModal
+            selected={prefChart}
+            onCloseAction={() => setOpenChartPref(false)}
+            onApplyAction={(pref) => {
+              setPrefChart(pref);
+              setOpenChartPref(false);
+            }}
+          />
+        )}
+        {openTablePref && (
+          <PrefectureModal
+            selected={prefTable}
+            onCloseAction={() => setOpenTablePref(false)}
+            onApplyAction={(pref) => {
+              setPrefTable(pref);
+              setOpenTablePref(false);
             }}
           />
         )}

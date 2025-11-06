@@ -1,28 +1,268 @@
 // web/src/app/job-boards/manual/page.tsx
 "use client";
 
-import React, { useMemo, useState } from "react";
-import Link from "next/link";
+import React, { useEffect, useMemo, useState } from "react";
 import AppHeader from "@/components/AppHeader";
-import KpiCard from "@/components/KpiCard";
+import Link from "next/link";
 import dynamic from "next/dynamic";
 
+// 職種モーダル（修正版）
 const JobCategoryModal = dynamic(
   () => import("@/components/job-boards/JobCategoryModal"),
   { ssr: false }
 );
 
-type SiteKey = "mynavi" | "doda" | "type" | "womantype";
+/** =========================
+ * 都道府県モーダル（共通）
+ * ========================= */
+const PREF_GROUPS: { label: string; items: string[] }[] = [
+  {
+    label: "北海道・東北",
+    items: [
+      "北海道",
+      "青森県",
+      "岩手県",
+      "宮城県",
+      "秋田県",
+      "山形県",
+      "福島県",
+    ],
+  },
+  {
+    label: "関東",
+    items: [
+      "茨城県",
+      "栃木県",
+      "群馬県",
+      "埼玉県",
+      "千葉県",
+      "東京都",
+      "神奈川県",
+    ],
+  },
+  {
+    label: "中部",
+    items: [
+      "新潟県",
+      "富山県",
+      "石川県",
+      "福井県",
+      "山梨県",
+      "長野県",
+      "岐阜県",
+      "静岡県",
+      "愛知県",
+    ],
+  },
+  {
+    label: "近畿",
+    items: [
+      "三重県",
+      "滋賀県",
+      "京都府",
+      "大阪府",
+      "兵庫県",
+      "奈良県",
+      "和歌山県",
+    ],
+  },
+  { label: "中国", items: ["鳥取県", "島根県", "岡山県", "広島県", "山口県"] },
+  { label: "四国", items: ["徳島県", "香川県", "愛媛県", "高知県"] },
+  {
+    label: "九州・沖縄",
+    items: [
+      "福岡県",
+      "佐賀県",
+      "長崎県",
+      "熊本県",
+      "大分県",
+      "宮崎県",
+      "鹿児島県",
+      "沖縄県",
+    ],
+  },
+];
 
-const SITE_OPTIONS: { value: SiteKey; label: string }[] = [
+function PrefectureModal({
+  selected,
+  onCloseAction,
+  onApplyAction,
+}: {
+  selected: string[];
+  onCloseAction: () => void;
+  onApplyAction: (pref: string[]) => void;
+}) {
+  const [pref, setPref] = useState<string[]>(selected ?? []);
+  const [query, setQuery] = useState("");
+  useEffect(() => setPref(selected ?? []), [selected]);
+  const all = useMemo(() => PREF_GROUPS.flatMap((g) => g.items), []);
+  const nationalAll = pref.length === all.length;
+
+  const filteredGroups = useMemo(() => {
+    const q = query.trim();
+    if (!q) return PREF_GROUPS;
+    return PREF_GROUPS.map((g) => ({
+      ...g,
+      items: g.items.filter((x) => x.includes(q)),
+    })).filter((g) => g.items.length > 0);
+  }, [query]);
+
+  const toggleNational = (checked: boolean) => setPref(checked ? [...all] : []);
+  const regionAllChecked = (items: string[]) =>
+    items.every((x) => pref.includes(x)) && items.length > 0;
+  const toggleRegionAll = (items: string[], checked: boolean) => {
+    if (checked) setPref(Array.from(new Set([...pref, ...items])));
+    else setPref(pref.filter((x) => !items.includes(x)));
+  };
+  const toggleOne = (name: string, checked: boolean) => {
+    setPref((p) =>
+      checked ? Array.from(new Set([...p, name])) : p.filter((x) => x !== name)
+    );
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="w-[980px] max-w-[96vw] rounded-2xl bg-white shadow-xl border border-neutral-200 overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200">
+          <div className="font-semibold">都道府県選択</div>
+          <button
+            onClick={onCloseAction}
+            className="rounded-lg px-2 py-1 border border-neutral-300 hover:bg-neutral-50 text-sm"
+          >
+            閉じる
+          </button>
+        </div>
+
+        <div className="p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <label className="text-sm inline-flex items-center">
+              <input
+                type="checkbox"
+                className="mr-2"
+                checked={nationalAll}
+                onChange={(e) => toggleNational(e.target.checked)}
+              />
+              全国 すべて選択
+            </label>
+            <input
+              className="w-64 rounded-lg border border-neutral-300 px-3 py-2 text-sm"
+              placeholder="検索（例: 大阪、東）"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </div>
+
+          <div className="max-h-[520px] overflow-auto space-y-3">
+            {filteredGroups.map((g) => {
+              const regionAll = regionAllChecked(g.items);
+              return (
+                <div
+                  key={g.label}
+                  className="rounded-xl border border-neutral-200 p-3"
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-xs font-semibold text-neutral-700">
+                      {g.label}
+                    </div>
+                    <label className="text-xs inline-flex items-center">
+                      <input
+                        type="checkbox"
+                        className="mr-2"
+                        checked={regionAll}
+                        onChange={(e) =>
+                          toggleRegionAll(g.items, e.target.checked)
+                        }
+                      />
+                      この地方をすべて選択/解除
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-x-3 gap-y-2 text-sm">
+                    {g.items.map((name) => {
+                      const checked = pref.includes(name);
+                      return (
+                        <label
+                          key={name}
+                          className={`flex items-center gap-2 rounded-lg border px-3 py-2 ${
+                            checked
+                              ? "border-indigo-300 bg-indigo-50 text-indigo-800"
+                              : "border-neutral-200 bg-white text-neutral-800 hover:bg-neutral-50"
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(e) => toggleOne(name, e.target.checked)}
+                          />
+                          {name}
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+            {filteredGroups.length === 0 && (
+              <div className="text-xs text-neutral-400">
+                該当する都道府県がありません
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-neutral-200">
+          <button
+            onClick={() => setPref([])}
+            className="rounded-lg px-3 py-1 border border-neutral-300 text-sm hover:bg-neutral-50"
+          >
+            クリア
+          </button>
+          <button
+            onClick={() => onApplyAction(pref)}
+            className="rounded-lg px-3 py-1 border border-neutral-300 text-sm hover:bg-neutral-50"
+          >
+            適用して閉じる
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** =========================
+ * 手動実行ページ
+ * ========================= */
+
+const SITE_OPTIONS: { value: string; label: string }[] = [
   { value: "mynavi", label: "マイナビ" },
   { value: "doda", label: "doda" },
   { value: "type", label: "type" },
   { value: "womantype", label: "女の転職type" },
 ];
 
-type PreviewRow = {
-  site_key: SiteKey;
+const AGE_BANDS = [
+  "20歳以下",
+  "25歳以下",
+  "30歳以下",
+  "35歳以下",
+  "40歳以下",
+  "45歳以下",
+  "50歳以下",
+  "55歳以下",
+  "60歳以下",
+  "65歳以下",
+];
+const EMP_TYPES = ["正社員", "契約社員", "派遣社員", "アルバイト", "業務委託"];
+const SALARY_BAND = [
+  "~300万",
+  "300~400万",
+  "400~500万",
+  "500~600万",
+  "600~800万",
+  "800万~",
+];
+
+type ManualFetchRow = {
+  site_key: string;
   internal_large: string | null;
   internal_small: string | null;
   age_band: string | null;
@@ -34,65 +274,101 @@ type PreviewRow = {
 };
 
 export default function JobBoardsManualPage() {
-  // フィルタ（トップのモーダルと同じ設計）
-  const [sites, setSites] = useState<SiteKey[]>(
+  const [sites, setSites] = useState<string[]>(
     SITE_OPTIONS.map((s) => s.value)
   );
   const [large, setLarge] = useState<string[]>([]);
   const [small, setSmall] = useState<string[]>([]);
-  const [age, setAge] = useState<string[]>([]);
-  const [emp, setEmp] = useState<string[]>([]);
-  const [sal, setSal] = useState<string[]>([]);
-  const [pref, setPref] = useState<string[]>([]);
+  const [ages, setAges] = useState<string[]>([]);
+  const [emps, setEmps] = useState<string[]>([]);
+  const [sals, setSals] = useState<string[]>([]);
+  const [prefs, setPrefs] = useState<string[]>([]);
   const [openCat, setOpenCat] = useState(false);
+  const [openPref, setOpenPref] = useState(false);
 
-  const [want, setWant] = useState<number>(12);
   const [running, setRunning] = useState(false);
-  const [preview, setPreview] = useState<PreviewRow[]>([]);
   const [msg, setMsg] = useState("");
+  const [rows, setRows] = useState<ManualFetchRow[]>([]);
+
+  const Chip: React.FC<{
+    active: boolean;
+    onClick: () => void;
+    label: string;
+  }> = ({ active, onClick, label }) => (
+    <button
+      onClick={onClick}
+      className={`px-2 py-1 text-xs rounded-full border ${
+        active
+          ? "bg-indigo-50 border-indigo-400 text-indigo-700"
+          : "border-neutral-300 text-neutral-700 hover:bg-neutral-50"
+      } mr-2 mb-2`}
+    >
+      {label}
+    </button>
+  );
+
+  function TagMulti({
+    values,
+    setValues,
+    options,
+  }: {
+    values: string[];
+    setValues: (v: string[]) => void;
+    options: string[];
+  }) {
+    const toggle = (v: string) =>
+      setValues(
+        values.includes(v) ? values.filter((x) => x !== v) : [...values, v]
+      );
+    return (
+      <div className="flex flex-wrap">
+        <Chip
+          active={values.length === options.length}
+          label="すべて"
+          onClick={() => setValues(options)}
+        />
+        <Chip
+          active={values.length === 0}
+          label="解除"
+          onClick={() => setValues([])}
+        />
+        {options.map((o) => (
+          <Chip
+            key={o}
+            label={o}
+            active={values.includes(o)}
+            onClick={() => toggle(o)}
+          />
+        ))}
+      </div>
+    );
+  }
 
   const run = async () => {
-    setMsg("");
+    if (running) return;
     setRunning(true);
-    setPreview([]);
+    setMsg("");
+    setRows([]);
     try {
-      // 1) 実行（countsには保存しない）→ プレビュー取得
-      const r = await fetch("/api/job-boards/manual/run-batch", {
+      const resp = await fetch("/api/job-boards/manual/run-batch", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           sites,
           large,
           small,
-          age,
-          emp,
-          sal,
-          pref,
-          want,
-          saveMode: "history", // ★ countsには保存しない
+          age: ages,
+          emp: emps,
+          sal: sals,
+          pref: prefs,
+          // 手動実行は job_board_counts へ保存せず、履歴テーブルへのみ保存
+          persist_to_counts: false,
         }),
       });
-      const j = await r.json();
-      if (!r.ok || !j?.ok) throw new Error(j?.error || "run failed");
-      const previewRows: PreviewRow[] = Array.isArray(j.preview)
-        ? j.preview
-        : [];
-      setPreview(previewRows);
-
-      // 2) 履歴テーブルに保存（まとめて1レコード）
-      const h = await fetch("/api/job-boards/manual/history", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          params: { sites, large, small, age, emp, sal, pref, want },
-          results: previewRows,
-        }),
-      });
-      const hj = await h.json();
-      if (!h.ok || !hj?.ok) throw new Error(hj?.error || "save history failed");
-      setMsg(
-        `実行完了: プレビュー ${previewRows.length} 件を履歴に保存しました`
-      );
+      const j = await resp.json();
+      if (!resp.ok) throw new Error(j?.error || "run failed");
+      setRows((j?.added_items as ManualFetchRow[]) ?? []);
+      setMsg(j?.note || "");
     } catch (e: any) {
       setMsg(String(e?.message || e));
     } finally {
@@ -100,81 +376,42 @@ export default function JobBoardsManualPage() {
     }
   };
 
-  const Chip: React.FC<{
-    label: string;
-    active: boolean;
-    onClick: () => void;
-  }> = ({ label, active, onClick }) => (
-    <button
-      onClick={onClick}
-      className={`px-2 py-1 text-xs rounded-full border mr-2 mb-2 ${
-        active
-          ? "bg-indigo-50 border-indigo-400 text-indigo-700"
-          : "border-neutral-300 text-neutral-700 hover:bg-neutral-50"
-      }`}
-    >
-      {label}
-    </button>
-  );
-
-  const sitesLabel = useMemo(() => {
-    if (sites.length === SITE_OPTIONS.length) return `全${sites.length}`;
-    if (sites.length === 0) return "なし";
-    return `${sites.length}件`;
-  }, [sites]);
-
   return (
     <>
       <AppHeader showBack />
       <main className="mx-auto max-w-6xl p-6">
-        <div className="mb-4 flex items-end justify-between">
+        <div className="mb-4 flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-semibold text-neutral-900">
-              手動実行
+            <h1 className="text-[26px] md:text-[24px] font-extrabold tracking-tight text-indigo-900">
+              転職サイト 手動実行
             </h1>
-            <p className="text-sm text-neutral-500">
-              トップの職種モーダルと同じUIで条件選択 → 実行 →
-              プレビューを履歴保存
+            <p className="mt-1 text-sm text-neutral-500">
+              ログイン情報を利用して件数を取得。結果は「手動実行履歴」に保存。
             </p>
           </div>
-          <div className="flex gap-2">
-            <Link
-              href="/job-boards/manual/history"
-              className="rounded-lg border border-neutral-200 px-3 py-2 hover:bg-neutral-50 text-sm"
-            >
-              手動実行履歴
-            </Link>
-          </div>
+          <Link
+            href="/job-boards/history"
+            className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
+          >
+            手動実行履歴へ
+          </Link>
         </div>
 
-        {/* KPI */}
-        <div className="grid grid-cols-2 gap-4 md:grid-cols-4 mb-4">
-          <KpiCard label="対象サイト" value={sitesLabel} />
-          <KpiCard
-            label="大分類"
-            value={large.length ? String(large.length) : "すべて"}
-          />
-          <KpiCard
-            label="小分類"
-            value={small.length ? String(small.length) : "すべて"}
-          />
-          <KpiCard label="件数目安" value={String(want)} />
-        </div>
-
-        {/* 条件 */}
-        <section className="rounded-2xl border border-neutral-200 p-4 mb-4">
+        <section className="rounded-2xl border border-neutral-200 p-4 space-y-4">
           {/* サイト */}
-          <div className="mb-3">
-            <div className="mb-1 text-xs text-neutral-600">サイト</div>
+          <div>
+            <div className="mb-1 text-xs font-medium text-neutral-600">
+              サイト
+            </div>
             <div className="flex flex-wrap">
               <Chip
-                label="すべて"
                 active={sites.length === SITE_OPTIONS.length}
+                label="すべて"
                 onClick={() => setSites(SITE_OPTIONS.map((s) => s.value))}
               />
               <Chip
-                label="解除"
                 active={sites.length === 0}
+                label="解除"
                 onClick={() => setSites([])}
               />
               {SITE_OPTIONS.map((o) => (
@@ -194,9 +431,11 @@ export default function JobBoardsManualPage() {
             </div>
           </div>
 
-          {/* 職種（トップと同じモーダルUI） */}
-          <div className="mb-3">
-            <div className="mb-1 text-xs text-neutral-600">職種</div>
+          {/* 職種（同UIモーダル） */}
+          <div>
+            <div className="mb-1 text-xs font-medium text-neutral-600">
+              職種
+            </div>
             <button
               className="px-2 py-1 text-xs rounded-lg border border-neutral-300 hover:bg-neutral-50"
               onClick={() => setOpenCat(true)}
@@ -206,171 +445,163 @@ export default function JobBoardsManualPage() {
             </button>
           </div>
 
-          {/* 年齢層/雇用形態/年収帯/都道府県（必要なら入力UIを足す） */}
-          {/* 簡易入力：カンマ区切り */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div>
-              <div className="mb-1 text-xs text-neutral-600">
-                年齢層（任意）
-              </div>
-              <input
-                className="w-full rounded-md border border-neutral-300 px-2 py-1 text-sm"
-                placeholder="例: 25歳以下, 30歳以下"
-                value={age.join(",")}
-                onChange={(e) =>
-                  setAge(
-                    e.target.value
-                      .split(",")
-                      .map((x) => x.trim())
-                      .filter(Boolean)
-                  )
-                }
-              />
+          {/* 都道府県（同UIモーダル） */}
+          <div>
+            <div className="mb-1 text-xs font-medium text-neutral-600">
+              都道府県
             </div>
-            <div>
-              <div className="mb-1 text-xs text-neutral-600">
-                雇用形態（任意）
-              </div>
-              <input
-                className="w-full rounded-md border border-neutral-300 px-2 py-1 text-sm"
-                placeholder="例: 正社員, 契約社員"
-                value={emp.join(",")}
-                onChange={(e) =>
-                  setEmp(
-                    e.target.value
-                      .split(",")
-                      .map((x) => x.trim())
-                      .filter(Boolean)
-                  )
-                }
-              />
-            </div>
-            <div>
-              <div className="mb-1 text-xs text-neutral-600">
-                年収帯（任意）
-              </div>
-              <input
-                className="w-full rounded-md border border-neutral-300 px-2 py-1 text-sm"
-                placeholder="例: 400~500万"
-                value={sal.join(",")}
-                onChange={(e) =>
-                  setSal(
-                    e.target.value
-                      .split(",")
-                      .map((x) => x.trim())
-                      .filter(Boolean)
-                  )
-                }
-              />
-            </div>
-            <div>
-              <div className="mb-1 text-xs text-neutral-600">
-                都道府県（任意）
-              </div>
-              <input
-                className="w-full rounded-md border border-neutral-300 px-2 py-1 text-sm"
-                placeholder="例: 大阪府, 東京都"
-                value={pref.join(",")}
-                onChange={(e) =>
-                  setPref(
-                    e.target.value
-                      .split(",")
-                      .map((x) => x.trim())
-                      .filter(Boolean)
-                  )
-                }
-              />
+            <div className="flex items-center gap-2">
+              <button
+                className="px-2 py-1 text-xs rounded-lg border border-neutral-300 hover:bg-neutral-50"
+                onClick={() => setOpenPref(true)}
+              >
+                選択（{prefs.length ? `${prefs.length}件` : "全国"}）
+              </button>
+              {prefs.length > 0 && (
+                <button
+                  className="px-2 py-1 text-xs rounded-lg border border-neutral-300 hover:bg-neutral-50"
+                  onClick={() => setPrefs([])}
+                >
+                  クリア
+                </button>
+              )}
             </div>
           </div>
 
-          <div className="mt-3 flex items-center gap-3">
-            <label className="text-xs text-neutral-600">
-              件数目安
-              <input
-                type="number"
-                min={1}
-                max={200}
-                value={want}
-                onChange={(e) =>
-                  setWant(Math.max(1, Math.min(200, +e.target.value || 1)))
-                }
-                className="ml-2 w-24 rounded-md border border-neutral-300 px-2 py-1 text-sm"
-              />
-            </label>
+          {/* 年齢/雇用/年収（バッチ選択） */}
+          <div>
+            <div className="mb-1 text-xs font-medium text-neutral-600">
+              年齢層
+            </div>
+            <TagMulti values={ages} setValues={setAges} options={AGE_BANDS} />
+          </div>
+          <div>
+            <div className="mb-1 text-xs font-medium text-neutral-600">
+              雇用形態
+            </div>
+            <TagMulti values={emps} setValues={setEmps} options={EMP_TYPES} />
+          </div>
+          <div>
+            <div className="mb-1 text-xs font-medium text-neutral-600">
+              年収帯
+            </div>
+            <TagMulti values={sals} setValues={setSals} options={SALARY_BAND} />
+          </div>
+
+          <div className="pt-2">
             <button
               onClick={run}
               disabled={running || sites.length === 0}
-              className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50 disabled:opacity-50"
+              className="inline-flex items-center gap-2 rounded-lg border border-neutral-300 px-4 py-2 text-sm hover:bg-neutral-50 disabled:opacity-50"
             >
-              {running ? "実行中…" : "実行する（履歴に保存）"}
+              {running && (
+                <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                  <circle
+                    cx="12"
+                    cy="12"
+                    r="10"
+                    stroke="currentColor"
+                    strokeWidth="4"
+                    fill="none"
+                    opacity="0.25"
+                  />
+                  <path
+                    d="M22 12a10 10 0 00-10-10"
+                    stroke="currentColor"
+                    strokeWidth="4"
+                    fill="none"
+                  />
+                </svg>
+              )}
+              実行する
             </button>
           </div>
+
+          {msg && (
+            <pre className="whitespace-pre-wrap text-xs text-neutral-600">
+              {msg}
+            </pre>
+          )}
         </section>
 
-        {/* プレビュー */}
-        <section className="rounded-2xl border border-neutral-200 overflow-x-auto">
-          <table className="min-w-[980px] w-full text-sm">
-            <thead className="bg-neutral-50 text-neutral-600">
-              <tr>
-                <th className="px-3 py-3 text-left">サイト</th>
-                <th className="px-3 py-3 text-left">大分類</th>
-                <th className="px-3 py-3 text-left">小分類</th>
-                <th className="px-3 py-3 text-left">年齢層</th>
-                <th className="px-3 py-3 text-left">雇用形態</th>
-                <th className="px-3 py-3 text-left">年収帯</th>
-                <th className="px-3 py-3 text-left">都道府県</th>
-                <th className="px-3 py-3 text-left">求人数</th>
-                <th className="px-3 py-3 text-left">求職者数</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-neutral-200">
-              {preview.map((r, idx) => (
-                <tr key={idx}>
-                  <td className="px-3 py-2">{r.site_key}</td>
-                  <td className="px-3 py-2">{r.internal_large ?? "-"}</td>
-                  <td className="px-3 py-2">{r.internal_small ?? "-"}</td>
-                  <td className="px-3 py-2">{r.age_band ?? "-"}</td>
-                  <td className="px-3 py-2">{r.employment_type ?? "-"}</td>
-                  <td className="px-3 py-2">{r.salary_band ?? "-"}</td>
-                  <td className="px-3 py-2">{r.prefecture ?? "-"}</td>
-                  <td className="px-3 py-2">{r.jobs_count ?? "-"}</td>
-                  <td className="px-3 py-2">{r.candidates_count ?? "-"}</td>
-                </tr>
-              ))}
-              {preview.length === 0 && (
+        {/* 結果表 */}
+        <section className="mt-6 rounded-2xl border border-neutral-200 p-4">
+          <div className="text-sm font-semibold mb-2">
+            取得結果（今回の手動実行）
+          </div>
+          <div className="overflow-x-auto rounded-xl border border-neutral-200">
+            <table className="min-w-[900px] w-full text-sm">
+              <thead className="bg-neutral-50 text-neutral-600">
                 <tr>
-                  <td
-                    colSpan={9}
-                    className="px-4 py-8 text-center text-neutral-400"
-                  >
-                    プレビューはありません
-                  </td>
+                  <th className="px-3 py-3 text-left">サイト</th>
+                  <th className="px-3 py-3 text-left">大分類</th>
+                  <th className="px-3 py-3 text-left">小分類</th>
+                  <th className="px-3 py-3 text-left">都道府県</th>
+                  <th className="px-3 py-3 text-left">年齢層</th>
+                  <th className="px-3 py-3 text-left">雇用形態</th>
+                  <th className="px-3 py-3 text-left">年収帯</th>
+                  <th className="px-3 py-3 text-right">求人数</th>
+                  <th className="px-3 py-3 text-right">求職者数</th>
                 </tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {(rows ?? []).length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan={9}
+                      className="px-4 py-8 text-center text-neutral-400"
+                    >
+                      まだ結果がありません
+                    </td>
+                  </tr>
+                ) : (
+                  (rows ?? []).map((r, i) => (
+                    <tr key={i} className="border-t border-neutral-200">
+                      <td className="px-3 py-3">{r.site_key}</td>
+                      <td className="px-3 py-3">{r.internal_large ?? "-"}</td>
+                      <td className="px-3 py-3">{r.internal_small ?? "-"}</td>
+                      <td className="px-3 py-3">{r.prefecture ?? "-"}</td>
+                      <td className="px-3 py-3">{r.age_band ?? "-"}</td>
+                      <td className="px-3 py-3">{r.employment_type ?? "-"}</td>
+                      <td className="px-3 py-3">{r.salary_band ?? "-"}</td>
+                      <td className="px-3 py-3 text-right">
+                        {r.jobs_count ?? 0}
+                      </td>
+                      <td className="px-3 py-3 text-right">
+                        {r.candidates_count ?? 0}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
         </section>
-
-        {msg && (
-          <pre className="mt-3 whitespace-pre-wrap text-xs text-neutral-600">
-            {msg}
-          </pre>
-        )}
-
-        {/* 職種モーダル */}
-        {openCat && (
-          <JobCategoryModal
-            large={large}
-            small={small}
-            onCloseAction={() => setOpenCat(false)}
-            onApplyAction={(L: string[], S: string[]) => {
-              setLarge(L);
-              setSmall(S);
-              setOpenCat(false);
-            }}
-          />
-        )}
       </main>
+
+      {/* モーダル */}
+      {openCat && (
+        <JobCategoryModal
+          large={large}
+          small={small}
+          onCloseAction={() => setOpenCat(false)}
+          onApplyAction={(L, S) => {
+            setLarge(L);
+            setSmall(S);
+            setOpenCat(false);
+          }}
+        />
+      )}
+      {openPref && (
+        <PrefectureModal
+          selected={prefs}
+          onCloseAction={() => setOpenPref(false)}
+          onApplyAction={(p) => {
+            setPrefs(p);
+            setOpenPref(false);
+          }}
+        />
+      )}
     </>
   );
 }
