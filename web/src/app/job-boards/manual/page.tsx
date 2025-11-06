@@ -12,18 +12,6 @@ const JobCategoryModal = dynamic(
   { ssr: false }
 );
 
-/** =========== 共通: Cookieから tenant_id を読む =========== */
-function getTenantIdFromCookie(): string | null {
-  try {
-    const m = document.cookie.match(
-      /(?:^|;\s*)(x-tenant-id|tenant_id)=([^;]+)/i
-    );
-    return m ? decodeURIComponent(m[2]) : null;
-  } catch {
-    return null;
-  }
-}
-
 /** =========================
  * 都道府県モーダル（共通）
  * ========================= */
@@ -285,6 +273,24 @@ type ManualFetchRow = {
   candidates_count: number | null;
 };
 
+/** ===== UUID ユーティリティ（x-tenant-id対策） ===== */
+function isValidUuid(v: string | null): v is string {
+  if (!v) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    v
+  );
+}
+function getTenantIdFromCookie(): string | null {
+  try {
+    const m = document.cookie.match(
+      /(?:^|;\s*)(x-tenant-id|tenant_id)=([^;]+)/i
+    );
+    return m ? decodeURIComponent(m[2]) : null;
+  } catch {
+    return null;
+  }
+}
+
 export default function JobBoardsManualPage() {
   const [sites, setSites] = useState<string[]>(
     SITE_OPTIONS.map((s) => s.value)
@@ -362,15 +368,21 @@ export default function JobBoardsManualPage() {
     setMsg("");
     setRows([]);
     try {
-      const tenant = getTenantIdFromCookie(); // ← ヘッダー送信（なくてもAPI側でfallback）
-      const headers: Record<string, string> = {
-        "content-type": "application/json",
-      };
-      if (tenant) headers["x-tenant-id"] = tenant;
+      const tenant = getTenantIdFromCookie();
+      if (!isValidUuid(tenant)) {
+        setRunning(false);
+        setMsg(
+          "テナントID（UUID）が見つかりません。ログイン後、または x-tenant-id クッキー/ヘッダを設定してください。"
+        );
+        return;
+      }
 
       const resp = await fetch("/api/job-boards/manual/run-batch", {
         method: "POST",
-        headers,
+        headers: {
+          "content-type": "application/json",
+          "x-tenant-id": tenant,
+        },
         body: JSON.stringify({
           sites,
           large,
@@ -380,15 +392,16 @@ export default function JobBoardsManualPage() {
           sal: sals,
           pref: prefs,
           want: 200,
-          saveMode: "history", // ← 履歴として保存
+          saveMode: "history", // 履歴へ保存
         }),
       });
       const j = await resp.json();
       if (!resp.ok || !j?.ok) throw new Error(j?.error || "run failed");
-
-      // ← プレビュー（サーバで履歴保存済み）
       setRows((j?.preview as ManualFetchRow[]) ?? []);
-      setMsg(j?.note || (j?.history_id ? `履歴ID: ${j.history_id}` : ""));
+      setMsg(
+        j?.note ||
+          (j?.history_id ? `履歴に保存しました（ID: ${j.history_id}）` : "")
+      );
     } catch (e: any) {
       setMsg(String(e?.message || e));
     } finally {
@@ -410,7 +423,7 @@ export default function JobBoardsManualPage() {
             </p>
           </div>
           <Link
-            href="/job-boards/manual/history" // ← パス修正
+            href="/job-boards/manual/history"
             className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
           >
             手動実行履歴へ
