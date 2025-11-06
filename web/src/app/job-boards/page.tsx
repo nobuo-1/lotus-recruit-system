@@ -450,6 +450,14 @@ export default function JobBoardsPage() {
                     送り先一覧
                   </Link>
                 </li>
+                <li>
+                  <Link
+                    href="/job-boards/manual/history"
+                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
+                  >
+                    手動実行履歴
+                  </Link>
+                </li>
               </ul>
             </section>
             {/* 設定 */}

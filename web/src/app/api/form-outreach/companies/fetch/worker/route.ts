@@ -1,18 +1,21 @@
-// web/src/app/api/form-outreach/companies/fetch/route.ts
+// web/src/app/api/form-outreach/companies/fetch/worker/route.ts
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-/** ---------- Types ---------- */
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
 type Filters = {
   prefectures?: string[];
   employee_size_ranges?: Array<"1-9" | "10-49" | "50-249" | "250+">;
   keywords?: string[];
   industries_large?: string[];
   industries_small?: string[];
-  max?: number; // for backward compat
+  max?: number;
 };
 
 type Candidate = {
@@ -27,15 +30,6 @@ type Candidate = {
 };
 
 type AskBatchHint = { round: number; remain: number; seed?: string };
-
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-
-/** ---------- Utils ---------- */
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const clamp = (n: any, min: number, max: number) =>
-  Math.max(min, Math.min(max, Math.floor(Number(n) || 0)));
 
 const JP_PREFS = [
   "北海道",
@@ -87,6 +81,10 @@ const JP_PREFS = [
   "沖縄県",
 ];
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const clamp = (n: any, min: number, max: number) =>
+  Math.max(min, Math.min(max, Math.floor(Number(n) || 0)));
+
 function normalizeUrl(u?: string): string | undefined {
   if (!u) return;
   try {
@@ -113,7 +111,7 @@ async function fetchWithTimeout(
       headers: {
         "user-agent":
           (init.headers as any)?.["user-agent"] ||
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
       },
     });
   } finally {
@@ -152,14 +150,12 @@ function extractEmails(
   for (const e of deobfuscateEmails(text)) pool.add(e);
 
   if (html) {
-    // mailto:
     const mailtoRe = /href=["']mailto:([^"']+)["']/gi;
     let m: RegExpExecArray | null;
     while ((m = mailtoRe.exec(html))) {
       const raw = decodeURIComponent(m[1] || "");
       for (const e of deobfuscateEmails(raw)) pool.add(e);
     }
-    // JSON-LD
     const ldRe =
       /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
     while ((m = ldRe.exec(html))) {
@@ -204,7 +200,6 @@ function extractHQPrefecture(html: string, text: string): string[] {
   return [...prefs];
 }
 
-// 業種推定（最低限の辞書・必要に応じて拡張可能）
 const INDUSTRY_MAP: Array<{ large: string; small: string; kw: RegExp }> = [
   { large: "IT・通信", small: "SaaS", kw: /(saas|クラウド|SaaS)/i },
   {
@@ -221,9 +216,8 @@ function classifyIndustryFromText(text: string): {
   large?: string;
   small?: string;
 } {
-  for (const rule of INDUSTRY_MAP) {
+  for (const rule of INDUSTRY_MAP)
     if (rule.kw.test(text)) return { large: rule.large, small: rule.small };
-  }
   return {};
 }
 
@@ -325,7 +319,6 @@ function dedupe(cands: Candidate[]): Candidate[] {
   return out;
 }
 
-/** 厳格フィルタ（AND） */
 function matchesFilters(c: Candidate, f: Filters): boolean {
   if (f.prefectures?.length) {
     const set = new Set((c.prefectures ?? []).map(String));
@@ -358,7 +351,6 @@ function matchesFilters(c: Candidate, f: Filters): boolean {
   return true;
 }
 
-/** ---------- OpenAI ---------- */
 async function askOpenAIForCompanies(
   filters: Filters,
   want: number,
@@ -434,22 +426,21 @@ async function askOpenAIForCompanies(
     }))
     .filter((c: Candidate) => c.company_name && c.website);
 
-  // LLMは多めに返す可能性、ここでは抑制
   return mapped.slice(0, Math.max(want * 3, 60));
 }
 
-/** ---------- Handler (Batch strict, fill-to-want) ---------- */
+/** ========= 実行（分割・レジューム） ========= */
 export async function POST(req: Request) {
   try {
     if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
       return NextResponse.json(
-        { error: "Supabase service role not configured" },
+        { ok: false, error: "Supabase service role not configured" },
         { status: 500 }
       );
     }
     if (!OPENAI_API_KEY) {
       return NextResponse.json(
-        { error: "OPENAI_API_KEY 未設定です" },
+        { ok: false, error: "OPENAI_API_KEY not set" },
         { status: 400 }
       );
     }
@@ -457,24 +448,102 @@ export async function POST(req: Request) {
     const tenantId = req.headers.get("x-tenant-id") || "";
     if (!tenantId)
       return NextResponse.json(
-        { error: "x-tenant-id required" },
+        { ok: false, error: "x-tenant-id required" },
         { status: 400 }
       );
 
-    const body = await req.json().catch(() => ({}));
-    const filters: Filters = body?.filters ?? {};
-    const want: number = clamp(body?.want ?? filters.max ?? 12, 1, 200); // 1〜200/回
-    const seed: string = String(body?.seed || Math.random()).slice(2);
-
     const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+    const body = (await req.json().catch(() => ({}))) as { run_id?: string };
 
-    // 既存 website を先に収集（重複避け）
+    // Run 特定（明示 run_id 優先、なければ queued/running の最古）
+    let run: {
+      id: string;
+      status: string;
+      progress: number;
+      inserted: number;
+      want: number;
+      filters: any;
+      seed: string | null;
+      started_at: string | null;
+    } | null = null;
+
+    if (body?.run_id) {
+      const { data, error } = await admin
+        .from("form_outreach_company_fetch_runs")
+        .select("id,status,progress,inserted,want,filters,seed,started_at")
+        .eq("tenant_id", tenantId)
+        .eq("id", body.run_id)
+        .single();
+      if (error)
+        return NextResponse.json(
+          { ok: false, error: error.message },
+          { status: 404 }
+        );
+      run = data as any;
+    } else {
+      const { data, error } = await admin
+        .from("form_outreach_company_fetch_runs")
+        .select("id,status,progress,inserted,want,filters,seed,started_at")
+        .eq("tenant_id", tenantId)
+        .in("status", ["queued", "running"])
+        .order("created_at", { ascending: true })
+        .limit(1)
+        .maybeSingle();
+      if (error)
+        return NextResponse.json(
+          { ok: false, error: error.message },
+          { status: 500 }
+        );
+      run = (data as any) || null;
+    }
+
+    if (!run) {
+      return NextResponse.json({ ok: true, note: "no queued/running run" });
+    }
+    if (run.status === "done") {
+      return NextResponse.json({
+        ok: true,
+        note: "already done",
+        run_id: run.id,
+      });
+    }
+    if (run.status === "canceled") {
+      return NextResponse.json({ ok: true, note: "canceled", run_id: run.id });
+    }
+
+    const filters: Filters = (run.filters as any) ?? {};
+    const seed = (run.seed ?? String(Math.random()).slice(2)) as string;
+    const want = clamp(run.want, 1, 500);
+    let progress = clamp(run.progress, 0, want);
+    let inserted = clamp(run.inserted, 0, want);
+
+    // running 化
+    {
+      const { error } = await admin
+        .from("form_outreach_company_fetch_runs")
+        .update({
+          status: "running",
+          started_at: run.started_at ?? new Date().toISOString(),
+        })
+        .eq("id", run.id)
+        .eq("tenant_id", tenantId);
+      if (error)
+        return NextResponse.json(
+          { ok: false, error: error.message },
+          { status: 500 }
+        );
+    }
+
+    // 既存 website（重複回避）
     const { data: existing, error: exErr } = await admin
       .from("form_prospects")
       .select("website")
       .eq("tenant_id", tenantId);
     if (exErr)
-      return NextResponse.json({ error: exErr.message }, { status: 500 });
+      return NextResponse.json(
+        { ok: false, error: exErr.message },
+        { status: 500 }
+      );
 
     const existingSet = new Set(
       (existing || [])
@@ -482,15 +551,36 @@ export async function POST(req: Request) {
         .filter(Boolean)
     );
 
-    // 1回の呼び出し内で、厳格フィルタを満たす候補を want 件まで埋めきる
-    let pool: Candidate[] = [];
+    // 予算
     const MAX_ROUNDS = 8;
     const CONCURRENCY = 8;
-    const REQUEST_BUDGET_MS = 28_000; // Vercel 300s 対策
+    const REQUEST_BUDGET_MS = 27_000;
     const t0 = Date.now();
 
     for (let round = 1; round <= MAX_ROUNDS; round++) {
-      const remain = Math.max(0, want - pool.length);
+      // === 途中キャンセル/完了チェック === ※ここを maybeSingle() に修正
+      {
+        const { data: fresh } = await admin
+          .from("form_outreach_company_fetch_runs")
+          .select("status")
+          .eq("id", run.id)
+          .eq("tenant_id", tenantId)
+          .maybeSingle();
+
+        const st = (fresh as any)?.status as string | undefined;
+        if (st === "canceled" || st === "done") {
+          return NextResponse.json({
+            ok: true,
+            run_id: run.id,
+            status: st,
+            progress,
+            inserted,
+            want,
+          });
+        }
+      }
+
+      const remain = Math.max(0, want - progress);
       if (remain === 0) break;
 
       const llm = await askOpenAIForCompanies(filters, remain, {
@@ -499,78 +589,206 @@ export async function POST(req: Request) {
         seed: `${seed}-${round}`,
       });
 
-      // 重複排除（既存DB & これまでのpool & URL空）
-      const step1: Candidate[] = dedupe(llm).filter(
-        (c: Candidate) =>
-          !!c.website && !existingSet.has(String(c.website).toLowerCase())
+      const pool = dedupe(
+        llm.filter(
+          (c) =>
+            !!c.website && !existingSet.has(String(c.website).toLowerCase())
+        )
       );
-      if (!step1.length) {
+
+      if (!pool.length) {
         if (Date.now() - t0 > REQUEST_BUDGET_MS) break;
         continue;
       }
 
-      // 検証＆付加情報
-      for (let i = 0; i < step1.length; i += CONCURRENCY) {
-        const slice: Candidate[] = step1.slice(i, i + CONCURRENCY);
+      for (let i = 0; i < pool.length; i += CONCURRENCY) {
+        // === ループ内のキャンセル/完了チェック === ※ここも maybeSingle() に修正
+        const { data: fresh } = await admin
+          .from("form_outreach_company_fetch_runs")
+          .select("status")
+          .eq("id", run.id)
+          .eq("tenant_id", tenantId)
+          .maybeSingle();
+
+        const st = (fresh as any)?.status as string | undefined;
+        if (st === "canceled" || st === "done") {
+          return NextResponse.json({
+            ok: true,
+            run_id: run.id,
+            status: st,
+            progress,
+            inserted,
+            want,
+          });
+        }
+
+        const slice = pool.slice(i, i + CONCURRENCY);
         const chunk = await Promise.all(
-          slice.map((cand: Candidate) => verifyAndEnrich(cand))
+          slice.map((cand) => verifyAndEnrich(cand))
         );
         const verified = (chunk.filter(Boolean) as Candidate[]).filter((cc) =>
           matchesFilters(cc, filters)
         );
-        // 厳格一致のみ追加
-        pool.push(...verified);
-        pool = dedupe(pool).slice(0, want);
-        if (pool.length >= want) break;
+
+        if (verified.length) {
+          const rows = verified.map((c) => ({
+            tenant_id: tenantId,
+            company_name: c.company_name,
+            website: c.website!,
+            contact_form_url: c.contact_form_url ?? null,
+            contact_email: c.contact_email ?? null,
+            industry:
+              [c.industry_large, c.industry_small]
+                .filter(Boolean)
+                .join(" / ") || null,
+            company_size: c.company_size ?? null,
+            job_site_source: "llm+web",
+            status: "new",
+            prefectures: c.prefectures ?? [],
+          }));
+
+          const { data: up, error: insErr } = await admin
+            .from("form_prospects")
+            .upsert(rows, { onConflict: "tenant_id,website" })
+            .select("id");
+
+          if (insErr) {
+            await admin
+              .from("form_outreach_company_fetch_runs")
+              .update({ status: "running", progress, inserted })
+              .eq("id", run.id)
+              .eq("tenant_id", tenantId);
+            return NextResponse.json(
+              { ok: false, error: insErr.message },
+              { status: 500 }
+            );
+          }
+
+          const added = up?.length ?? 0;
+          progress = clamp(progress + added, 0, want);
+          inserted = clamp(inserted + added, 0, want);
+
+          await admin
+            .from("form_outreach_company_fetch_runs")
+            .update({ progress, inserted })
+            .eq("id", run.id)
+            .eq("tenant_id", tenantId);
+        }
+
+        if (progress >= want) break;
         if (Date.now() - t0 > REQUEST_BUDGET_MS) break;
       }
 
-      if (pool.length < want) await sleep(150);
+      if (progress < want) await sleep(150);
       if (Date.now() - t0 > REQUEST_BUDGET_MS) break;
     }
 
-    const toInsert: Candidate[] = pool.slice(0, want);
-    if (toInsert.length === 0) {
-      return NextResponse.json({
-        inserted: 0,
-        rows: [],
-        note: "条件に合致する新規候補が見つかりませんでした",
-      });
+    const done = progress >= want;
+    const update: Record<string, any> = {
+      status: done ? "done" : "running",
+      progress,
+      inserted,
+    };
+    if (done) update.finished_at = new Date().toISOString();
+
+    const { error: upErr } = await admin
+      .from("form_outreach_company_fetch_runs")
+      .update(update)
+      .eq("id", run.id)
+      .eq("tenant_id", tenantId);
+
+    if (upErr) {
+      return NextResponse.json(
+        { ok: false, error: upErr.message },
+        { status: 500 }
+      );
     }
 
-    // 保存：重複は upsert でスキップ/更新（tenant_id,website が一意キー想定）
-    const rows = toInsert.map((c: Candidate) => ({
-      tenant_id: tenantId,
-      company_name: c.company_name,
-      website: c.website!,
-      contact_form_url: c.contact_form_url ?? null,
-      contact_email: c.contact_email ?? null,
-      industry:
-        [c.industry_large, c.industry_small].filter(Boolean).join(" / ") ||
-        null,
-      company_size: c.company_size ?? null,
-      job_site_source: "llm+web",
-      status: "new",
-      prefectures: c.prefectures ?? [],
-    }));
-
-    const { data: inserted, error: insErr } = await admin
-      .from("form_prospects")
-      .upsert(rows, { onConflict: "tenant_id,website" })
-      .select(
-        "id, tenant_id, company_name, website, contact_email, contact_form_url, industry, company_size, job_site_source, prefectures, created_at"
-      );
-
-    if (insErr)
-      return NextResponse.json({ error: insErr.message }, { status: 500 });
-
     return NextResponse.json({
-      inserted: inserted?.length || 0,
-      rows: inserted || [],
+      ok: true,
+      run_id: run.id,
+      status: update.status,
+      progress,
+      inserted,
+      want,
+      budget_ms: Date.now() - t0,
     });
   } catch (e: any) {
     return NextResponse.json(
-      { error: String(e?.message || e) },
+      { ok: false, error: String(e?.message || e) },
+      { status: 500 }
+    );
+  }
+}
+
+/** ========= キャンセル / 強制完了（管理操作） =========
+ *  PATCH /api/form-outreach/companies/fetch/worker
+ *  body: { run_id: string, action: "cancel" | "force_done" }
+ */
+export async function PATCH(req: Request) {
+  try {
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+      return NextResponse.json(
+        { ok: false, error: "Supabase service role not configured" },
+        { status: 500 }
+      );
+    }
+    const tenantId = req.headers.get("x-tenant-id") || "";
+    if (!tenantId)
+      return NextResponse.json(
+        { ok: false, error: "x-tenant-id required" },
+        { status: 400 }
+      );
+
+    const { run_id, action } = (await req.json().catch(() => ({}))) as {
+      run_id?: string;
+      action?: "cancel" | "force_done";
+    };
+
+    if (!run_id || !action) {
+      return NextResponse.json(
+        { ok: false, error: "run_id and action(cancel|force_done) required" },
+        { status: 400 }
+      );
+    }
+
+    const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+    if (action === "cancel") {
+      const { error } = await admin
+        .from("form_outreach_company_fetch_runs")
+        .update({ status: "canceled", finished_at: new Date().toISOString() })
+        .eq("id", run_id)
+        .eq("tenant_id", tenantId);
+      if (error)
+        return NextResponse.json(
+          { ok: false, error: error.message },
+          { status: 500 }
+        );
+      return NextResponse.json({ ok: true, run_id, status: "canceled" });
+    }
+
+    if (action === "force_done") {
+      const { error } = await admin
+        .from("form_outreach_company_fetch_runs")
+        .update({ status: "done", finished_at: new Date().toISOString() })
+        .eq("id", run_id)
+        .eq("tenant_id", tenantId);
+      if (error)
+        return NextResponse.json(
+          { ok: false, error: error.message },
+          { status: 500 }
+        );
+      return NextResponse.json({ ok: true, run_id, status: "done" });
+    }
+
+    return NextResponse.json(
+      { ok: false, error: "invalid action" },
+      { status: 400 }
+    );
+  } catch (e: any) {
+    return NextResponse.json(
+      { ok: false, error: String(e?.message || e) },
       { status: 500 }
     );
   }
