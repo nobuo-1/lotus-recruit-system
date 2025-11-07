@@ -51,8 +51,9 @@ const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-// 契約があれば利用、なければフォールバック
+// 国税庁 Web-API キー（必須）
 const NTA_CORP_API_KEY = process.env.NTA_CORP_API_KEY || "";
+// 登記情報提供サービス（任意・未実装フォールバックあり）
 const TIIS_API_KEY = process.env.TIIS_API_KEY || "";
 
 /** ---------- Utils ---------- */
@@ -307,7 +308,7 @@ function resolveLinks(
   base: string
 ): Array<{ href: string; label: string }> {
   const out: Array<{ href: string; label: string }> = [];
-  const re = /<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  const re = /<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\s]*?)<\/a>/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(html))) {
     try {
@@ -358,89 +359,198 @@ function prefecturesFromAddress(addr?: string | null): string[] {
   return hit.length ? hit.slice(0, 2) : [];
 }
 
-/** --------- Phase A: 国税庁(法人番号)ベース候補（SME優先 + ランダム都道府県固定） --------- */
-async function fetchCorporatesBase(
+/** =========================
+ * 国税庁 Web-API（住所検索）ラッパ
+ *  - ここでは AI を一切使わない
+ *  - フィルタで指定された都道府県から 1つ固定で選び、
+ *    市区町村／町丁名（丁目を除く）の固定語で検索 → 結果を乱択抽出
+ * ========================= */
+
+// 大量件数対策：都道府県→代表的な市区町村／町丁名（丁目なし）シード
+const MUNICIPALITY_SEEDS: Record<string, string[]> = {
+  東京都: [
+    "千代田区神田",
+    "中央区日本橋",
+    "港区芝",
+    "新宿区西新宿",
+    "文京区本郷",
+    "台東区台東",
+    "墨田区吾妻橋",
+    "江東区豊洲",
+    "品川区大井",
+    "目黒区上目黒",
+    "大田区蒲田",
+    "世田谷区三軒茶屋",
+    "渋谷区渋谷",
+    "中野区中野",
+    "杉並区高円寺",
+    "豊島区池袋",
+    "北区王子",
+    "荒川区西日暮里",
+    "板橋区板橋",
+    "練馬区豊玉北",
+    "足立区綾瀬",
+    "葛飾区新小岩",
+    "江戸川区西葛西",
+  ],
+  大阪府: [
+    "大阪市北区梅田",
+    "大阪市中央区本町",
+    "堺市堺区南瓦町",
+    "東大阪市荒本北",
+  ],
+  愛知県: [
+    "名古屋市中村区名駅",
+    "名古屋市中区栄",
+    "豊田市西町",
+    "岡崎市康生通",
+  ],
+  神奈川県: [
+    "横浜市西区みなとみらい",
+    "川崎市中原区小杉町",
+    "相模原市中央区中央",
+  ],
+  北海道: ["札幌市中央区大通西", "札幌市北区北二十四条西"],
+  福岡県: ["福岡市博多区博多駅前", "福岡市中央区天神"],
+};
+
+function randomPick<T>(arr: T[], seedNum: number): T {
+  return arr[Math.floor(seedNum % arr.length)];
+}
+
+async function ntaAddressSearch(
+  address: string,
+  limit = 200
+): Promise<Candidate[]> {
+  // 公式ドキュメントに準拠した v4 エンドポイント（住所検索）
+  // ※ ご利用環境の仕様に合わせて `type` などのクエリは適宜調整してください。
+  const base = "https://api.houjin-bangou.nta.go.jp/4/address";
+  const qs = new URLSearchParams({
+    id: NTA_CORP_API_KEY,
+    address,
+    // 以下は安全側の既定値（該当 API パラメータが存在しない場合は無視されます）
+    type: "12", // 住所検索
+    mode: "2", // 前方一致/部分一致の緩和
+    target: "1", // 現在情報
+    divide: "1", // ページ分割あり
+    // 上限（API 仕様の上限に応じて自動的に丸められる可能性あり）
+    // 明示の limit/offset が無い API の場合はサーバ側に依存
+  });
+  const url = `${base}?${qs.toString()}`;
+
+  const r = await fetchWithTimeout(url, {}, 12000);
+  const text = await r.text();
+  if (!r.ok)
+    throw new Error(`NTA API error ${r.status}: ${text.slice(0, 200)}`);
+
+  let j: any = {};
+  try {
+    j = JSON.parse(text);
+  } catch {
+    throw new Error("NTA API JSON parse failed");
+  }
+
+  // 返却 JSON の中から、corporate_number / name / address を持つ配列を抽出
+  const rows: any[] = deepCollectCorporateLike(j);
+  const out: Candidate[] = rows
+    .slice(0, limit)
+    .map((x) => {
+      const name = String(x?.name ?? x?.corporationName ?? "").trim();
+      const number =
+        String(x?.corporate_number ?? x?.corporateNumber ?? "").trim() || null;
+      const addr = String(x?.address ?? x?.location ?? "").trim() || null;
+      return {
+        company_name: name,
+        corporate_number: number,
+        hq_address: addr,
+        website: null,
+        prefectures: prefecturesFromAddress(addr),
+      };
+    })
+    .filter((c) => !!c.company_name);
+
+  return out;
+}
+
+// JSON 深部から会社っぽいノードを収集（corporate_number を持つもの）
+function deepCollectCorporateLike(root: any): any[] {
+  const out: any[] = [];
+  const stack: any[] = [root];
+  while (stack.length) {
+    const cur = stack.pop();
+    if (!cur) continue;
+    if (Array.isArray(cur)) {
+      for (const v of cur) stack.push(v);
+      continue;
+    }
+    if (typeof cur === "object") {
+      const keys = Object.keys(cur);
+      const hasNumKey = keys.some((k) => /corporate[_]?number/i.test(k));
+      const hasNameKey = keys.some((k) => /(name|corporationName)/i.test(k));
+      const hasAddrKey = keys.some((k) => /(address|location)/i.test(k));
+      if (hasNumKey && hasNameKey) out.push(cur);
+      for (const k of keys) stack.push(cur[k]);
+    }
+  }
+  return out;
+}
+
+/** --------- Phase A: 国税庁 Web-API からの候補取得（AI 不使用） --------- */
+async function fetchFromNTA(
   filters: Filters,
   want: number,
   hint: AskBatchHint
 ): Promise<Candidate[]> {
-  // 実装メモ: 本来は国税庁API（CSV等）→ TIIS 連携。ここでは LLM フォールバック。
-  if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is not set");
+  if (!NTA_CORP_API_KEY) {
+    throw new Error(
+      "NTA_CORP_API_KEY が未設定です。国税庁 法人番号公表サイトの Web-API キーを設定してください。（Phase A は AI を使用しません）"
+    );
+  }
 
-  const sys =
-    "You are a diligent Japanese business research assistant. Output STRICT JSON only, no commentary.";
-
-  // Pref を 1県に固定（指定があればその中から）
+  // フィルタの都道府県から 1 つ固定選択（指定無しなら全国）
   const pool =
     Array.isArray(filters.prefectures) && filters.prefectures.length
       ? filters.prefectures
       : JP_PREFS;
   const seedNum =
     Number(String(hint.seed || Date.now()).replace(/\D/g, "")) || Date.now();
-  const fixedPref = pool[Math.floor(seedNum % pool.length)];
+  const pref = randomPick(pool, seedNum);
 
-  const prompt = `以下条件に合致する日本の法人候補を出してください。上場企業・大手グループ本社は避け、中小〜中堅企業を優先。
-各アイテムは次のキーを含めてください:
-{company_name, hq_address, corporate_number, website}
-- website は https:// から始まる公式サイトが望ましい（不明なら空可）
-- hq_address には必ず都道府県名を含める（例: 東京都...）
-- 必ず ${fixedPref} に所在する企業のみ返す（他県を返さない）
-- 重複を避ける
-出力は JSON のみ: {"items":[...]}。
+  // 市区町村／町丁名のシード。巨大件数対策としてできるだけ町丁名まで入れる。
+  const muniSeeds = MUNICIPALITY_SEEDS[pref] || [];
+  const addressSeeds = muniSeeds.length ? muniSeeds : [pref];
 
-任意キーワード: ${
-    Array.isArray(filters.keywords) && filters.keywords.length
-      ? filters.keywords.join(", ")
-      : "指定なし"
+  const bag: Candidate[] = [];
+  // 過剰呼び出しを避けつつ、複数 seed から分散取得
+  for (let i = 0; i < addressSeeds.length; i++) {
+    if (bag.length >= want * 3) break; // 余裕を持って確保
+    const addr =
+      addressSeeds[(i + (seedNum % addressSeeds.length)) % addressSeeds.length];
+    try {
+      const one = await ntaAddressSearch(addr, 300);
+      bag.push(...one);
+      // 同一住所で噴出するのを抑制
+      await sleep(100);
+    } catch {
+      // 次の seed へ
+    }
   }
-ラウンド: ${hint.round} / 少なくとも ${hint.remain} 社は新規で
-シード: ${hint.seed || "-"}`;
 
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${OPENAI_API_KEY}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "gpt-4o",
-      temperature: 0.2,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: sys },
-        { role: "user", content: prompt },
-      ],
-    }),
-  });
-
-  const txt = await res.text();
-  if (!res.ok) throw new Error(`OpenAI error ${res.status}: ${txt}`);
-
-  let payload: any = {};
-  try {
-    const j = JSON.parse(txt);
-    const content = j?.choices?.[0]?.message?.content ?? "{}";
-    payload = JSON.parse(content);
-  } catch {}
-
-  const items = Array.isArray(payload?.items) ? payload.items : [];
-  const mapped: Candidate[] = items
-    .map((x: any): Candidate | null => {
-      const name = String(x?.company_name || "").trim();
-      if (!name) return null;
-      const hq = typeof x?.hq_address === "string" ? x.hq_address : null;
-      const prefs = prefecturesFromAddress(hq);
-      return {
-        company_name: name,
-        hq_address: hq,
-        corporate_number:
-          typeof x?.corporate_number === "string" ? x.corporate_number : null,
-        website: normalizeUrl(x?.website) ?? null,
-        prefectures: prefs.length ? prefs : undefined,
-      };
-    })
-    .filter((c: Candidate | null): c is Candidate => !!c);
-  return mapped.slice(0, Math.max(want * 3, 60));
+  // 乱択 → 重複排除 → 返却
+  const uniq = new Map<string, Candidate>();
+  for (const c of bag) {
+    const key = `${(c.corporate_number || "").toLowerCase()}__${(
+      c.company_name || ""
+    ).toLowerCase()}`;
+    if (!uniq.has(key)) uniq.set(key, c);
+  }
+  const all = Array.from(uniq.values());
+  // fisher–yates 的シャッフル簡略
+  for (let i = all.length - 1; i > 0; i--) {
+    const j = (seedNum + i) % (i + 1);
+    [all[i], all[j]] = [all[j], all[i]];
+  }
+  return all.slice(0, Math.max(want * 2, 60));
 }
 
 /** --------- Phase B: 登記（資本金/設立）付与（フォールバックあり） --------- */
@@ -487,7 +597,7 @@ async function enrichRegistryInfo(c: Candidate): Promise<Candidate> {
   };
 }
 
-/** --------- Phase C: 公式HP 到達/抽出 --------- */
+/** --------- Phase C: 公式HP 到達/抽出（※AI はここでは使用可） --------- */
 async function verifyAndEnrichWebsite(c: Candidate): Promise<Candidate | null> {
   const site = normalizeUrl(c.website || undefined);
   if (!site) return null;
@@ -529,7 +639,9 @@ function dedupe(cands: Candidate[]): Candidate[] {
   const seen = new Set<string>();
   const out: Candidate[] = [];
   for (const cand of cands) {
-    const key = `${(cand.website || "").toLowerCase()}__${cand.company_name}`;
+    const key = `${(cand.corporate_number || "").toLowerCase()}__${(
+      cand.company_name || ""
+    ).toLowerCase()}`;
     if (!seen.has(key)) {
       seen.add(key);
       out.push(cand);
@@ -617,7 +729,7 @@ function matchesFilters(
   return { ok: reasons.length === 0, reasons };
 }
 
-/** 公式サイト解決（LLM） */
+/** 公式サイト解決（LLM 使用可：Phase A 以外） */
 async function resolveHomepageWithLLM(
   c: Candidate
 ): Promise<string | undefined> {
@@ -661,10 +773,9 @@ async function resolveHomepageWithLLM(
 
 /** 不適合のキー（重複判定） */
 function keyForRejected(c: Rejected): string {
-  const w = (c.website || "").toLowerCase();
+  const num = (c.corporate_number || "").toLowerCase();
   const n = (c.company_name || "").toLowerCase();
-  const k = (c.corporate_number || "").toLowerCase();
-  return `${k}__${w}__${n}`;
+  return `${num}__${n}`;
 }
 
 /** ---------- Handler: POST (Batch, 新フロー) ---------- */
@@ -679,6 +790,15 @@ export async function POST(req: Request) {
     if (!OPENAI_API_KEY) {
       return NextResponse.json(
         { error: "OPENAI_API_KEY 未設定です" },
+        { status: 400 }
+      );
+    }
+    if (!NTA_CORP_API_KEY) {
+      return NextResponse.json(
+        {
+          error:
+            "NTA_CORP_API_KEY 未設定：国税庁 Web-API キーを設定してください（Phase A は AI 不使用）",
+        },
         { status: 400 }
       );
     }
@@ -723,20 +843,21 @@ export async function POST(req: Request) {
       const remain = Math.max(0, want - accepted.length);
       if (remain === 0) break;
 
-      // A) 国税庁ベース（SME優先 + ランダム都道府県固定）
-      const corpBase = await fetchCorporatesBase(filters, remain, {
+      // A) 国税庁 Web-API（住所検索のみ、AI 不使用）
+      const corpBase = await fetchFromNTA(filters, remain, {
         round,
         remain,
         seed: `${seed}-nta-${round}`,
       });
 
-      // 重複排除（既存DB & このラウンド & URL空は後で解決）
+      // 重複排除
       const stepA = dedupe(
-        corpBase.filter(
-          (c: Candidate) =>
-            !c.website || !existingSet.has(String(c.website).toLowerCase())
-        )
+        corpBase.filter((c: Candidate) => {
+          // Phase A 時点では website は null が多いので既存チェックは保留（URL重複判定できないため）
+          return !!c.company_name;
+        })
       );
+
       if (!stepA.length) {
         if (Date.now() - t0 > REQUEST_BUDGET_MS) break;
         continue;
@@ -756,7 +877,7 @@ export async function POST(req: Request) {
         }
       }
 
-      // C) 公式HP解決 → 到達/抽出 → 最終フィルタ
+      // C-1) 公式HP解決（ここは LLM 利用可。NTA には HP 情報が無いため）
       for (let i = 0; i < passB.length; i += CONCURRENCY) {
         const slice: Candidate[] = passB.slice(i, i + CONCURRENCY);
 
@@ -770,12 +891,26 @@ export async function POST(req: Request) {
           })
         );
 
+        // HP が解決できなかった法人は「最終抽出不可（HP到達不可）」として不適合へ
+        const resolvable = withSite.filter((x) => !!x.website);
+        const unresolved = withSite.filter((x) => !x.website);
+        for (const ng of unresolved) {
+          rejected.push({ ...ng, reject_reasons: ["公式サイト未解決"] });
+        }
+        if (!resolvable.length) continue;
+
+        // C-2) 到達/抽出 → 最終フィルタ
         const verifiedChunk: Array<Candidate | null> = await Promise.all(
-          withSite.map((cand: Candidate) => verifyAndEnrichWebsite(cand))
+          resolvable.map((cand: Candidate) => verifyAndEnrichWebsite(cand))
         );
 
         for (const cc of verifiedChunk) {
           if (!cc) continue;
+          if (existingSet.has(String(cc.website).toLowerCase())) {
+            // 既存 URL は除外（新規追加防止）
+            rejected.push({ ...cc, reject_reasons: ["既存URLと重複"] });
+            continue;
+          }
           const fin = matchesFilters(cc, filters);
           if (fin.ok) {
             accepted.push(cc);
@@ -790,7 +925,7 @@ export async function POST(req: Request) {
         if (Date.now() - t0 > REQUEST_BUDGET_MS) break;
       }
 
-      if (accepted.length < want) await sleep(150);
+      if (accepted.length < want) await sleep(120);
       if (Date.now() - t0 > REQUEST_BUDGET_MS) break;
     }
 
@@ -805,7 +940,7 @@ export async function POST(req: Request) {
         [c.industry_large, c.industry_small].filter(Boolean).join(" / ") ||
         null,
       company_size: c.company_size_extracted ?? c.company_size ?? null,
-      job_site_source: "nta+registry+web",
+      job_site_source: "nta-address+registry+web",
       status: "new",
       prefectures: c.prefectures ?? [],
       corporate_number: c.corporate_number ?? null,
