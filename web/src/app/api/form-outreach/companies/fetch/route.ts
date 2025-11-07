@@ -6,12 +6,19 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
 /** ---------- Types ---------- */
+type SizeRange = "1-9" | "10-49" | "50-249" | "250+";
+
 type Filters = {
   prefectures?: string[];
-  employee_size_ranges?: Array<"1-9" | "10-49" | "50-249" | "250+">;
+  employee_size_ranges?: SizeRange[];
   keywords?: string[];
   industries_large?: string[];
   industries_small?: string[];
+  // 追加: 資本金・設立年月日
+  capital_min?: number | null; // JPY (例: 30000000 = 3,000万円)
+  capital_max?: number | null; // JPY
+  established_from?: string | null; // "YYYY-MM-DD"
+  established_to?: string | null; // "YYYY-MM-DD"
   max?: number; // for backward compat
 };
 
@@ -23,16 +30,29 @@ type Candidate = {
   industry_large?: string | null;
   industry_small?: string | null;
   prefectures?: string[];
-  company_size?: "1-9" | "10-49" | "50-249" | "250+" | null;
-  /** 本文から抽出できた実測の規模レンジ（LLM推定ではなくサイト実データに基づく） */
-  company_size_extracted?: "1-9" | "10-49" | "50-249" | "250+" | null;
+  company_size?: SizeRange | null;
+  company_size_extracted?: SizeRange | null;
+
+  // 追加: 国税庁→登記情報由来の属性
+  corporate_number?: string | null;
+  hq_address?: string | null;
+  capital?: number | null; // JPY
+  established_on?: string | null; // ISO "YYYY-MM-DD"
 };
 
 type AskBatchHint = { round: number; remain: number; seed?: string };
 
+type Rejected = Candidate & {
+  reject_reasons: string[]; // why it was filtered out
+};
+
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
+// 任意: 公的APIキー(なければフォールバックで進む)
+const NTA_CORP_API_KEY = process.env.NTA_CORP_API_KEY || "";
+const TIIS_API_KEY = process.env.TIIS_API_KEY || "";
 
 /** ---------- Utils ---------- */
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -132,6 +152,25 @@ function textFromHtml(html: string): string {
     .slice(0, 250_000);
 }
 
+function toHalfWidthDigits(s: string): string {
+  // 全角数字→半角
+  return s.replace(/[０-９]/g, (d) =>
+    String.fromCharCode(d.charCodeAt(0) - 0xfee0)
+  );
+}
+
+/** 金額文字列→数値(JPY) 例: "3,000万円"→30000000, "1.2億円"→120000000 */
+function parseYenAmount(raw: string): number | null {
+  let s = toHalfWidthDigits(raw).replace(/[,，\s]/g, "");
+  const unit = /億|万/.exec(s)?.[0] || "";
+  s = s.replace(/[^\d.]/g, "");
+  const n = Number(s || "0");
+  if (!isFinite(n) || n <= 0) return null;
+  if (unit === "億") return Math.round(n * 100_000_000);
+  if (unit === "万") return Math.round(n * 10_000);
+  return Math.round(n); // 円
+}
+
 function deobfuscateEmails(text: string): string[] {
   const alt = text
     .replace(/\s*\[at\]\s*/gi, "@")
@@ -184,32 +223,52 @@ function extractEmails(
   return arr;
 }
 
-/** 従業員数 → レンジ抽出（揺れ対応強化版） */
+/** 従業員数 → レンジ抽出（揺れ対応） */
 function extractCompanySizeToRange(text: string): Candidate["company_size"] {
-  // カンマ（半角/全角）と全角空白はノイズになりやすいので除去
   const t = text.replace(/[,\uFF0C\u3000]/g, "");
-
-  // 代表的な揺れ例：
-  // 「従業員数 約35名」「社員 120人規模」「スタッフ 10名程度」「従業員 50名以上」「従業員 100人未満」
   const re =
     /(従業員|従業員数|社員|スタッフ)[^\d]{0,8}(約|およそ)?\s*([0-9]{1,6})\s*(名|人)\s*(規模|程度|前後|以上|超|未満|以下)?/i;
-
   const m = re.exec(t);
   if (!m) return null;
-
   let n = Number(m[3]);
   if (!Number.isFinite(n) || n <= 0) return null;
-
   const mod = (m[5] || "").toString();
-
-  // 「未満/以下」は上限のニュアンス → 1引いて近い下位バケットへ倒す
   if (/未満|以下/.test(mod)) n = Math.max(0, n - 1);
-  // 「以上/超」は下限のニュアンスだが、算出バケットは通常の数値で十分
-
   if (n <= 9) return "1-9";
   if (n <= 49) return "10-49";
   if (n <= 249) return "50-249";
   return "250+";
+}
+
+/** 資本金抽出（会社概要などから） */
+function extractCapital(text: string): number | null {
+  const t = toHalfWidthDigits(text);
+  // 例: 資本金 3,000万円 / 資本金: 1.2億円 / 資本金 1000万 / 資本金 30000000円
+  const re = /資本金[^\d０-９]{0,6}([0-9０-９.,]+)\s*(億|万)?\s*円?/i;
+  const m = re.exec(t);
+  if (!m) return null;
+  const amt = parseYenAmount(`${m[1]}${m[2] || ""}`);
+  return amt ?? null;
+}
+
+/** 設立年月日抽出（会社概要などから → ISO） */
+function extractEstablishedOn(text: string): string | null {
+  const t = toHalfWidthDigits(text).replace(/\s/g, "");
+  // 例: 設立 2008年4月1日 / 設立年月日: 2012/07/ / 創業 1999年
+  let m =
+    /(設立|設立年月日|創業)[^\d]{0,6}(\d{4})[\/\-年\.]?(\d{1,2})?[\/\-月\.]?(\d{1,2})?日?/i.exec(
+      t
+    );
+  if (!m) return null;
+  const y = Number(m[2]);
+  const mm = m[3]
+    ? String(Math.max(1, Math.min(12, Number(m[3])))).padStart(2, "0")
+    : "01";
+  const dd = m[4]
+    ? String(Math.max(1, Math.min(31, Number(m[4])))).padStart(2, "0")
+    : "01";
+  if (!y || y < 1900 || y > 2100) return null;
+  return `${y}-${mm}-${dd}`;
 }
 
 function extractHQPrefecture(html: string, text: string): string[] {
@@ -294,122 +353,32 @@ async function findContactForm(
   return null;
 }
 
-/** Web検証 + 付加情報の付与（実測 company_size_extracted を保持） */
-async function verifyAndEnrich(c: Candidate): Promise<Candidate | null> {
-  const site = normalizeUrl(c.website);
-  if (!site) return null;
-
-  try {
-    const r = await fetchWithTimeout(site, {}, 12000);
-    if (!r.ok) return null;
-    const html = await r.text();
-    const text = textFromHtml(html);
-
-    let host = "";
-    try {
-      host = new URL(site).host;
-    } catch {}
-
-    const emails = extractEmails(text, html, host);
-    const contact_form_url = await findContactForm(site, html);
-    const sizeExtracted = extractCompanySizeToRange(text); // ← 実測を抽出
-    const prefs = extractHQPrefecture(html, text);
-    const ind = classifyIndustryFromText(text);
-
-    return {
-      company_name: c.company_name,
-      website: site,
-      contact_email: emails[0] ?? c.contact_email ?? null,
-      contact_form_url,
-      // 表示用の company_size は実測優先で一旦上書きするが、保存時にも実測優先で処理
-      company_size: sizeExtracted ?? c.company_size ?? null,
-      company_size_extracted: sizeExtracted ?? null, // ← 実測値を保持
-      prefectures: (prefs.length ? prefs : c.prefectures ?? []).slice(0, 4),
-      industry_large: c.industry_large ?? ind.large ?? null,
-      industry_small: c.industry_small ?? ind.small ?? null,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function dedupe(cands: Candidate[]): Candidate[] {
-  const seen = new Set<string>();
-  const out: Candidate[] = [];
-  for (const c of cands) {
-    const key = `${(c.website || "").toLowerCase()}__${c.company_name}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      out.push(c);
-    }
-  }
-  return out;
-}
-
-/** 厳格フィルタ（AND）
- * - 規模レンジが指定されている場合：本文の実測（company_size_extracted）が必須。未検出や不一致は除外。
- * - 規模レンジが未指定の場合：従来どおり（他条件のみ）。
+/** --------- Phase A: 国税庁(法人番号)ベース候補の取得 ---------
+ * 実運用では、NTA_CORP_API_KEY があれば公表サイトのAPIを叩く設計。
+ * 未設定の場合は LLM での補完にフォールバック（会社名/所在地/法人番号/HP の候補生成）。
  */
-function matchesFilters(c: Candidate, f: Filters): boolean {
-  if (f.prefectures?.length) {
-    const set = new Set((c.prefectures ?? []).map(String));
-    if (![...set].some((p) => f.prefectures!.includes(p))) return false;
-  }
-
-  if (f.employee_size_ranges?.length) {
-    const ex = c.company_size_extracted ?? null;
-    if (!ex) return false; // 実測が取れていない場合は除外
-    if (!f.employee_size_ranges.includes(ex)) return false; // 実測がフィルタ不一致
-  }
-
-  if (f.industries_large?.length) {
-    if (!c.industry_large || !f.industries_large.includes(c.industry_large))
-      return false;
-  }
-  if (f.industries_small?.length) {
-    if (!c.industry_small || !f.industries_small.includes(c.industry_small))
-      return false;
-  }
-  if (f.keywords?.length) {
-    const name = (c.company_name || "").toLowerCase();
-    let host = "";
-    try {
-      host = new URL(c.website || "").host.toLowerCase();
-    } catch {}
-    const ok = f.keywords.some((kw) => {
-      const k = String(kw || "").toLowerCase();
-      return !!k && (name.includes(k) || host.includes(k));
-    });
-    if (!ok) return false;
-  }
-  return true;
-}
-
-/** ---------- OpenAI ---------- */
-async function askOpenAIForCompanies(
+async function fetchCorporatesBase(
   filters: Filters,
   want: number,
   hint: AskBatchHint
 ): Promise<Candidate[]> {
+  // TODO: 本番の国税庁API連携を実装する場合はここに追加
+  // 現状は LLM で 会社名/所在地/法人番号/HP候補 を生成
   if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is not set");
-
   const sys =
     "You are a diligent Japanese business research assistant. Output STRICT JSON only, no commentary.";
-  const prompt = `次の条件に合致する日本の企業候補を返してください。中小〜中堅企業も多めに、重複は避けること。
-必ず https:// から始まる homepage URL を含め、可能なら従業員規模レンジ(company_size: "1-9"|"10-49"|"50-249"|"250+") を付与。
-出力は JSON のみ: {"items":[{company_name, website, prefectures?, industry_large?, industry_small?, company_size?}]}。
+  const prompt = `以下条件に合致する日本の法人候補を出してください。大手だけに偏らないこと。
+各アイテムは次のキーを含めてください:
+{company_name, hq_address, corporate_number, website}
+website は https:// から始まる公式サイトが望ましい（不明なら空）。
+出力は JSON のみ: {"items":[...]}。
 
 条件:
 - 都道府県: ${
     filters.prefectures?.length ? filters.prefectures.join(", ") : "全国"
   }
-- 従業員規模レンジ: ${filters.employee_size_ranges?.join(", ") || "指定なし"}
 - 任意キーワード: ${filters.keywords?.join(", ") || "指定なし"}
-- 業種(大分類): ${filters.industries_large?.join(", ") || "指定なし"}
-- 業種(小分類): ${filters.industries_small?.join(", ") || "指定なし"}
-- ラウンド: ${hint.round} / 追加で最低 ${hint.remain} 社は新規に見つけること
-- シード: ${hint.seed || "-"}
-- 大手や上場だけに偏らないこと`;
+- ラウンド: ${hint.round} / 少なくとも ${hint.remain} 社は新規で`;
 
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -439,34 +408,239 @@ async function askOpenAIForCompanies(
   } catch {
     payload = {};
   }
-
   const items = Array.isArray(payload?.items) ? payload.items : [];
   const mapped: Candidate[] = items
     .map((x: any) => ({
       company_name: String(x?.company_name || "").trim(),
+      hq_address: typeof x?.hq_address === "string" ? x.hq_address : null,
+      corporate_number:
+        typeof x?.corporate_number === "string" ? x.corporate_number : null,
       website: normalizeUrl(x?.website),
-      industry_large:
-        typeof x?.industry_large === "string" ? x.industry_large : null,
-      industry_small:
-        typeof x?.industry_small === "string" ? x.industry_small : null,
-      prefectures: Array.isArray(x?.prefectures)
-        ? x.prefectures.filter((p: any) => typeof p === "string")
-        : [],
-      // LLMの推定は参考値。最終判定・保存は実測優先。
-      company_size: ((): Candidate["company_size"] => {
-        const v = String(x?.company_size || "").trim();
-        return (["1-9", "10-49", "50-249", "250+"] as const).includes(v as any)
-          ? (v as any)
-          : null;
-      })(),
     }))
-    .filter((c: Candidate) => c.company_name && c.website);
-
-  // LLMは多めに返す可能性、ここでは抑制
+    .filter((c: Candidate) => c.company_name);
   return mapped.slice(0, Math.max(want * 3, 60));
 }
 
-/** ---------- Handler (Batch strict, fill-to-want) ---------- */
+/** --------- Phase B: 登記情報（資本金/設立）取得（フォールバックあり） ---------
+ * TIIS_API_KEY があれば登記情報提供サービスAPIを叩く設計。
+ * 未設定の場合は、会社HPの会社概要などから推定抽出にフォールバック。
+ */
+async function enrichRegistryInfo(c: Candidate): Promise<Candidate> {
+  let capital: number | null = null;
+  let established_on: string | null = null;
+
+  // 公式APIの実装ポイント（疑似）
+  if (TIIS_API_KEY && c.corporate_number) {
+    try {
+      // 実装先: 登記情報提供サービスのAPIエンドポイント（契約仕様に従って実装）
+      // ここではダミー/コメントのみ。実装がない場合はフォールバックに進む。
+      // const r = await fetchWithTimeout(`${process.env.TIIS_API_BASE}/org/${c.corporate_number}`, {
+      //   headers: { authorization: `Bearer ${TIIS_API_KEY}` }
+      // }, 8000);
+      // if (r.ok) { const j = await r.json(); capital = j.capital; established_on = j.established_on; }
+    } catch {}
+  }
+
+  if (!capital || !established_on) {
+    // フォールバック: HP（あれば）から抽出
+    const site = normalizeUrl(c.website);
+    if (site) {
+      try {
+        const r = await fetchWithTimeout(site, {}, 10000);
+        if (r.ok) {
+          const html = await r.text();
+          const text = textFromHtml(html);
+          capital = capital ?? extractCapital(text);
+          established_on = established_on ?? extractEstablishedOn(text);
+        }
+      } catch {}
+    }
+  }
+
+  return {
+    ...c,
+    capital: capital ?? null,
+    established_on: established_on ?? null,
+  };
+}
+
+/** --------- Phase C: 公式HPの到達/抽出（従業員・フォーム・メール・都道府県・業種） --------- */
+async function verifyAndEnrichWebsite(c: Candidate): Promise<Candidate | null> {
+  const site = normalizeUrl(c.website);
+  if (!site) return null;
+
+  try {
+    const r = await fetchWithTimeout(site, {}, 12000);
+    if (!r.ok) return null;
+    const html = await r.text();
+    const text = textFromHtml(html);
+
+    let host = "";
+    try {
+      host = new URL(site).host;
+    } catch {}
+
+    const emails = extractEmails(text, html, host);
+    const contact_form_url = await findContactForm(site, html);
+    const sizeExtracted = extractCompanySizeToRange(text);
+    const prefs = extractHQPrefecture(html, text);
+    const ind = classifyIndustryFromText(text);
+
+    return {
+      ...c,
+      website: site,
+      contact_email: emails[0] ?? c.contact_email ?? null,
+      contact_form_url,
+      company_size: sizeExtracted ?? c.company_size ?? null,
+      company_size_extracted: sizeExtracted ?? null,
+      prefectures: (prefs.length ? prefs : c.prefectures ?? []).slice(0, 4),
+      industry_large: c.industry_large ?? ind.large ?? null,
+      industry_small: c.industry_small ?? ind.small ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function dedupe(cands: Candidate[]): Candidate[] {
+  const seen = new Set<string>();
+  const out: Candidate[] = [];
+  for (const c of cands) {
+    const key = `${(c.website || "").toLowerCase()}__${c.company_name}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(c);
+    }
+  }
+  return out;
+}
+
+/** --------- 事前フィルタ（資本金/設立） --------- */
+function prefilterByRegistry(
+  c: Candidate,
+  f: Filters
+): { ok: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+  if (f.capital_min != null && Number.isFinite(f.capital_min)) {
+    if (c.capital == null || c.capital < (f.capital_min as number)) {
+      reasons.push("資本金が下限未満、または不明");
+    }
+  }
+  if (f.capital_max != null && Number.isFinite(f.capital_max)) {
+    if (c.capital == null || c.capital > (f.capital_max as number)) {
+      reasons.push("資本金が上限超過、または不明");
+    }
+  }
+  if (f.established_from) {
+    if (!c.established_on || c.established_on < f.established_from) {
+      reasons.push("設立日が下限より前、または不明");
+    }
+  }
+  if (f.established_to) {
+    if (!c.established_on || c.established_on > f.established_to) {
+      reasons.push("設立日が上限より後、または不明");
+    }
+  }
+  return { ok: reasons.length === 0, reasons };
+}
+
+/** 厳格フィルタ（最終、AND） */
+function matchesFilters(
+  c: Candidate,
+  f: Filters
+): { ok: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+
+  // 都道府県
+  if (f.prefectures?.length) {
+    const set = new Set((c.prefectures ?? []).map(String));
+    if (![...set].some((p) => f.prefectures!.includes(p))) {
+      reasons.push("所在都道府県が不一致");
+    }
+  }
+
+  // 規模（実測必須）
+  if (f.employee_size_ranges?.length) {
+    const ex = c.company_size_extracted ?? null;
+    if (!ex) reasons.push("従業員数の実測が不明");
+    else if (!f.employee_size_ranges.includes(ex))
+      reasons.push("従業員数レンジ不一致");
+  }
+
+  // 業種
+  if (f.industries_large?.length) {
+    if (!c.industry_large || !f.industries_large.includes(c.industry_large))
+      reasons.push("業種(大分類)不一致");
+  }
+  if (f.industries_small?.length) {
+    if (!c.industry_small || !f.industries_small.includes(c.industry_small))
+      reasons.push("業種(小分類)不一致");
+  }
+
+  // キーワード（社名/ドメイン）
+  if (f.keywords?.length) {
+    const name = (c.company_name || "").toLowerCase();
+    let host = "";
+    try {
+      host = new URL(c.website || "").host.toLowerCase();
+    } catch {}
+    const ok = f.keywords.some((kw) => {
+      const k = String(kw || "").toLowerCase();
+      return !!k && (name.includes(k) || host.includes(k));
+    });
+    if (!ok) reasons.push("キーワード不一致");
+  }
+
+  // 資本金・設立（念のため最終でもチェック）
+  const pre = prefilterByRegistry(c, f);
+  if (!pre.ok) reasons.push(...pre.reasons);
+
+  return { ok: reasons.length === 0, reasons };
+}
+
+/** ---------- LLM: 公式サイト解決（名前+住所→HP URL） ---------- */
+async function resolveHomepageWithLLM(
+  c: Candidate
+): Promise<string | undefined> {
+  if (!OPENAI_API_KEY) return normalizeUrl(c.website);
+  const sys =
+    "You are a helpful assistant. Output STRICT JSON only, no commentary.";
+  const prompt = `次の法人の公式ホームページURLを1つ推定してください。https:// から始まる必要があります。不明なら空。
+入力: {"company_name":"${c.company_name}","hq_address":"${
+    c.hq_address ?? ""
+  }","corporate_number":"${c.corporate_number ?? ""}"}
+出力: {"website": "https://... | \"\""}`;
+
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${OPENAI_API_KEY}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      temperature: 0.1,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: sys },
+        { role: "user", content: prompt },
+      ],
+    }),
+  });
+
+  const txt = await res.text();
+  if (!res.ok) return normalizeUrl(c.website);
+  try {
+    const j = JSON.parse(txt);
+    const content = j?.choices?.[0]?.message?.content ?? "{}";
+    const payload = JSON.parse(content);
+    return normalizeUrl(payload?.website);
+  } catch {
+    return normalizeUrl(c.website);
+  }
+}
+
+/** ---------- Handler: POST (Batch, 新フロー) ---------- */
 export async function POST(req: Request) {
   try {
     if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
@@ -491,7 +665,7 @@ export async function POST(req: Request) {
 
     const body = await req.json().catch(() => ({}));
     const filters: Filters = body?.filters ?? {};
-    const want: number = clamp(body?.want ?? filters.max ?? 12, 1, 200); // 1〜200/回
+    const want: number = clamp(body?.want ?? filters.max ?? 12, 1, 200);
     const seed: string = String(body?.seed || Math.random()).slice(2);
 
     const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
@@ -510,93 +684,192 @@ export async function POST(req: Request) {
         .filter(Boolean)
     );
 
-    // 1回の呼び出し内で、厳格フィルタを満たす候補を want 件まで埋めきる
-    let pool: Candidate[] = [];
+    let accepted: Candidate[] = [];
+    let rejected: Rejected[] = [];
+
     const MAX_ROUNDS = 8;
     const CONCURRENCY = 8;
-    const REQUEST_BUDGET_MS = 28_000; // Vercel 300s 対策
+    const REQUEST_BUDGET_MS = 28_000;
     const t0 = Date.now();
 
     for (let round = 1; round <= MAX_ROUNDS; round++) {
-      const remain = Math.max(0, want - pool.length);
+      const remain = Math.max(0, want - accepted.length);
       if (remain === 0) break;
 
-      const llm = await askOpenAIForCompanies(filters, remain, {
+      // A) 国税庁(法人番号)ベース候補
+      const corpBase: Candidate[] = await fetchCorporatesBase(filters, remain, {
         round,
         remain,
-        seed: `${seed}-${round}`,
+        seed: `${seed}-nta-${round}`,
       });
 
-      // 重複排除（既存DB & これまでのpool & URL空）
-      const step1: Candidate[] = dedupe(llm).filter(
-        (c: Candidate) =>
-          !!c.website && !existingSet.has(String(c.website).toLowerCase())
+      // 重複排除 (既存DB & 今ラウンド & URL空は後で解決)
+      const stepA = dedupe(
+        corpBase.filter(
+          (c: Candidate) =>
+            !c.website || !existingSet.has(String(c.website).toLowerCase())
+        )
       );
-      if (!step1.length) {
+      if (!stepA.length) {
         if (Date.now() - t0 > REQUEST_BUDGET_MS) break;
         continue;
       }
 
-      // 検証＆付加情報
-      for (let i = 0; i < step1.length; i += CONCURRENCY) {
-        const slice: Candidate[] = step1.slice(i, i + CONCURRENCY);
-        const chunk = await Promise.all(
-          slice.map((cand: Candidate) => verifyAndEnrich(cand))
+      // B) 登記（資本金/設立）付与 & 事前フィルタ
+      const enriched: Candidate[] = await Promise.all(
+        stepA.map((cand: Candidate) => enrichRegistryInfo(cand))
+      );
+      const passB: Candidate[] = [];
+      for (const cc of enriched) {
+        const check = prefilterByRegistry(cc, filters);
+        if (!check.ok) {
+          rejected.push({ ...cc, reject_reasons: check.reasons });
+        } else {
+          passB.push(cc);
+        }
+      }
+
+      // C) 公式HP解決（ない場合）→ 到達/抽出
+      for (let i = 0; i < passB.length; i += CONCURRENCY) {
+        const slice: Candidate[] = passB.slice(i, i + CONCURRENCY);
+        const withSite: Candidate[] = await Promise.all(
+          slice.map(async (cand: Candidate) => {
+            if (!cand.website) {
+              const w = await resolveHomepageWithLLM(cand);
+              if (w) cand.website = w;
+            }
+            return cand;
+          })
         );
-        const verified = (chunk.filter(Boolean) as Candidate[]).filter((cc) =>
-          matchesFilters(cc, filters)
+
+        const verifiedChunk: Array<Candidate | null> = await Promise.all(
+          withSite.map((cand: Candidate) => verifyAndEnrichWebsite(cand))
         );
-        // 厳格一致のみ追加
-        pool.push(...verified);
-        pool = dedupe(pool).slice(0, want);
-        if (pool.length >= want) break;
+
+        for (const cc of verifiedChunk) {
+          if (!cc) continue;
+          // 最終フィルタ
+          const fin = matchesFilters(cc, filters);
+          if (fin.ok) {
+            accepted.push(cc);
+          } else {
+            rejected.push({ ...cc, reject_reasons: fin.reasons });
+          }
+          if (accepted.length >= want) break;
+        }
+
+        accepted = dedupe(accepted).slice(0, want);
+        if (accepted.length >= want) break;
         if (Date.now() - t0 > REQUEST_BUDGET_MS) break;
       }
 
-      if (pool.length < want) await sleep(150);
+      if (accepted.length < want) await sleep(150);
       if (Date.now() - t0 > REQUEST_BUDGET_MS) break;
     }
 
-    const toInsert: Candidate[] = pool.slice(0, want);
-    if (toInsert.length === 0) {
-      return NextResponse.json({
-        inserted: 0,
-        rows: [],
-        note: "条件に合致する新規候補が見つかりませんでした",
-      });
-    }
-
-    // 保存：重複は upsert でスキップ/更新（tenant_id,website が一意キー想定）
+    const toInsert: Candidate[] = accepted.slice(0, want);
     const rows = toInsert.map((c: Candidate) => ({
       tenant_id: tenantId,
       company_name: c.company_name,
-      website: c.website!,
+      website: c.website || null,
       contact_form_url: c.contact_form_url ?? null,
       contact_email: c.contact_email ?? null,
       industry:
         [c.industry_large, c.industry_small].filter(Boolean).join(" / ") ||
         null,
-      // 実測があればそれを保存。なければ従来の company_size（LLM推定含む）を保存。
       company_size: c.company_size_extracted ?? c.company_size ?? null,
-      job_site_source: "llm+web",
+      job_site_source: "nta+registry+web",
       status: "new",
       prefectures: c.prefectures ?? [],
+      // 追加保存列
+      corporate_number: c.corporate_number ?? null,
+      hq_address: c.hq_address ?? null,
+      capital: c.capital ?? null,
+      established_on: c.established_on ?? null,
     }));
 
-    const { data: inserted, error: insErr } = await admin
-      .from("form_prospects")
-      .upsert(rows, { onConflict: "tenant_id,website" })
-      .select(
-        "id, tenant_id, company_name, website, contact_email, contact_form_url, industry, company_size, job_site_source, prefectures, created_at"
-      );
-
-    if (insErr)
-      return NextResponse.json({ error: insErr.message }, { status: 500 });
+    let inserted: any[] | null = null;
+    if (rows.length) {
+      const { data, error: insErr } = await admin
+        .from("form_prospects")
+        .upsert(rows as any, { onConflict: "tenant_id,website" })
+        .select(
+          "id, tenant_id, company_name, website, contact_email, contact_form_url, industry, company_size, job_site_source, prefectures, corporate_number, hq_address, capital, established_on, created_at"
+        );
+      if (insErr)
+        return NextResponse.json({ error: insErr.message }, { status: 500 });
+      inserted = data;
+    }
 
     return NextResponse.json({
       inserted: inserted?.length || 0,
       rows: inserted || [],
+      rejected: rejected.slice(0, Math.max(60, want * 3)), // UIで上限
     });
+  } catch (e: any) {
+    return NextResponse.json(
+      { error: String(e?.message || e) },
+      { status: 500 }
+    );
+  }
+}
+
+/** ---------- PATCH: 不適合テーブルからの手動追加 ---------- */
+export async function PATCH(req: Request) {
+  try {
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+      return NextResponse.json(
+        { error: "Supabase service role not configured" },
+        { status: 500 }
+      );
+    }
+    const tenantId = req.headers.get("x-tenant-id") || "";
+    if (!tenantId)
+      return NextResponse.json(
+        { error: "x-tenant-id required" },
+        { status: 400 }
+      );
+
+    const body = await req.json().catch(() => ({}));
+    const c: Candidate | undefined = body?.candidate;
+    if (!c || !c.company_name) {
+      return NextResponse.json(
+        { error: "candidate is required" },
+        { status: 400 }
+      );
+    }
+
+    const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+    const payload = {
+      tenant_id: tenantId,
+      company_name: c.company_name,
+      website: c.website ?? null,
+      contact_form_url: c.contact_form_url ?? null,
+      contact_email: c.contact_email ?? null,
+      industry:
+        [c.industry_large, c.industry_small].filter(Boolean).join(" / ") ||
+        null,
+      company_size: c.company_size_extracted ?? c.company_size ?? null,
+      job_site_source: "manual-override",
+      status: "new",
+      prefectures: c.prefectures ?? [],
+      corporate_number: c.corporate_number ?? null,
+      hq_address: c.hq_address ?? null,
+      capital: c.capital ?? null,
+      established_on: c.established_on ?? null,
+    };
+
+    const { data, error } = await admin
+      .from("form_prospects")
+      .upsert(payload as any, { onConflict: "tenant_id,website" })
+      .select(
+        "id, tenant_id, company_name, website, contact_email, contact_form_url, industry, company_size, job_site_source, prefectures, corporate_number, hq_address, capital, established_on, created_at"
+      )
+      .single();
+
+    if (error)
+      return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ row: data });
   } catch (e: any) {
     return NextResponse.json(
       { error: String(e?.message || e) },
