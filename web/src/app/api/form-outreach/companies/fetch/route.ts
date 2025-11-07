@@ -14,16 +14,17 @@ type Filters = {
   keywords?: string[];
   industries_large?: string[];
   industries_small?: string[];
-  capital_min?: number | null;
-  capital_max?: number | null;
-  established_from?: string | null; // "YYYY-MM-DD"
-  established_to?: string | null; // "YYYY-MM-DD"
-  max?: number;
+  // 追加: 資本金・設立年月日（レンジ）
+  capital_min?: number | null; // JPY
+  capital_max?: number | null; // JPY
+  established_from?: string | null; // YYYY-MM-DD
+  established_to?: string | null; // YYYY-MM-DD
+  max?: number; // backward-compat for want
 };
 
 type Candidate = {
   company_name: string;
-  website?: string;
+  website?: string | null;
   contact_email?: string | null;
   contact_form_url?: string | null;
   industry_large?: string | null;
@@ -32,25 +33,31 @@ type Candidate = {
   company_size?: SizeRange | null;
   company_size_extracted?: SizeRange | null;
 
+  // 公式データ由来
   corporate_number?: string | null;
   hq_address?: string | null;
   capital?: number | null; // JPY
-  established_on?: string | null; // ISO "YYYY-MM-DD"
+  established_on?: string | null; // YYYY-MM-DD
 };
 
 type AskBatchHint = { round: number; remain: number; seed?: string };
-type Rejected = Candidate & { reject_reasons: string[] };
 
+type Rejected = Candidate & {
+  reject_reasons: string[];
+};
+
+/** ---------- ENV ---------- */
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
+// 契約があれば利用、なければフォールバック
 const NTA_CORP_API_KEY = process.env.NTA_CORP_API_KEY || "";
 const TIIS_API_KEY = process.env.TIIS_API_KEY || "";
 
 /** ---------- Utils ---------- */
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const clamp = (n: any, min: number, max: number) =>
+const clamp = (n: unknown, min: number, max: number) =>
   Math.max(min, Math.min(max, Math.floor(Number(n) || 0)));
 
 const JP_PREFS = [
@@ -103,7 +110,7 @@ const JP_PREFS = [
   "沖縄県",
 ];
 
-function normalizeUrl(u?: string): string | undefined {
+function normalizeUrl(u?: string | null): string | undefined {
   if (!u) return;
   try {
     const raw = u.trim();
@@ -119,7 +126,7 @@ async function fetchWithTimeout(
   url: string,
   init: RequestInit = {},
   ms = 10000
-) {
+): Promise<Response> {
   const ctl = new AbortController();
   const id = setTimeout(() => ctl.abort(), ms);
   try {
@@ -128,7 +135,9 @@ async function fetchWithTimeout(
       signal: ctl.signal,
       headers: {
         "user-agent":
-          (init.headers as any)?.["user-agent"] ||
+          (init.headers as Record<string, string> | undefined)?.[
+            "user-agent"
+          ] ||
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)",
       },
     });
@@ -152,6 +161,7 @@ function toHalfWidthDigits(s: string): string {
   );
 }
 
+/** "3,000万円"→30000000 / "1.2億円"→120000000 */
 function parseYenAmount(raw: string): number | null {
   let s = toHalfWidthDigits(raw).replace(/[,，\s]/g, "");
   const unit = /億|万/.exec(s)?.[0] || "";
@@ -185,18 +195,20 @@ function extractEmails(
   for (const e of deobfuscateEmails(text)) pool.add(e);
 
   if (html) {
+    // mailto:
     const mailtoRe = /href=["']mailto:([^"']+)["']/gi;
     let m: RegExpExecArray | null;
     while ((m = mailtoRe.exec(html))) {
       const raw = decodeURIComponent(m[1] || "");
       for (const e of deobfuscateEmails(raw)) pool.add(e);
     }
+    // JSON-LD
     const ldRe =
       /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
     while ((m = ldRe.exec(html))) {
       try {
         const j = JSON.parse(m[1]);
-        const cand = j?.email || j?.contactPoint?.email;
+        const cand = (j?.email as string) || (j?.contactPoint?.email as string);
         if (typeof cand === "string") {
           for (const e of deobfuscateEmails(cand)) pool.add(e);
         }
@@ -213,6 +225,7 @@ function extractEmails(
   return arr;
 }
 
+/** 従業員数 → レンジ抽出 */
 function extractCompanySizeToRange(text: string): Candidate["company_size"] {
   const t = text.replace(/[,\uFF0C\u3000]/g, "");
   const re =
@@ -266,6 +279,7 @@ function extractHQPrefecture(html: string, text: string): string[] {
   return [...prefs];
 }
 
+// 業種の簡易推定
 const INDUSTRY_MAP: Array<{ large: string; small: string; kw: RegExp }> = [
   { large: "IT・通信", small: "SaaS", kw: /(saas|クラウド|SaaS)/i },
   {
@@ -282,16 +296,17 @@ function classifyIndustryFromText(text: string): {
   large?: string;
   small?: string;
 } {
-  for (const rule of INDUSTRY_MAP)
+  for (const rule of INDUSTRY_MAP) {
     if (rule.kw.test(text)) return { large: rule.large, small: rule.small };
+  }
   return {};
 }
 
 function resolveLinks(
   html: string,
   base: string
-): { href: string; label: string }[] {
-  const out: { href: string; label: string }[] = [];
+): Array<{ href: string; label: string }> {
+  const out: Array<{ href: string; label: string }> = [];
   const re = /<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(html))) {
@@ -336,53 +351,50 @@ async function findContactForm(
   return null;
 }
 
-/** ---------- prefecture sampling ---------- */
-function samplePrefectures(
-  src: string[] | undefined,
-  seed: string,
-  maxPick = 3
-): string[] {
-  const list = (src && src.length ? src : JP_PREFS).slice();
-  // シンプル擬似乱数
-  let x = [...seed].reduce((a, c) => a + c.charCodeAt(0), 0) || 1;
-  const pick: string[] = [];
-  for (let i = 0; i < Math.min(maxPick, list.length); i++) {
-    x = (1103515245 * x + 12345) % 2147483647;
-    const idx = x % list.length;
-    pick.push(list[idx]);
-    list.splice(idx, 1);
-  }
-  return pick;
+/** 住所文字列から都道府県推定 */
+function prefecturesFromAddress(addr?: string | null): string[] {
+  if (!addr) return [];
+  const hit = JP_PREFS.filter((p) => addr.includes(p));
+  return hit.length ? hit.slice(0, 2) : [];
 }
 
-/** --------- Phase A: 国税庁(法人番号)ベース候補（都道府県ランダムサンプリングでブレ最小化） --------- */
+/** --------- Phase A: 国税庁(法人番号)ベース候補（SME優先 + ランダム都道府県固定） --------- */
 async function fetchCorporatesBase(
   filters: Filters,
   want: number,
   hint: AskBatchHint
 ): Promise<Candidate[]> {
+  // 実装メモ: 本来は国税庁API（CSV等）→ TIIS 連携。ここでは LLM フォールバック。
   if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is not set");
-
-  // ★ ランダムに都道府県サンプリング（指定があればその集合から）
-  const prefPick = samplePrefectures(
-    filters.prefectures,
-    hint.seed || `${hint.round}`,
-    2
-  );
-  const prefText = prefPick.join(", ");
 
   const sys =
     "You are a diligent Japanese business research assistant. Output STRICT JSON only, no commentary.";
-  const prompt = `以下条件に合致する日本の法人候補を出してください。大手だけに偏らないこと。
-必ず次の都道府県の企業のみを返してください: ${prefText}
+
+  // Pref を 1県に固定（指定があればその中から）
+  const pool =
+    Array.isArray(filters.prefectures) && filters.prefectures.length
+      ? filters.prefectures
+      : JP_PREFS;
+  const seedNum =
+    Number(String(hint.seed || Date.now()).replace(/\D/g, "")) || Date.now();
+  const fixedPref = pool[Math.floor(seedNum % pool.length)];
+
+  const prompt = `以下条件に合致する日本の法人候補を出してください。上場企業・大手グループ本社は避け、中小〜中堅企業を優先。
 各アイテムは次のキーを含めてください:
 {company_name, hq_address, corporate_number, website}
-website は https:// から始まる公式サイトが望ましい（不明なら空）。
+- website は https:// から始まる公式サイトが望ましい（不明なら空可）
+- hq_address には必ず都道府県名を含める（例: 東京都...）
+- 必ず ${fixedPref} に所在する企業のみ返す（他県を返さない）
+- 重複を避ける
 出力は JSON のみ: {"items":[...]}。
 
-その他条件:
-- 任意キーワード: ${filters.keywords?.join(", ") || "指定なし"}
-- ラウンド: ${hint.round} / 少なくとも ${hint.remain} 社`;
+任意キーワード: ${
+    Array.isArray(filters.keywords) && filters.keywords.length
+      ? filters.keywords.join(", ")
+      : "指定なし"
+  }
+ラウンド: ${hint.round} / 少なくとも ${hint.remain} 社は新規で
+シード: ${hint.seed || "-"}`;
 
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -391,7 +403,6 @@ website は https:// から始まる公式サイトが望ましい（不明な�
       "content-type": "application/json",
     },
     body: JSON.stringify({
-      // ★ モデルを GPT-4o に統一
       model: "gpt-4o",
       temperature: 0.2,
       response_format: { type: "json_object" },
@@ -410,70 +421,75 @@ website は https:// から始まる公式サイトが望ましい（不明な�
     const j = JSON.parse(txt);
     const content = j?.choices?.[0]?.message?.content ?? "{}";
     payload = JSON.parse(content);
-  } catch {
-    payload = {};
-  }
+  } catch {}
 
   const items = Array.isArray(payload?.items) ? payload.items : [];
   const mapped: Candidate[] = items
-    .map((x: any) => ({
-      company_name: String(x?.company_name || "").trim(),
-      hq_address: typeof x?.hq_address === "string" ? x.hq_address : null,
-      corporate_number:
-        typeof x?.corporate_number === "string" ? x.corporate_number : null,
-      website: normalizeUrl(x?.website),
-    }))
-    .filter((c: Candidate) => c.company_name);
-
-  // ★ 追加フィルタ：hq_address が pick都道府県に含まれない場合は弾く（ブレ低減）
-  const strict = mapped.filter((c: Candidate) => {
-    const t = (c.hq_address || "") + " " + (c.company_name || "");
-    return prefPick.some((p) => t.includes(p));
-  });
-
-  return strict.slice(0, Math.max(want * 3, 60));
+    .map((x: any): Candidate | null => {
+      const name = String(x?.company_name || "").trim();
+      if (!name) return null;
+      const hq = typeof x?.hq_address === "string" ? x.hq_address : null;
+      const prefs = prefecturesFromAddress(hq);
+      return {
+        company_name: name,
+        hq_address: hq,
+        corporate_number:
+          typeof x?.corporate_number === "string" ? x.corporate_number : null,
+        website: normalizeUrl(x?.website) ?? null,
+        prefectures: prefs.length ? prefs : undefined,
+      };
+    })
+    .filter((c: Candidate | null): c is Candidate => !!c);
+  return mapped.slice(0, Math.max(want * 3, 60));
 }
 
-/** --------- Phase B: 登記情報（資本金/設立）取得（フォールバックあり） --------- */
+/** --------- Phase B: 登記（資本金/設立）付与（フォールバックあり） --------- */
 async function enrichRegistryInfo(c: Candidate): Promise<Candidate> {
   let capital: number | null = null;
   let established_on: string | null = null;
 
+  // 公式 API（契約がある場合のみ。未実装→フォールバック）
   if (TIIS_API_KEY && c.corporate_number) {
     try {
-      // 契約仕様に応じて実装。なければフォールバックに進む。
+      // 例：fetch 登記 API → capital / established_on を取得
       // const r = await fetchWithTimeout(`${process.env.TIIS_API_BASE}/org/${c.corporate_number}`, {
-      //   headers: { authorization: `Bearer ${TIIS_API_KEY}` }
+      //   headers: { authorization: `Bearer ${TIIS_API_KEY}` },
       // }, 8000);
       // if (r.ok) { const j = await r.json(); capital = j.capital; established_on = j.established_on; }
     } catch {}
   }
 
-  if (!capital || !established_on) {
-    const site = normalizeUrl(c.website);
-    if (site) {
-      try {
-        const r = await fetchWithTimeout(site, {}, 10000);
-        if (r.ok) {
-          const html = await r.text();
-          const text = textFromHtml(html);
-          capital = capital ?? extractCapital(text);
-          established_on = established_on ?? extractEstablishedOn(text);
-        }
-      } catch {}
-    }
+  // フォールバック: 公式サイトがあれば解析
+  const site = normalizeUrl(c.website || undefined);
+  if ((!capital || !established_on) && site) {
+    try {
+      const r = await fetchWithTimeout(site, {}, 10000);
+      if (r.ok) {
+        const html = await r.text();
+        const text = textFromHtml(html);
+        if (!capital) capital = extractCapital(text);
+        if (!established_on) established_on = extractEstablishedOn(text);
+      }
+    } catch {}
   }
+
+  // 住所→都道府県補完（未設定なら）
+  const fromAddr = prefecturesFromAddress(c.hq_address ?? null);
+  const mergedPref = (
+    c.prefectures && c.prefectures.length ? c.prefectures : fromAddr
+  ).slice(0, 4);
 
   return {
     ...c,
     capital: capital ?? null,
     established_on: established_on ?? null,
+    prefectures: mergedPref,
   };
 }
 
-/** --------- Phase C: 公式HPの到達/抽出 --------- */
+/** --------- Phase C: 公式HP 到達/抽出 --------- */
 async function verifyAndEnrichWebsite(c: Candidate): Promise<Candidate | null> {
-  const site = normalizeUrl(c.website);
+  const site = normalizeUrl(c.website || undefined);
   if (!site) return null;
 
   try {
@@ -512,42 +528,46 @@ async function verifyAndEnrichWebsite(c: Candidate): Promise<Candidate | null> {
 function dedupe(cands: Candidate[]): Candidate[] {
   const seen = new Set<string>();
   const out: Candidate[] = [];
-  for (const c of cands) {
-    const key = `${(c.website || "").toLowerCase()}__${c.company_name}`;
+  for (const cand of cands) {
+    const key = `${(cand.website || "").toLowerCase()}__${cand.company_name}`;
     if (!seen.has(key)) {
       seen.add(key);
-      out.push(c);
+      out.push(cand);
     }
   }
   return out;
 }
 
-/** --------- 事前フィルタ（資本金/設立） --------- */
+/** 事前フィルタ（資本金/設立） */
 function prefilterByRegistry(
   c: Candidate,
   f: Filters
 ): { ok: boolean; reasons: string[] } {
   const reasons: string[] = [];
   if (f.capital_min != null && Number.isFinite(f.capital_min)) {
-    if (c.capital == null || c.capital < (f.capital_min as number))
+    if (c.capital == null || c.capital < (f.capital_min as number)) {
       reasons.push("資本金が下限未満、または不明");
+    }
   }
   if (f.capital_max != null && Number.isFinite(f.capital_max)) {
-    if (c.capital == null || c.capital > (f.capital_max as number))
+    if (c.capital == null || c.capital > (f.capital_max as number)) {
       reasons.push("資本金が上限超過、または不明");
+    }
   }
   if (f.established_from) {
-    if (!c.established_on || c.established_on < f.established_from)
+    if (!c.established_on || c.established_on < f.established_from) {
       reasons.push("設立日が下限より前、または不明");
+    }
   }
   if (f.established_to) {
-    if (!c.established_on || c.established_on > f.established_to)
+    if (!c.established_on || c.established_on > f.established_to) {
       reasons.push("設立日が上限より後、または不明");
+    }
   }
   return { ok: reasons.length === 0, reasons };
 }
 
-/** 厳格フィルタ（最終、AND） */
+/** 最終フィルタ（AND） */
 function matchesFilters(
   c: Candidate,
   f: Filters
@@ -556,9 +576,8 @@ function matchesFilters(
 
   if (f.prefectures?.length) {
     const set = new Set((c.prefectures ?? []).map(String));
-    if (![...set].some((p) => f.prefectures!.includes(p))) {
-      reasons.push("所在都道府県が不一致");
-    }
+    const some = [...set].some((p) => f.prefectures!.includes(p));
+    if (!some) reasons.push("所在都道府県が不一致");
   }
 
   if (f.employee_size_ranges?.length) {
@@ -569,12 +588,14 @@ function matchesFilters(
   }
 
   if (f.industries_large?.length) {
-    if (!c.industry_large || !f.industries_large.includes(c.industry_large))
+    if (!c.industry_large || !f.industries_large.includes(c.industry_large)) {
       reasons.push("業種(大分類)不一致");
+    }
   }
   if (f.industries_small?.length) {
-    if (!c.industry_small || !f.industries_small.includes(c.industry_small))
+    if (!c.industry_small || !f.industries_small.includes(c.industry_small)) {
       reasons.push("業種(小分類)不一致");
+    }
   }
 
   if (f.keywords?.length) {
@@ -596,11 +617,11 @@ function matchesFilters(
   return { ok: reasons.length === 0, reasons };
 }
 
-/** ---------- 公式サイト解決（LLM） ---------- */
+/** 公式サイト解決（LLM） */
 async function resolveHomepageWithLLM(
   c: Candidate
 ): Promise<string | undefined> {
-  if (!OPENAI_API_KEY) return normalizeUrl(c.website);
+  if (!OPENAI_API_KEY) return normalizeUrl(c.website || undefined);
   const sys =
     "You are a helpful assistant. Output STRICT JSON only, no commentary.";
   const prompt = `次の法人の公式ホームページURLを1つ推定してください。https:// から始まる必要があります。不明なら空。
@@ -627,18 +648,26 @@ async function resolveHomepageWithLLM(
   });
 
   const txt = await res.text();
-  if (!res.ok) return normalizeUrl(c.website);
+  if (!res.ok) return normalizeUrl(c.website || undefined);
   try {
     const j = JSON.parse(txt);
     const content = j?.choices?.[0]?.message?.content ?? "{}";
     const payload = JSON.parse(content);
     return normalizeUrl(payload?.website);
   } catch {
-    return normalizeUrl(c.website);
+    return normalizeUrl(c.website || undefined);
   }
 }
 
-/** ---------- Handler: POST ---------- */
+/** 不適合のキー（重複判定） */
+function keyForRejected(c: Rejected): string {
+  const w = (c.website || "").toLowerCase();
+  const n = (c.company_name || "").toLowerCase();
+  const k = (c.corporate_number || "").toLowerCase();
+  return `${k}__${w}__${n}`;
+}
+
+/** ---------- Handler: POST (Batch, 新フロー) ---------- */
 export async function POST(req: Request) {
   try {
     if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
@@ -668,6 +697,7 @@ export async function POST(req: Request) {
 
     const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+    // 既存 website を収集（重複避け）
     const { data: existing, error: exErr } = await admin
       .from("form_prospects")
       .select("website")
@@ -686,20 +716,21 @@ export async function POST(req: Request) {
 
     const MAX_ROUNDS = 8;
     const CONCURRENCY = 8;
-    const REQUEST_BUDGET_MS = 28_000;
+    const REQUEST_BUDGET_MS = 28_000; // Vercel 対応
     const t0 = Date.now();
 
     for (let round = 1; round <= MAX_ROUNDS; round++) {
       const remain = Math.max(0, want - accepted.length);
       if (remain === 0) break;
 
-      // A) 国税庁ベース（都道府県サンプリング）
-      const corpBase: Candidate[] = await fetchCorporatesBase(filters, remain, {
+      // A) 国税庁ベース（SME優先 + ランダム都道府県固定）
+      const corpBase = await fetchCorporatesBase(filters, remain, {
         round,
         remain,
         seed: `${seed}-nta-${round}`,
       });
 
+      // 重複排除（既存DB & このラウンド & URL空は後で解決）
       const stepA = dedupe(
         corpBase.filter(
           (c: Candidate) =>
@@ -711,25 +742,29 @@ export async function POST(req: Request) {
         continue;
       }
 
-      // B) 登記（資本金/設立）付与 & 事前フィルタ
+      // B) 登記（資本金/設立）付与 → 事前フィルタ
       const enriched: Candidate[] = await Promise.all(
-        stepA.map((cand: Candidate) => enrichRegistryInfo(cand))
+        stepA.map((cc: Candidate) => enrichRegistryInfo(cc))
       );
       const passB: Candidate[] = [];
       for (const cc of enriched) {
         const check = prefilterByRegistry(cc, filters);
-        if (!check.ok) rejected.push({ ...cc, reject_reasons: check.reasons });
-        else passB.push(cc);
+        if (!check.ok) {
+          rejected.push({ ...cc, reject_reasons: check.reasons });
+        } else {
+          passB.push(cc);
+        }
       }
 
-      // C) 公式HP解決（ない場合）→ 到達/抽出
+      // C) 公式HP解決 → 到達/抽出 → 最終フィルタ
       for (let i = 0; i < passB.length; i += CONCURRENCY) {
         const slice: Candidate[] = passB.slice(i, i + CONCURRENCY);
+
         const withSite: Candidate[] = await Promise.all(
-          slice.map(async (cand: Candidate) => {
+          slice.map(async (cand: Candidate): Promise<Candidate> => {
             if (!cand.website) {
               const w = await resolveHomepageWithLLM(cand);
-              if (w) cand.website = w;
+              cand.website = w ?? null;
             }
             return cand;
           })
@@ -742,8 +777,11 @@ export async function POST(req: Request) {
         for (const cc of verifiedChunk) {
           if (!cc) continue;
           const fin = matchesFilters(cc, filters);
-          if (fin.ok) accepted.push(cc);
-          else rejected.push({ ...cc, reject_reasons: fin.reasons });
+          if (fin.ok) {
+            accepted.push(cc);
+          } else {
+            rejected.push({ ...cc, reject_reasons: fin.reasons });
+          }
           if (accepted.length >= want) break;
         }
 
@@ -780,7 +818,7 @@ export async function POST(req: Request) {
     if (rows.length) {
       const { data, error: insErr } = await admin
         .from("form_prospects")
-        .upsert(rows as any, { onConflict: "tenant_id,website" })
+        .upsert(rows, { onConflict: "tenant_id,website" })
         .select(
           "id, tenant_id, company_name, website, contact_email, contact_form_url, industry, company_size, job_site_source, prefectures, corporate_number, hq_address, capital, established_on, created_at"
         );
@@ -789,20 +827,39 @@ export async function POST(req: Request) {
       inserted = data;
     }
 
+    // 不適合の重複除去（理由はマージ）
+    const dedupedRejectedMap = new Map<string, Rejected>();
+    for (const it of rejected) {
+      const k = keyForRejected(it);
+      const ex = dedupedRejectedMap.get(k);
+      if (!ex) dedupedRejectedMap.set(k, it);
+      else {
+        const merged: Rejected = {
+          ...ex,
+          reject_reasons: Array.from(
+            new Set([
+              ...(ex.reject_reasons || []),
+              ...(it.reject_reasons || []),
+            ])
+          ),
+        };
+        dedupedRejectedMap.set(k, merged);
+      }
+    }
+    const dedupedRejected = Array.from(dedupedRejectedMap.values());
+
     return NextResponse.json({
       inserted: inserted?.length || 0,
       rows: inserted || [],
-      rejected: rejected.slice(0, Math.max(60, want * 3)),
+      rejected: dedupedRejected.slice(0, Math.max(60, want * 3)),
     });
-  } catch (e: any) {
-    return NextResponse.json(
-      { error: String(e?.message || e) },
-      { status: 500 }
-    );
+  } catch (e: unknown) {
+    const msg = (e as Error)?.message || String(e);
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
 }
 
-/** ---------- PATCH: 不適合テーブルからの手動追加 ---------- */
+/** ---------- Handler: PATCH（不適合→手動追加） ---------- */
 export async function PATCH(req: Request) {
   try {
     if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
@@ -858,10 +915,8 @@ export async function PATCH(req: Request) {
     if (error)
       return NextResponse.json({ error: error.message }, { status: 500 });
     return NextResponse.json({ row: data });
-  } catch (e: any) {
-    return NextResponse.json(
-      { error: String(e?.message || e) },
-      { status: 500 }
-    );
+  } catch (e: unknown) {
+    const msg = (e as Error)?.message || String(e);
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
 }

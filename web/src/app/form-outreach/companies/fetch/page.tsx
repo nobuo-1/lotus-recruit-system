@@ -3,10 +3,11 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import AppHeader from "@/components/AppHeader";
 import Link from "next/link";
-import { CheckCircle, XCircle, Loader2, Play, Plus } from "lucide-react";
+import { CheckCircle, XCircle, Loader2, Play } from "lucide-react";
 
 const LS_KEY = "fo_manual_fetch_latest";
 const LS_FETCH_COUNT = "fo_manual_fetch_count";
+const LS_REJECT_KEY = "fo_manual_fetch_rejected";
 
 type StepState = "idle" | "running" | "done" | "error";
 
@@ -29,7 +30,20 @@ type AddedRow = {
   created_at: string | null;
 };
 
-type RejectedRow = Omit<AddedRow, "id" | "created_at"> & {
+type RejectedRow = {
+  company_name: string;
+  website?: string | null;
+  contact_email?: string | null;
+  contact_form_url?: string | null;
+  industry_large?: string | null;
+  industry_small?: string | null;
+  company_size?: string | null;
+  company_size_extracted?: string | null;
+  prefectures?: string[] | null;
+  corporate_number?: string | null;
+  hq_address?: string | null;
+  capital?: number | null;
+  established_on?: string | null;
   reject_reasons: string[];
 };
 
@@ -47,28 +61,26 @@ type Filters = {
   keywords: string[];
   industries_large: string[];
   industries_small: string[];
-  // 追加
+  // 新規レンジ系
   capital_min?: number | null;
   capital_max?: number | null;
-  established_from?: string | null;
-  established_to?: string | null;
-
+  established_from?: string | null; // YYYY-MM-DD
+  established_to?: string | null; // YYYY-MM-DD
   updated_at?: string | null;
 };
 
-// ★ フローは11段構成
+// フロー可視化（任意に増減）
 const FLOW_TITLES = [
   "条件読み込み/表示",
-  "地域サンプリング（都道府県）",
-  "候補生成（国税庁ベース）",
-  "登記付与（資本金/設立）",
+  "国税庁から候補抽出（ランダム地域）",
+  "登記付与（資本金・設立）",
   "事前フィルタ（資本金/設立）",
-  "公式サイト解決（LLM）",
+  "公式HP解決（LLM）",
   "到達性チェック（HTTP）",
-  "フォーム探索",
-  "メール抽出",
-  "属性抽出（従業員/都道府県/業種）",
-  "保存（DB）",
+  "メール/フォーム抽出",
+  "従業員規模推定",
+  "都道府県/業種推定",
+  "保存（DB）/ 不適合集計",
 ];
 
 export default function ManualFetch() {
@@ -98,16 +110,19 @@ export default function ManualFetch() {
   const [countModalOpen, setCountModalOpen] = useState(false);
   const [fetchTotal, setFetchTotal] = useState<number>(60);
   const abortRef = useRef<AbortController | null>(null);
+  const cancelledRef = useRef(false);
 
   useEffect(() => {
     (async () => {
       try {
+        // me
         let meRes = await fetch("/api/me/tenant", { cache: "no-store" });
         if (!meRes.ok)
           meRes = await fetch("/api/me/tenant/", { cache: "no-store" });
         const me = await meRes.json().catch(() => ({}));
         setTenantId(me?.tenant_id ?? me?.profile?.tenant_id ?? null);
 
+        // filters
         const fRes = await fetch("/api/form-outreach/settings/filters", {
           cache: "no-store",
           headers: me?.tenant_id
@@ -132,23 +147,41 @@ export default function ManualFetch() {
             : Array.isArray(incoming.industries)
             ? incoming.industries
             : [],
-          capital_min: Number.isFinite(incoming.capital_min)
-            ? incoming.capital_min
-            : null,
-          capital_max: Number.isFinite(incoming.capital_max)
-            ? incoming.capital_max
-            : null,
-          established_from: incoming.established_from ?? null,
-          established_to: incoming.established_to ?? null,
+          capital_min:
+            typeof incoming.capital_min === "number"
+              ? incoming.capital_min
+              : null,
+          capital_max:
+            typeof incoming.capital_max === "number"
+              ? incoming.capital_max
+              : null,
+          established_from:
+            typeof incoming.established_from === "string"
+              ? incoming.established_from
+              : null,
+          established_to:
+            typeof incoming.established_to === "string"
+              ? incoming.established_to
+              : null,
           updated_at: incoming.updated_at ?? null,
         });
 
+        // keep "added"
         const raw = localStorage.getItem(LS_KEY);
         if (raw) {
           const obj = JSON.parse(raw);
           const ts = obj?.ts ? new Date(obj.ts).getTime() : 0;
           if (Date.now() - ts < 24 * 3600 * 1000) setAdded(obj.rows ?? []);
           else localStorage.removeItem(LS_KEY);
+        }
+        // keep "rejected"
+        const rejRaw = localStorage.getItem(LS_REJECT_KEY);
+        if (rejRaw) {
+          const obj = JSON.parse(rejRaw);
+          const ts = obj?.ts ? new Date(obj.ts).getTime() : 0;
+          if (Date.now() - ts < 24 * 3600 * 1000)
+            setRejected(Array.isArray(obj.rows) ? obj.rows : []);
+          else localStorage.removeItem(LS_REJECT_KEY);
         }
 
         const last = Number(localStorage.getItem(LS_FETCH_COUNT));
@@ -160,9 +193,18 @@ export default function ManualFetch() {
     })();
   }, []);
 
-  const anyRunning = s.some((x) => x === "running");
-  const openCountModal = () => {
-    if (anyRunning || loading) return;
+  const anyRunning = loading; // シンプルに実行状態で判定
+
+  /** 実行/中止ボタンのクリック */
+  const handleRunButton = () => {
+    if (anyRunning) {
+      // 中止
+      cancelledRef.current = true;
+      abortRef.current?.abort();
+      setMsg("実行を中止しています…");
+      return;
+    }
+    // 実行開始（件数モーダル）
     if (!tenantId)
       return setMsg(
         "テナントが解決できませんでした。ログインを確認してください。"
@@ -181,32 +223,33 @@ export default function ManualFetch() {
     if (!tenantId) return;
     setMsg("");
     setLoading(true);
+    cancelledRef.current = false;
     setS(Array(FLOW_TITLES.length).fill("idle"));
     setActiveIdx(-1);
-    setRejected([]);
     abortRef.current?.abort();
     abortRef.current = new AbortController();
 
     try {
-      // 0: 条件表示
+      // 0: 条件表示（固定）
       setActiveIdx(0);
       setS((a) => a.map((v, i) => (i === 0 ? "running" : "idle")));
-      await delay(200);
+      await delay(180);
       setS((a) => a.map((v, i) => (i === 0 ? "done" : v)));
       setActiveIdx(-1);
 
       let done = 0;
       let attempts = 0;
-      const MAX_ATTEMPTS = Math.ceil(total / 5) + 10;
-      const BATCH = Math.min(25, Math.max(8, Math.floor(total / 4)));
+      const MAX_ATTEMPTS = Math.ceil(total / 5) + 10; // 充分な再試行枠
+      const BATCH = Math.min(25, Math.max(8, Math.floor(total / 4))); // 自動バッチ
 
       while (done < total && attempts < MAX_ATTEMPTS) {
+        if (cancelledRef.current) throw new Error("ABORTED");
         attempts++;
         const want = Math.min(BATCH, total - done);
         const seed = `${Date.now()}-${attempts}`;
 
-        // フローの擬似進行（1→9を順回し）
-        const anim = animateSteps(setS, setActiveIdx, { start: 1, end: 9 });
+        // フローの擬似進行（API待ちの間、1→FLOW_TITLES.length-2 を順回し）
+        const anim = animateSteps(setS, setActiveIdx, FLOW_TITLES.length);
 
         const r = await fetch("/api/form-outreach/companies/fetch", {
           method: "POST",
@@ -219,27 +262,29 @@ export default function ManualFetch() {
         });
         const j: RunResult = await safeJson(r);
 
-        // 保存（10）を明示
+        // 保存（末尾ステップ）を明示
         anim.stop();
-        setActiveIdx(10);
+        const lastIdx = FLOW_TITLES.length - 1;
+        setActiveIdx(lastIdx);
         setS((a) =>
           a.map((v, i) =>
-            i === 10
+            i === lastIdx
               ? "running"
-              : i <= 9
+              : i < lastIdx
               ? a[i] === "idle"
                 ? "done"
                 : a[i]
               : v
           )
         );
-        await delay(150);
+        await delay(120);
 
-        if (!r.ok) throw new Error(j?.error || `fetch failed (${r.status})`);
+        if (!r.ok) {
+          if (cancelledRef.current) throw new Error("ABORTED");
+          throw new Error(j?.error || `fetch failed (${r.status})`);
+        }
 
         const rows = j.rows ?? [];
-        const rej = j.rejected ?? [];
-
         if (rows.length) {
           setAdded((prev) => {
             const next = [...rows, ...prev];
@@ -250,8 +295,16 @@ export default function ManualFetch() {
             return next;
           });
         }
-        if (rej.length) {
-          setRejected((prev) => [...rej, ...prev].slice(0, 1000));
+        if (Array.isArray(j.rejected) && j.rejected.length) {
+          const rejList: RejectedRow[] = j.rejected as RejectedRow[];
+          setRejected((prev) => {
+            const next = dedupeRejected([...rejList, ...prev]);
+            localStorage.setItem(
+              LS_REJECT_KEY,
+              JSON.stringify({ ts: new Date().toISOString(), rows: next })
+            );
+            return next;
+          });
         }
 
         const inc = Number.isFinite(j.inserted)
@@ -259,12 +312,12 @@ export default function ManualFetch() {
           : rows.length;
         done += inc;
 
-        setS((a) => a.map((v, i) => (i === 10 ? "done" : v)));
+        setS((a) => a.map((v, i) => (i === lastIdx ? "done" : v)));
         setActiveIdx(-1);
         setMsg(`取得進行中：${done}/${total} 件`);
 
         if (inc === 0) {
-          await delay(300);
+          await delay(240);
           continue;
         }
       }
@@ -277,29 +330,13 @@ export default function ManualFetch() {
     } catch (e: any) {
       setActiveIdx(-1);
       setS((arr) => arr.map((v) => (v === "running" ? "error" : v)));
-      setMsg(String(e?.message || e));
+      if (String(e?.message || e) === "ABORTED") {
+        setMsg("実行を中止しました。");
+      } else {
+        setMsg(String(e?.message || e));
+      }
     } finally {
       setLoading(false);
-    }
-  };
-
-  const manualAdd = async (c: RejectedRow) => {
-    if (!tenantId) return;
-    try {
-      const r = await fetch("/api/form-outreach/companies/fetch", {
-        method: "PATCH",
-        headers: {
-          "x-tenant-id": tenantId,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ candidate: c }),
-      });
-      const j = await safeJson(r);
-      if (!r.ok) throw new Error(j?.error || "manual add failed");
-      setAdded((prev) => (j?.row ? [j.row, ...prev] : prev));
-      setMsg("1件を手動追加しました。");
-    } catch (e: any) {
-      setMsg(String(e?.message || e));
     }
   };
 
@@ -327,7 +364,59 @@ export default function ManualFetch() {
     }
   };
 
-  /** --- サマリー（「規模」の前と「資本金」の前で改行） --- */
+  /** 不適合 → 採用に追加（手動） */
+  const addFromRejected = async (row: RejectedRow) => {
+    try {
+      if (!tenantId) throw new Error("tenant missing");
+      const r = await fetch("/api/form-outreach/companies/fetch", {
+        method: "PATCH",
+        headers: {
+          "x-tenant-id": tenantId,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ candidate: row }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j?.error || "manual add failed");
+
+      // 追加先の一覧に反映
+      if (j?.row) {
+        setAdded((prev) => {
+          const next = [j.row as AddedRow, ...prev];
+          localStorage.setItem(
+            LS_KEY,
+            JSON.stringify({ ts: new Date().toISOString(), rows: next })
+          );
+          return next;
+        });
+      }
+      // 不適合からは除去
+      setRejected((prev) => {
+        const next = prev.filter((x) => !sameRejected(x, row));
+        localStorage.setItem(
+          LS_REJECT_KEY,
+          JSON.stringify({ ts: new Date().toISOString(), rows: next })
+        );
+        return next;
+      });
+      setMsg("不適合から採用に追加しました。");
+    } catch (e: any) {
+      setMsg(String(e?.message || e));
+    }
+  };
+
+  /** 不適合の一時非表示 */
+  const hideRejected = (row: RejectedRow) => {
+    setRejected((prev) => {
+      const next = prev.filter((x) => !sameRejected(x, row));
+      localStorage.setItem(
+        LS_REJECT_KEY,
+        JSON.stringify({ ts: new Date().toISOString(), rows: next })
+      );
+      return next;
+    });
+  };
+
   const summaryParts = useMemo(() => {
     const pref = filters.prefectures.length
       ? filters.prefectures.join(" / ")
@@ -335,18 +424,6 @@ export default function ManualFetch() {
     const size = filters.employee_size_ranges.length
       ? filters.employee_size_ranges.join(" / ")
       : "指定なし";
-    const capital =
-      (Number.isFinite(filters.capital_min)
-        ? formatYen(filters.capital_min!)
-        : "-") +
-      " 〜 " +
-      (Number.isFinite(filters.capital_max)
-        ? formatYen(filters.capital_max!)
-        : "-");
-    const established =
-      (filters.established_from || "-") +
-      " 〜 " +
-      (filters.established_to || "-");
     const kw = filters.keywords.length
       ? filters.keywords.join(" / ")
       : "指定なし";
@@ -357,7 +434,19 @@ export default function ManualFetch() {
         : filters.industries_large.length > 0
         ? filters.industries_large.join(" / ")
         : "指定なし";
-    return { pref, size, capital, established, kw, ind };
+    const cap =
+      (filters.capital_min != null
+        ? `≥${formatJPY(filters.capital_min)}`
+        : "指定なし") +
+      " 〜 " +
+      (filters.capital_max != null
+        ? `≤${formatJPY(filters.capital_max)}`
+        : "指定なし");
+    const est =
+      (filters.established_from || "指定なし") +
+      " 〜 " +
+      (filters.established_to || "指定なし");
+    return { pref, size, kw, ind, cap, est };
   }, [filters]);
 
   return (
@@ -372,24 +461,51 @@ export default function ManualFetch() {
             <p className="text-sm text-neutral-500">
               進行をフローチャートで可視化。保存は逐次反映。紺色バッジは非表示。
             </p>
-            {/* ★ 改行位置を調整（規模の前 / 資本金の前で改行） */}
-            <p className="text-xs text-neutral-500 mt-1 break-words whitespace-pre-wrap">
+            <p className="text-xs text-neutral-500 mt-1 break-words">
               テナント: <span className="font-mono">{tenantId ?? "-"}</span>
-              {"\n"}現在のフィルタ: 都道府県={summaryParts.pref}
-              {"\n"}規模={summaryParts.size}
-              {"\n"}資本金={summaryParts.capital}
-              {"\n"}設立={summaryParts.established}
-              {"\n"}KW={summaryParts.kw}
-              {"\n"}業種={summaryParts.ind}
+              <br />
+              現在のフィルタ:{" "}
+              <span className="opacity-80">都道府県={summaryParts.pref}</span>
+              <br />
+              <span className="opacity-80">
+                {/* ご要望: 「規模」の前で改行 */}
+                規模={summaryParts.size}
+              </span>
+              <br />
+              <span className="opacity-80">資本金={summaryParts.cap}</span>
+              <br />
+              <span className="opacity-80">設立={summaryParts.est}</span>
+              <br />
+              <span className="opacity-80">KW={summaryParts.kw}</span>
+              <br />
+              <span className="opacity-80">業種={summaryParts.ind}</span>
             </p>
           </div>
-          <div className="shrink-0 whitespace-nowrap">
+          <div className="shrink-0 whitespace-nowrap flex gap-2">
             <Link
               href="/form-outreach/companies"
               className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
             >
               企業一覧へ
             </Link>
+            <button
+              onClick={handleRunButton}
+              className={`inline-flex items-center gap-2 rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50 ${
+                anyRunning ? "text-red-700 border-red-300" : ""
+              }`}
+            >
+              {anyRunning ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  中止する
+                </>
+              ) : (
+                <>
+                  <Play className="h-4 w-4" />
+                  ワークフローを実行
+                </>
+              )}
+            </button>
           </div>
         </div>
 
@@ -404,18 +520,10 @@ export default function ManualFetch() {
               >
                 取得フィルタ設定へ
               </Link>
-              <button
-                onClick={openCountModal}
-                disabled={anyRunning || loading}
-                className="inline-flex items-center gap-2 rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50 disabled:opacity-50"
-              >
-                <Play className="h-4 w-4" />
-                {anyRunning || loading ? "実行中…" : "ワークフローを実行"}
-              </button>
             </div>
           </div>
 
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-3 lg:grid-cols-5">
             {FLOW_TITLES.map((title, idx) => (
               <FlowNode
                 key={title}
@@ -427,8 +535,8 @@ export default function ManualFetch() {
           </div>
         </section>
 
-        {/* 逐次レンダリングテーブル（適合） */}
-        <section className="rounded-2xl border border-neutral-200 overflow-hidden mb-6">
+        {/* 逐次レンダリングテーブル（今回追加） */}
+        <section className="rounded-2xl border border-neutral-200 overflow-hidden">
           <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 bg-neutral-50">
             <div className="text-sm font-medium text-neutral-800">
               今回追加（新しい順）
@@ -444,162 +552,221 @@ export default function ManualFetch() {
             </div>
           </div>
 
-          <table className="min-w-[1200px] w-full text-sm">
-            <thead className="bg-neutral-50 text-neutral-600">
-              <tr>
-                <th className="px-3 py-3 text-left">企業名</th>
-                <th className="px-3 py-3 text-left">サイトURL</th>
-                <th className="px-3 py-3 text-left">メール</th>
-                <th className="px-3 py-3 text-left">フォーム</th>
-                <th className="px-3 py-3 text-left">規模</th>
-                <th className="px-3 py-3 text-left">都道府県</th>
-                <th className="px-3 py-3 text-left">業種</th>
-                <th className="px-3 py-3 text-left">資本金</th>
-                <th className="px-3 py-3 text-left">設立</th>
-                <th className="px-3 py-3 text-left">取得元</th>
-                <th className="px-3 py-3 text-left">取得日時</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-neutral-200">
-              {added.map((c) => (
-                <tr key={c.id}>
-                  <td className="px-3 py-2">{c.company_name || "-"}</td>
-                  <td className="px-3 py-2">
-                    {c.website ? (
-                      <a
-                        href={c.website}
-                        target="_blank"
-                        className="text-indigo-700 hover:underline break-all"
-                      >
-                        {c.website}
-                      </a>
-                    ) : (
-                      "-"
-                    )}
-                  </td>
-                  <td className="px-3 py-2">{c.contact_email || "-"}</td>
-                  <td className="px-3 py-2">
-                    {c.contact_form_url ? (
-                      <a
-                        href={c.contact_form_url}
-                        target="_blank"
-                        className="text-indigo-700 hover:underline"
-                      >
-                        あり
-                      </a>
-                    ) : (
-                      "なし"
-                    )}
-                  </td>
-                  <td className="px-3 py-2">{c.company_size || "-"}</td>
-                  <td className="px-3 py-2">
-                    {Array.isArray(c.prefectures) && c.prefectures.length
-                      ? c.prefectures.join(" / ")
-                      : "-"}
-                  </td>
-                  <td className="px-3 py-2">{c.industry || "-"}</td>
-                  <td className="px-3 py-2">
-                    {c.capital != null ? formatYen(c.capital) : "-"}
-                  </td>
-                  <td className="px-3 py-2">{c.established_on || "-"}</td>
-                  <td className="px-3 py-2">
-                    {c.job_site_source || c.source_site || "-"}
-                  </td>
-                  <td className="px-3 py-2">
-                    {c.created_at
-                      ? c.created_at.replace("T", " ").replace("Z", "")
-                      : "-"}
-                  </td>
-                </tr>
-              ))}
-              {added.length === 0 && (
+          <div className="overflow-x-auto">
+            <table className="min-w-[1200px] w-full text-sm">
+              <thead className="bg-neutral-50 text-neutral-600">
                 <tr>
-                  <td
-                    colSpan={11}
-                    className="px-4 py-10 text-center text-neutral-400"
-                  >
-                    新規追加はありません
-                  </td>
+                  <th className="px-3 py-3 text-left">企業名</th>
+                  <th className="px-3 py-3 text-left">サイトURL</th>
+                  <th className="px-3 py-3 text-left">メール</th>
+                  <th className="px-3 py-3 text-left">フォーム</th>
+                  <th className="px-3 py-3 text-left">規模</th>
+                  <th className="px-3 py-3 text-left">都道府県</th>
+                  <th className="px-3 py-3 text-left">業種</th>
+                  <th className="px-3 py-3 text-left">資本金</th>
+                  <th className="px-3 py-3 text-left">設立</th>
+                  <th className="px-3 py-3 text-left">法人番号</th>
+                  <th className="px-3 py-3 text-left">本社所在地</th>
+                  <th className="px-3 py-3 text-left">取得元</th>
+                  <th className="px-3 py-3 text-left">取得日時</th>
                 </tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-neutral-200">
+                {added.map((c) => (
+                  <tr key={c.id}>
+                    <td className="px-3 py-2">{c.company_name || "-"}</td>
+                    <td className="px-3 py-2">
+                      {c.website ? (
+                        <a
+                          href={c.website}
+                          target="_blank"
+                          className="text-indigo-700 hover:underline break-all"
+                        >
+                          {c.website}
+                        </a>
+                      ) : (
+                        "-"
+                      )}
+                    </td>
+                    <td className="px-3 py-2">{c.contact_email || "-"}</td>
+                    <td className="px-3 py-2">
+                      {c.contact_form_url ? (
+                        <a
+                          href={c.contact_form_url}
+                          target="_blank"
+                          className="text-indigo-700 hover:underline"
+                        >
+                          あり
+                        </a>
+                      ) : (
+                        "なし"
+                      )}
+                    </td>
+                    <td className="px-3 py-2">{c.company_size || "-"}</td>
+                    <td className="px-3 py-2">
+                      {Array.isArray(c.prefectures) && c.prefectures.length
+                        ? c.prefectures.join(" / ")
+                        : "-"}
+                    </td>
+                    <td className="px-3 py-2">{c.industry || "-"}</td>
+                    <td className="px-3 py-2">
+                      {c.capital != null ? formatJPY(c.capital) : "-"}
+                    </td>
+                    <td className="px-3 py-2">{c.established_on || "-"}</td>
+                    <td className="px-3 py-2">{c.corporate_number || "-"}</td>
+                    <td className="px-3 py-2 break-all">
+                      {c.hq_address || "-"}
+                    </td>
+                    <td className="px-3 py-2">
+                      {c.job_site_source || c.source_site || "-"}
+                    </td>
+                    <td className="px-3 py-2">
+                      {c.created_at
+                        ? c.created_at.replace("T", " ").replace("Z", "")
+                        : "-"}
+                    </td>
+                  </tr>
+                ))}
+                {added.length === 0 && (
+                  <tr>
+                    <td
+                      colSpan={13}
+                      className="px-4 py-10 text-center text-neutral-400"
+                    >
+                      新規追加はありません
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </section>
 
-        {/* ★ 不適合（フィルタで弾いた）一覧 + 手動追加 */}
-        <section className="rounded-2xl border border-neutral-200 overflow-hidden">
+        {/* フィルタ不適合（横スクロール対応 + 手動追加） */}
+        <section className="rounded-2xl border border-neutral-200 overflow-hidden mt-6">
           <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 bg-neutral-50">
             <div className="text-sm font-medium text-neutral-800">
-              フィルタ不適合（手動判断で追加可能）
+              フィルタ不適合（重複除去済み / 直近取得が上）
             </div>
-            <div className="text-xs text-neutral-500">最大1000件まで保持</div>
+            <div className="flex items-center gap-2 text-xs text-neutral-500">
+              表示件数: {rejected.length}
+            </div>
           </div>
 
-          <table className="min-w-[1200px] w-full text-sm">
-            <thead className="bg-neutral-50 text-neutral-600">
-              <tr>
-                <th className="px-3 py-3 text-left">企業名</th>
-                <th className="px-3 py-3 text-left">サイトURL</th>
-                <th className="px-3 py-3 text-left">都道府県</th>
-                <th className="px-3 py-3 text-left">資本金</th>
-                <th className="px-3 py-3 text-left">設立</th>
-                <th className="px-3 py-3 text-left">理由</th>
-                <th className="px-3 py-3 text-left">操作</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-neutral-200">
-              {rejected.map((c, idx) => (
-                <tr key={`${c.company_name}-${idx}`}>
-                  <td className="px-3 py-2">{c.company_name || "-"}</td>
-                  <td className="px-3 py-2">
-                    {c.website ? (
-                      <a
-                        href={c.website}
-                        target="_blank"
-                        className="text-indigo-700 hover:underline break-all"
-                      >
-                        {c.website}
-                      </a>
-                    ) : (
-                      "-"
-                    )}
-                  </td>
-                  <td className="px-3 py-2">
-                    {Array.isArray(c.prefectures) && c.prefectures.length
-                      ? c.prefectures.join(" / ")
-                      : "-"}
-                  </td>
-                  <td className="px-3 py-2">
-                    {c.capital != null ? formatYen(c.capital) : "-"}
-                  </td>
-                  <td className="px-3 py-2">{c.established_on || "-"}</td>
-                  <td className="px-3 py-2">
-                    {(c.reject_reasons || []).slice(0, 4).join(" / ") || "-"}
-                  </td>
-                  <td className="px-3 py-2">
-                    <button
-                      onClick={() => manualAdd(c)}
-                      className="inline-flex items-center gap-1 rounded-lg border border-neutral-200 px-2 py-1 text-xs hover:bg-neutral-50"
-                      title="手動で追加"
-                    >
-                      <Plus className="h-3.5 w-3.5" />
-                      追加
-                    </button>
-                  </td>
-                </tr>
-              ))}
-              {rejected.length === 0 && (
+          <div className="overflow-x-auto">
+            <table className="min-w-[1400px] w-full text-sm">
+              <thead className="bg-neutral-50 text-neutral-600">
                 <tr>
-                  <td
-                    colSpan={7}
-                    className="px-4 py-10 text-center text-neutral-400"
-                  >
-                    不適合の候補はありません
-                  </td>
+                  <th className="px-3 py-3 text-left">企業名</th>
+                  <th className="px-3 py-3 text-left">サイトURL</th>
+                  <th className="px-3 py-3 text-left">都道府県</th>
+                  <th className="px-3 py-3 text-left">資本金</th>
+                  <th className="px-3 py-3 text-left">設立</th>
+                  <th className="px-3 py-3 text-left">法人番号</th>
+                  <th className="px-3 py-3 text-left">本社所在地</th>
+                  <th className="px-3 py-3 text-left">メール</th>
+                  <th className="px-3 py-3 text-left">フォーム</th>
+                  <th className="px-3 py-3 text-left">推定規模</th>
+                  <th className="px-3 py-3 text-left">業種</th>
+                  <th className="px-3 py-3 text-left">不採用理由</th>
+                  <th className="px-3 py-3 text-left">操作</th>
                 </tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-neutral-200">
+                {rejected.map((r, idx) => (
+                  <tr key={idx}>
+                    <td className="px-3 py-2">{r.company_name}</td>
+                    <td className="px-3 py-2">
+                      {r.website ? (
+                        <a
+                          href={r.website}
+                          target="_blank"
+                          className="text-indigo-700 hover:underline break-all"
+                        >
+                          {r.website}
+                        </a>
+                      ) : (
+                        "-"
+                      )}
+                    </td>
+                    <td className="px-3 py-2">
+                      {Array.isArray(r.prefectures) && r.prefectures?.length
+                        ? r.prefectures.join(" / ")
+                        : "-"}
+                    </td>
+                    <td className="px-3 py-2">
+                      {r.capital != null ? formatJPY(r.capital) : "-"}
+                    </td>
+                    <td className="px-3 py-2">{r.established_on || "-"}</td>
+                    <td className="px-3 py-2">{r.corporate_number || "-"}</td>
+                    <td className="px-3 py-2 break-all">
+                      {r.hq_address || "-"}
+                    </td>
+                    <td className="px-3 py-2">{r.contact_email || "-"}</td>
+                    <td className="px-3 py-2">
+                      {r.contact_form_url ? (
+                        <a
+                          href={r.contact_form_url}
+                          target="_blank"
+                          className="text-indigo-700 hover:underline"
+                        >
+                          あり
+                        </a>
+                      ) : (
+                        "なし"
+                      )}
+                    </td>
+                    <td className="px-3 py-2">
+                      {r.company_size_extracted || r.company_size || "-"}
+                    </td>
+                    <td className="px-3 py-2">
+                      {[r.industry_large, r.industry_small]
+                        .filter(Boolean)
+                        .join(" / ") || "-"}
+                    </td>
+                    <td className="px-3 py-2">
+                      <ul className="list-disc list-inside space-y-0.5">
+                        {Array.from(new Set(r.reject_reasons || [])).map(
+                          (rr, i) => (
+                            <li key={i} className="text-xs text-neutral-700">
+                              {rr}
+                            </li>
+                          )
+                        )}
+                      </ul>
+                    </td>
+                    <td className="px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => addFromRejected(r)}
+                          className="rounded border border-neutral-300 px-2 py-1 text-xs hover:bg-neutral-50"
+                        >
+                          採用に追加
+                        </button>
+                        <button
+                          onClick={() => hideRejected(r)}
+                          className="rounded border border-neutral-300 px-2 py-1 text-xs hover:bg-neutral-50"
+                          title="この行を非表示にします"
+                        >
+                          非表示
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {rejected.length === 0 && (
+                  <tr>
+                    <td
+                      colSpan={13}
+                      className="px-4 py-10 text-center text-neutral-400"
+                    >
+                      不適合データはありません
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </section>
 
         {msg && (
@@ -651,14 +818,6 @@ function FlowNode({
         {icon}
         <div className="text-sm font-medium text-neutral-800">{title}</div>
       </div>
-      <div
-        className="hidden md:block absolute -right-3 top-1/2 h-[2px] w-6 bg-neutral-200"
-        aria-hidden
-      />
-      <div
-        className="hidden md:block absolute -bottom-3 left-1/2 w-[2px] h-6 bg-neutral-200"
-        aria-hidden
-      />
     </div>
   );
 }
@@ -745,22 +904,16 @@ async function safeJson(res: Response) {
     return {};
   }
 }
-function formatYen(n: number) {
-  if (n >= 100_000_000 && n % 100_000_000 === 0)
-    return `${n / 100_000_000}億円`;
-  if (n >= 10_000 && n % 10_000 === 0) return `${n / 10_000}万円`;
-  return `${n.toLocaleString()}円`;
-}
 
-/** API待機中に指定区間を順に running→done で進める簡易アニメーション */
+/** API待機中に 1→(FLOW_TITLES.length-2) を順に running→done で進める簡易アニメーション */
 function animateSteps(
   setS: React.Dispatch<React.SetStateAction<StepState[]>>,
   setActiveIdx: React.Dispatch<React.SetStateAction<number>>,
-  range: { start: number; end: number }
+  totalSteps: number
 ) {
   let stopped = false;
   (async () => {
-    for (let i = range.start; i <= range.end; i++) {
+    for (let i = 1; i <= Math.max(1, totalSteps - 2); i++) {
       if (stopped) break;
       setActiveIdx(i);
       setS((a) =>
@@ -768,7 +921,7 @@ function animateSteps(
           idx === i ? "running" : idx < i && v === "idle" ? "done" : v
         )
       );
-      await delay(220);
+      await delay(180);
       if (stopped) break;
       setS((a) => a.map((v, idx) => (idx === i ? "done" : v)));
     }
@@ -779,4 +932,54 @@ function animateSteps(
       setActiveIdx(-1);
     },
   };
+}
+
+function normalizeSite(u?: string | null) {
+  if (!u) return "";
+  try {
+    const url = new URL(/^https?:\/\//i.test(u) ? u : `https://${u}`);
+    url.hash = "";
+    return url.toString().toLowerCase();
+  } catch {
+    return (u || "").toLowerCase();
+  }
+}
+function rejectedKey(c: RejectedRow) {
+  const k1 = (c.corporate_number || "").trim();
+  const k2 = normalizeSite(c.website);
+  const k3 = (c.company_name || "").trim().toLowerCase();
+  return `${k1}__${k2}__${k3}`;
+}
+function sameRejected(a: RejectedRow, b: RejectedRow) {
+  return rejectedKey(a) === rejectedKey(b);
+}
+function dedupeRejected(list: RejectedRow[]): RejectedRow[] {
+  const map = new Map<string, RejectedRow>();
+  for (const r of list) {
+    const key = rejectedKey(r);
+    const existed = map.get(key);
+    if (!existed) map.set(key, r);
+    else {
+      // 不採用理由はマージ
+      const mergedReasons = Array.from(
+        new Set([
+          ...(existed.reject_reasons || []),
+          ...(r.reject_reasons || []),
+        ])
+      );
+      map.set(key, { ...existed, reject_reasons: mergedReasons });
+    }
+  }
+  return Array.from(map.values());
+}
+function formatJPY(n: number) {
+  try {
+    return new Intl.NumberFormat("ja-JP", {
+      style: "currency",
+      currency: "JPY",
+      maximumFractionDigits: 0,
+    }).format(n);
+  } catch {
+    return `${n}円`;
+  }
 }
