@@ -40,7 +40,7 @@ async function resolveTenantId(req: NextRequest): Promise<string | null> {
 }
 
 function normalizeOut(row: any) {
-  // クライアントが期待する形に正規化
+  // クライアントが期待する形に正規化（未知列は安全に既定値へ）
   return {
     tenant_id: row?.tenant_id ?? null,
     prefectures: Array.isArray(row?.prefectures) ? row.prefectures : [],
@@ -48,8 +48,10 @@ function normalizeOut(row: any) {
       ? row.employee_size_ranges
       : [],
     keywords: Array.isArray(row?.keywords) ? row.keywords : [],
-    // レガシー job_titles はそのまま返しつつ、UI側は industries_small へ吸収済み
+
+    // 互換: レガシー job_titles を読み取りだけ許容（DBになくても undefined なので安全）
     job_titles: Array.isArray(row?.job_titles) ? row.job_titles : [],
+
     // 拡張（存在すれば使う）
     industries_large: Array.isArray(row?.industries_large)
       ? row.industries_large
@@ -61,13 +63,12 @@ function normalizeOut(row: any) {
       : Array.isArray(row?.job_titles)
       ? row.job_titles
       : [],
-    // ★ 追加：資本金・設立の範囲
+
+    // 新規: 資本金レンジ / 設立日レンジ
     capital_min: typeof row?.capital_min === "number" ? row.capital_min : null,
     capital_max: typeof row?.capital_max === "number" ? row.capital_max : null,
-    established_from:
-      typeof row?.established_from === "string" ? row.established_from : null,
-    established_to:
-      typeof row?.established_to === "string" ? row.established_to : null,
+    established_from: row?.established_from ?? null,
+    established_to: row?.established_to ?? null,
 
     updated_at: row?.updated_at ?? null,
     created_at: row?.created_at ?? null,
@@ -82,31 +83,33 @@ async function loadExisting(tenantId: string) {
     { headers: adminHeaders(), cache: "no-store" }
   );
   const rows = await r.json().catch(() => []);
-  if (!r.ok) throw new Error(rows?.message || "fetch failed");
+  if (!r.ok) {
+    throw new Error(rows?.message || "fetch failed");
+  }
   return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
 }
 
+/** エラーメッセージに応じて未知列を安全に取り除く（保険） */
 function stripUnknownColsOnDemand(payload: any, message: string) {
-  // PostgreSQLのエラー文に「～ column does not exist」が含まれる環境用の救済
   const msg = (message || "").toLowerCase();
-  if (!msg) return null;
   const p = { ...payload };
-  const maybe: string[] = [
-    "industries_large",
-    "industries_small",
-    "capital_min",
-    "capital_max",
-    "established_from",
-    "established_to",
-  ];
-  let touched = false;
-  for (const col of maybe) {
-    if (msg.includes(col.toLowerCase())) {
-      delete (p as any)[col];
-      touched = true;
-    }
+
+  // このAPIでは job_titles は DB に存在しない前提
+  if ("job_titles" in p) delete p.job_titles;
+
+  // 環境差異で industries_* が未作成なケースにも保険で対応
+  if (msg.includes("industries_large")) delete p.industries_large;
+  if (msg.includes("industries_small")) delete p.industries_small;
+
+  // これ以上削っても効果がない場合は null を返す
+  if (
+    payload.job_titles === undefined &&
+    payload.industries_large === p.industries_large &&
+    payload.industries_small === p.industries_small
+  ) {
+    return null;
   }
-  return touched ? p : null;
+  return p;
 }
 
 /** GET: 現在のフィルタ取得（テナント別） */
@@ -157,10 +160,7 @@ export async function POST(req: NextRequest) {
     const body = await req.json().catch(() => ({}));
     const input = body?.filters ?? {};
 
-    const numOrNull = (v: any) =>
-      typeof v === "number" && Number.isFinite(v) ? v : null;
-    const strOrNull = (v: any) => (typeof v === "string" && v ? v : null);
-
+    // 新規項目を含めた保存ペイロード（DBに存在しない job_titles は書かない）
     const now = new Date().toISOString();
     const basePayload: any = {
       tenant_id: tenantId,
@@ -169,18 +169,24 @@ export async function POST(req: NextRequest) {
         ? input.employee_size_ranges
         : [],
       keywords: Array.isArray(input.keywords) ? input.keywords : [],
-      job_titles: Array.isArray(input.job_titles) ? input.job_titles : [],
       industries_large: Array.isArray(input.industries_large)
         ? input.industries_large
         : [],
       industries_small: Array.isArray(input.industries_small)
         ? input.industries_small
         : [],
-      // ★ 追加：資本金・設立の範囲
-      capital_min: numOrNull(input.capital_min),
-      capital_max: numOrNull(input.capital_max),
-      established_from: strOrNull(input.established_from),
-      established_to: strOrNull(input.established_to),
+
+      // 新規: 資本金レンジ / 設立日レンジ
+      capital_min:
+        typeof input.capital_min === "number" ? input.capital_min : null,
+      capital_max:
+        typeof input.capital_max === "number" ? input.capital_max : null,
+      established_from:
+        typeof input.established_from === "string"
+          ? input.established_from
+          : null,
+      established_to:
+        typeof input.established_to === "string" ? input.established_to : null,
 
       updated_at: now,
     };
