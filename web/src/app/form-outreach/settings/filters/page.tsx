@@ -336,6 +336,11 @@ type Filters = {
   keywords: string[];
   industries_large: IndustryLarge[];
   industries_small: string[];
+  // ★ 追加
+  capital_min: number | null;
+  capital_max: number | null;
+  established_from: string | null; // YYYY-MM-DD
+  established_to: string | null; // YYYY-MM-DD
   updated_at?: string | null;
 };
 
@@ -353,6 +358,10 @@ export default function FiltersPage() {
     keywords: [],
     industries_large: [],
     industries_small: [],
+    capital_min: null,
+    capital_max: null,
+    established_from: null,
+    established_to: null,
     updated_at: null,
   });
 
@@ -360,36 +369,30 @@ export default function FiltersPage() {
   const [prefModalOpen, setPrefModalOpen] = useState(false);
   const [indModalOpen, setIndModalOpen] = useState(false);
 
-  // --- ここを堅牢化（404/HTMLでも落ちないように） ---
   useEffect(() => {
     (async () => {
       try {
-        // 1) テナント取得（404時はトレイリングスラッシュ再試行）
+        // 1) テナント
         let me: any = null;
         let meRes = await fetch("/api/me/tenant", { cache: "no-store" });
-        if (!meRes.ok) {
-          const meRes2 = await fetch("/api/me/tenant/", { cache: "no-store" });
-          meRes = meRes2;
-        }
-        if (meRes.ok) {
-          me = await safeJson(meRes);
-        } else {
-          // 未ログイン or ルート未配備でも落ちないように
-          me = null;
-        }
-
+        if (!meRes.ok)
+          meRes = await fetch("/api/me/tenant/", { cache: "no-store" });
+        me = meRes.ok ? await safeJson(meRes) : null;
         const tId: string | null =
           me?.profile?.tenant_id ?? me?.tenant_id ?? null;
         setTenantId(tId);
 
-        // 2) 保存フィルタ読み込み（テナントがあればヘッダ付与）
+        // 2) フィルタ読み込み
         const fRes = await fetch("/api/form-outreach/settings/filters", {
           cache: "no-store",
           headers: tId ? { "x-tenant-id": tId } : undefined,
         });
-
         const j = fRes.ok ? await safeJson(fRes) : {};
         const incoming = j?.filters ?? {};
+
+        const numOrNull = (v: any) =>
+          typeof v === "number" && Number.isFinite(v) ? v : null;
+        const strOrNull = (v: any) => (typeof v === "string" && v ? v : null);
 
         setFilters((prev) => ({
           ...prev,
@@ -408,6 +411,12 @@ export default function FiltersPage() {
             : Array.isArray(incoming.job_titles)
             ? incoming.job_titles
             : [],
+          // ★ 追加
+          capital_min: numOrNull(incoming.capital_min),
+          capital_max: numOrNull(incoming.capital_max),
+          established_from: strOrNull(incoming.established_from),
+          established_to: strOrNull(incoming.established_to),
+
           updated_at: incoming.updated_at ?? null,
         }));
       } catch (e: any) {
@@ -453,6 +462,18 @@ export default function FiltersPage() {
     if (nL === 0 && nS === 0) return "（未選択）";
     return `${nL}大分類 / ${nS}小分類を選択中`;
   }, [filters.industries_large, filters.industries_small]);
+
+  const capitalSummary = useMemo(() => {
+    const { capital_min, capital_max } = filters;
+    const left = capital_min != null ? formatYen(capital_min) : "-";
+    const right = capital_max != null ? formatYen(capital_max) : "-";
+    return `${left} 〜 ${right}`;
+  }, [filters.capital_min, filters.capital_max]);
+
+  const establishedSummary = useMemo(() => {
+    const { established_from, established_to } = filters;
+    return `${established_from || "-"} 〜 ${established_to || "-"}`;
+  }, [filters.established_from, filters.established_to]);
 
   return (
     <>
@@ -554,6 +575,80 @@ export default function FiltersPage() {
 
           <hr className="border-neutral-200" />
 
+          {/* 資本金（範囲） */}
+          <div>
+            <div className="text-sm font-medium text-neutral-800 mb-2">
+              資本金（範囲・任意）
+            </div>
+            <div className="flex items-center gap-3">
+              <input
+                className="w-56 rounded-lg border border-neutral-300 px-3 py-2 text-sm"
+                placeholder="下限（例: 3000万 / 3億 / 30000000）"
+                defaultValue={filters.capital_min ?? ""}
+                onBlur={(e) =>
+                  setFilters((f) => ({
+                    ...f,
+                    capital_min: parseYenInput(e.target.value),
+                  }))
+                }
+              />
+              <span className="text-neutral-500">〜</span>
+              <input
+                className="w-56 rounded-lg border border-neutral-300 px-3 py-2 text-sm"
+                placeholder="上限（例: 5億 / 2億5000万 / 500000000）"
+                defaultValue={filters.capital_max ?? ""}
+                onBlur={(e) =>
+                  setFilters((f) => ({
+                    ...f,
+                    capital_max: parseYenInput(e.target.value),
+                  }))
+                }
+              />
+              <div className="text-xs text-neutral-500">
+                現在: {capitalSummary}
+              </div>
+            </div>
+          </div>
+
+          <hr className="border-neutral-200" />
+
+          {/* 設立年月日（範囲） */}
+          <div>
+            <div className="text-sm font-medium text-neutral-800 mb-2">
+              設立年月日（範囲・任意）
+            </div>
+            <div className="flex items-center gap-3">
+              <input
+                type="date"
+                className="rounded-lg border border-neutral-300 px-3 py-2 text-sm"
+                value={filters.established_from ?? ""}
+                onChange={(e) =>
+                  setFilters((f) => ({
+                    ...f,
+                    established_from: e.target.value || null,
+                  }))
+                }
+              />
+              <span className="text-neutral-500">〜</span>
+              <input
+                type="date"
+                className="rounded-lg border border-neutral-300 px-3 py-2 text-sm"
+                value={filters.established_to ?? ""}
+                onChange={(e) =>
+                  setFilters((f) => ({
+                    ...f,
+                    established_to: e.target.value || null,
+                  }))
+                }
+              />
+              <div className="text-xs text-neutral-500">
+                現在: {establishedSummary}
+              </div>
+            </div>
+          </div>
+
+          <hr className="border-neutral-200" />
+
           {/* キーワード */}
           <div>
             <div className="text-sm font-medium text-neutral-800 mb-1">
@@ -646,7 +741,7 @@ export default function FiltersPage() {
         />
       )}
 
-      {/* 業種モーダル */}
+      {/* 業種モーダル（このファイル内に定義） */}
       {indModalOpen && (
         <IndustryCategoryModal
           large={filters.industries_large}
@@ -681,7 +776,7 @@ function PrefectureModal({
   const [pref, setPref] = useState<string[]>(selected ?? []);
   const [query, setQuery] = useState("");
 
-  useEffect(() => setPref(selected ?? []), [selected]);
+  React.useEffect(() => setPref(selected ?? []), [selected]);
 
   const allPrefList = useMemo(() => PREF_GROUPS.flatMap((g) => g.items), []);
   const nationalAll = pref.length === allPrefList.length;
@@ -810,7 +905,7 @@ function PrefectureModal({
           </div>
         </div>
 
-        {/* Footer（JobCategoryModal と同系構成） */}
+        {/* Footer */}
         <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-neutral-200">
           <button
             onClick={() => setPref([])}
@@ -831,7 +926,7 @@ function PrefectureModal({
 }
 
 /** =========================
- * 業種モーダル
+ * 業種モーダル（このファイル内で定義）
  * ========================= */
 function IndustryCategoryModal({
   large,
@@ -844,14 +939,13 @@ function IndustryCategoryModal({
   onCloseAction: () => void;
   onApplyAction: (L: IndustryLarge[], S: string[]) => void;
 }) {
-  // 初期反映
   const [L, setL] = useState<IndustryLarge[]>(large ?? []);
   const [S, setS] = useState<string[]>(small ?? []);
   const [activeL, setActiveL] = useState<IndustryLarge>(
     (L[0] ?? INDUSTRY_LARGE[0]) as IndustryLarge
   );
 
-  useEffect(() => {
+  React.useEffect(() => {
     setL(large ?? []);
     setS(small ?? []);
     setActiveL(
@@ -909,8 +1003,8 @@ function IndustryCategoryModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify中心 bg-black/40">
-      <div className="w-[980px] max-w-[96vw] rounded-2xl bg白 shadow-xl border border-neutral-200 overflow-hidden">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="w-[980px] max-w-[96vw] rounded-2xl bg-white shadow-xl border border-neutral-200 overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200">
           <div className="font-semibold">業種選択</div>
@@ -963,7 +1057,7 @@ function IndustryCategoryModal({
             </div>
           </div>
 
-          {/* 右：小分類（アクティブのみ） */}
+          {/* 右：小分類 */}
           <div className="col-span-8">
             <div className="flex items-center justify-between mb-2">
               <div className="text-sm font-semibold text-neutral-800">
@@ -1032,7 +1126,6 @@ function splitCsv(s: string): string[] {
 
 async function safeJson(res: Response) {
   try {
-    // JSON以外（例：HTMLの404ページ）が来ても落ちない
     const text = await res.text();
     return text ? JSON.parse(text) : {};
   } catch {
@@ -1067,4 +1160,27 @@ function toIndustryLarge(input: unknown): IndustryLarge[] {
     (x): x is IndustryLarge =>
       typeof x === "string" && allow.has(x as IndustryLarge)
   );
+}
+
+function parseYenInput(v: string): number | null {
+  if (!v) return null;
+  const s = v.replace(/\s/g, "");
+  const m = /^([0-9.,]+)(万|億)?$/u.exec(s);
+  if (m) {
+    const num = Number(m[1].replace(/[,，]/g, ""));
+    if (!Number.isFinite(num)) return null;
+    if (m[2] === "万") return Math.round(num * 10_000);
+    if (m[2] === "億") return Math.round(num * 100_000_000);
+    return Math.round(num);
+  }
+  // そのまま数値化トライ
+  const n = Number(s);
+  return Number.isFinite(n) ? Math.round(n) : null;
+}
+
+function formatYen(n: number) {
+  if (n >= 100_000_000 && n % 100_000_000 === 0)
+    return `${n / 100_000_000}億円`;
+  if (n >= 10_000 && n % 10_000 === 0) return `${n / 10_000}万円`;
+  return `${n.toLocaleString()}円`;
 }

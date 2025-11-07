@@ -61,6 +61,14 @@ function normalizeOut(row: any) {
       : Array.isArray(row?.job_titles)
       ? row.job_titles
       : [],
+    // ★ 追加：資本金・設立の範囲
+    capital_min: typeof row?.capital_min === "number" ? row.capital_min : null,
+    capital_max: typeof row?.capital_max === "number" ? row.capital_max : null,
+    established_from:
+      typeof row?.established_from === "string" ? row.established_from : null,
+    established_to:
+      typeof row?.established_to === "string" ? row.established_to : null,
+
     updated_at: row?.updated_at ?? null,
     created_at: row?.created_at ?? null,
   };
@@ -74,21 +82,31 @@ async function loadExisting(tenantId: string) {
     { headers: adminHeaders(), cache: "no-store" }
   );
   const rows = await r.json().catch(() => []);
-  if (!r.ok) {
-    throw new Error(rows?.message || "fetch failed");
-  }
+  if (!r.ok) throw new Error(rows?.message || "fetch failed");
   return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
 }
 
-function stripUnknownIndustryColsOnDemand(payload: any, message: string) {
+function stripUnknownColsOnDemand(payload: any, message: string) {
+  // PostgreSQLのエラー文に「～ column does not exist」が含まれる環境用の救済
   const msg = (message || "").toLowerCase();
-  if (msg.includes("industries_large") || msg.includes("industries_small")) {
-    const p = { ...payload };
-    delete p.industries_large;
-    delete p.industries_small;
-    return p;
+  if (!msg) return null;
+  const p = { ...payload };
+  const maybe: string[] = [
+    "industries_large",
+    "industries_small",
+    "capital_min",
+    "capital_max",
+    "established_from",
+    "established_to",
+  ];
+  let touched = false;
+  for (const col of maybe) {
+    if (msg.includes(col.toLowerCase())) {
+      delete (p as any)[col];
+      touched = true;
+    }
   }
-  return null;
+  return touched ? p : null;
 }
 
 /** GET: 現在のフィルタ取得（テナント別） */
@@ -139,6 +157,10 @@ export async function POST(req: NextRequest) {
     const body = await req.json().catch(() => ({}));
     const input = body?.filters ?? {};
 
+    const numOrNull = (v: any) =>
+      typeof v === "number" && Number.isFinite(v) ? v : null;
+    const strOrNull = (v: any) => (typeof v === "string" && v ? v : null);
+
     const now = new Date().toISOString();
     const basePayload: any = {
       tenant_id: tenantId,
@@ -154,6 +176,12 @@ export async function POST(req: NextRequest) {
       industries_small: Array.isArray(input.industries_small)
         ? input.industries_small
         : [],
+      // ★ 追加：資本金・設立の範囲
+      capital_min: numOrNull(input.capital_min),
+      capital_max: numOrNull(input.capital_max),
+      established_from: strOrNull(input.established_from),
+      established_to: strOrNull(input.established_to),
+
       updated_at: now,
     };
 
@@ -174,9 +202,8 @@ export async function POST(req: NextRequest) {
       let j = await r.json().catch(() => ({}));
 
       if (!r.ok) {
-        // industries_* カラム未作成などの環境でも動作するようにリトライ
-        const stripped = stripUnknownIndustryColsOnDemand(
-          j?.message || "",
+        const stripped = stripUnknownColsOnDemand(
+          basePayload,
           j?.message || ""
         );
         if (stripped) {
@@ -213,15 +240,15 @@ export async function POST(req: NextRequest) {
     let j = await r.json().catch(() => ({}));
 
     if (!r.ok) {
-      const stripped = stripUnknownIndustryColsOnDemand(
-        j?.message || "",
+      const stripped = stripUnknownColsOnDemand(
+        { ...basePayload, created_at: now },
         j?.message || ""
       );
       if (stripped) {
         r = await fetch(`${URL}/rest/v1/form_outreach_filters`, {
           method: "POST",
           headers: adminHeaders(),
-          body: JSON.stringify({ ...stripped, created_at: now }),
+          body: JSON.stringify(stripped),
         });
         j = await r.json().catch(() => ({}));
       }
