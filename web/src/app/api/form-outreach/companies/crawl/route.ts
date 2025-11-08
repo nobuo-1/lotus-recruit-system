@@ -382,12 +382,13 @@ export async function POST(req: Request) {
     const { sb, usingServiceRole } = getAdmin();
     let inserted_new = 0;
     let rlsWarning: string | undefined;
+    let toInsert: any[] = [];
 
     if (deduped.length) {
       const nums = deduped.map((r) => r.corporate_number);
 
-      // 既存チェック
-      const { data: existedRows, error: exErr } = (sb as any)
+      // ★★★ ここが修正点：必ず await を付与 ★★★
+      const { data: existedRows, error: exErr } = await (sb as any)
         .from("nta_corporates_cache")
         .select("corporate_number")
         .eq("tenant_id", tenantId)
@@ -411,7 +412,7 @@ export async function POST(req: Request) {
         (existedRows || []).map((r: any) => String(r.corporate_number))
       );
       const now = new Date().toISOString();
-      const toInsert = deduped
+      toInsert = deduped
         .filter((r) => !existed.has(r.corporate_number))
         .slice(0, want * 2)
         .map((r) => ({
@@ -425,14 +426,31 @@ export async function POST(req: Request) {
         }));
 
       if (toInsert.length) {
-        // upsert で重複を無視。representation を返す
-        const { data, error } = (sb as any)
-          .from("nta_corporates_cache")
-          .upsert(toInsert, {
-            onConflict: "tenant_id,corporate_number",
-            ignoreDuplicates: true,
-          })
-          .select("corporate_number");
+        // まずは upsert（ユニーク制約がある場合に最適）
+        const tryUpsert = async () => {
+          // ★★★ ここも修正点：await を付与 ★★★
+          const { data, error } = await (sb as any)
+            .from("nta_corporates_cache")
+            .upsert(toInsert, {
+              onConflict: "tenant_id,corporate_number",
+              ignoreDuplicates: true,
+            })
+            .select("corporate_number");
+
+          return { data, error };
+        };
+
+        let { data, error } = await tryUpsert();
+
+        // ユニーク制約が無い場合は upsert が失敗するので insert にフォールバック
+        if (error && /no unique|ON CONFLICT/i.test(error.message || "")) {
+          const ins = await (sb as any)
+            .from("nta_corporates_cache")
+            .insert(toInsert)
+            .select("corporate_number");
+          data = ins.data;
+          error = ins.error;
+        }
 
         if (error) {
           const rlsBlocked = /row-level security|permission denied|RLS/i.test(
@@ -443,8 +461,8 @@ export async function POST(req: Request) {
               error: error.message,
               rls_blocked: rlsBlocked || undefined,
               hint: rlsBlocked
-                ? "RLSによりINSERTが拒否。サーバに SUPABASE_SERVICE_ROLE_KEY を設定するか、RLSポリシーで匿名INSERTを許可してください。"
-                : "テーブル/権限/制約を確認してください。",
+                ? "RLSによりINSERTが拒否。SUPABASE_SERVICE_ROLE_KEY を設定するか、RLSポリシーでINSERTを許可してください。"
+                : "テーブルのユニーク制約/権限/制約を確認してください。",
               step: { a2_crawled, a3_picked, a4_filled, a5_inserted: 0 },
               html_sig: { ...lastSig, resultCount: lastCount },
               trace,
@@ -453,12 +471,12 @@ export async function POST(req: Request) {
             { status: 500 }
           );
         }
+
         inserted_new = Array.isArray(data) ? data.length : 0;
 
-        // service role なし かつ 新規候補あり かつ 0件保存 → RLS警告を返す
         if (!usingServiceRole && toInsert.length > 0 && inserted_new === 0) {
           rlsWarning =
-            "新規候補は検出されましたが保存できませんでした。RLS により匿名INSERTが拒否されている可能性があります。サーバ環境変数 SUPABASE_SERVICE_ROLE_KEY を設定してください。";
+            "新規候補は検出されましたが保存できませんでした。RLS により匿名INSERTが拒否の可能性。SUPABASE_SERVICE_ROLE_KEY を設定してください。";
         }
       }
     }
@@ -466,7 +484,7 @@ export async function POST(req: Request) {
     return NextResponse.json(
       {
         new_cache: inserted_new,
-        to_insert_count: Math.min(want * 2, a3_picked),
+        to_insert_count: toInsert.length,
         step: { a2_crawled, a3_picked, a4_filled, a5_inserted: inserted_new },
         rows_preview,
         using_service_role: usingServiceRole,
