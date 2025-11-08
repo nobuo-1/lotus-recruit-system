@@ -419,7 +419,7 @@ export default function ManualFetch() {
           "x-tenant-id": tenantId,
           "content-type": "application/json",
         },
-        body: JSON.stringify({ since, want: total, try_llm: true }),
+        body: JSON.stringify({ since, want: total, try_llm: false }),
         signal: abortRef.current.signal,
       });
       const ej = await safeJson(enrichRes);
@@ -447,10 +447,9 @@ export default function ManualFetch() {
           return next;
         });
       }
-      // ← 不適合もAPIから受け取り表示
-      const rej: RejectedRow[] = Array.isArray(ej?.rejected_rows)
-        ? ej.rejected_rows
-        : [];
+
+      // ★ 修正：APIのrejected（= form_prospects_rejected反映）をそのままUIへ表示
+      const rej: RejectedRow[] = Array.isArray(ej?.rejected) ? ej.rejected : [];
       if (rej.length) {
         setRejected((prev) => {
           const next = dedupeRejected([...rej, ...prev]);
@@ -959,7 +958,7 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
           </div>
         </section>
 
-        {/* 不適合一覧 */}
+        {/* 不適合一覧（form_prospects_rejected 反映） */}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden mt-6">
           <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 bg-neutral-50">
             <div className="text-sm font-medium text-neutral-800">
