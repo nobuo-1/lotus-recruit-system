@@ -1,20 +1,22 @@
 // web/src/app/api/form-outreach/companies/crawl/route.ts
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
-export const maxDuration = 30; // 504回避のため少し余裕
+export const maxDuration = 30;
 
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { NTA_TOWN_SEEDS } from "@/constants/ntaTownSeeds.generated";
 
 /** ========= Types ========= */
-type Filters = { prefectures?: string[] };
+type Filters = { prefectures?: string[] }; // 例: ["東京都","大阪府"]
 type RawRow = {
   corporate_number: string; // 13桁
   name: string; // 商号又は名称（NOT NULL）
   address: string | null; // 所在地
-  detail_url: string | null; // 変更履歴ページ（/henkorireki-johoto.html?selHouzinNo=...）
+  detail_url: string | null; // 変更履歴ページ
 };
+
+type PrefOpt = { code: string; name: string };
+type CityOpt = { code: string; name: string };
 
 /** ========= ENV ========= */
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
@@ -34,7 +36,7 @@ function okUuid(s: string) {
 const clamp = (n: any, min: number, max: number) =>
   Math.max(min, Math.min(max, Math.floor(Number(n) || 0)));
 
-async function fetchWithTimeout(url: string, init: any = {}, ms = 7000) {
+async function fetchWithTimeout(url: string, init: any = {}, ms = 8000) {
   const ctl = new AbortController();
   const id = setTimeout(() => ctl.abort(), ms);
   try {
@@ -53,97 +55,16 @@ async function fetchWithTimeout(url: string, init: any = {}, ms = 7000) {
   }
 }
 
-/** ========= 実サイト仕様に合わせて Cookie を事前取得 =========
- *  トップ + 結果ページに軽く当てて、Set-Cookie を収集して次リクエストに付与
- */
-async function getSessionCookie(): Promise<string> {
-  const pairs: string[] = [];
-
-  const collect = (setCookieHeader: string | null) => {
-    if (!setCookieHeader) return;
-    const found = Array.from(
-      setCookieHeader.matchAll(/(^|,)\s*([^=;,]+=[^;]+)/g)
-    )
-      .map((m) => (m[2] || "").trim())
-      .filter(Boolean);
-    for (const p of found) if (!pairs.includes(p)) pairs.push(p);
-  };
-
-  const top = await fetchWithTimeout(
-    "https://www.houjin-bangou.nta.go.jp/",
-    {},
-    6000
-  );
-  collect(top.headers.get("set-cookie"));
-
-  // 結果ページにも一度hitしてcookieを増やす
-  const init = await fetchWithTimeout(
-    "https://www.houjin-bangou.nta.go.jp/kensaku-kekka.html",
-    {
-      headers: { cookie: pairs.join("; ") },
-    },
-    6000
-  );
-  collect(init.headers.get("set-cookie"));
-
-  return pairs.join("; ");
-}
-
-/** ========= 文字処理 ========= */
-function strip(htmlFragment: string): string {
-  return (htmlFragment || "")
+/** ========= 共通ユーティリティ ========= */
+function strip(fragment: string) {
+  return (fragment || "")
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
     .replace(/<[^>]+>/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
-function ensure(s?: string | null): string {
-  return (s ?? "").toString();
-}
 
-/** ========= キーワード生成（pref/city/townの種から location に詰める） ========= */
-function buildFastKeywords(filters: Filters, seedNum: number, take = 6) {
-  const prefCand = filters.prefectures?.length
-    ? filters.prefectures
-    : ["東京都", "大阪府"];
-  const pool: Array<{
-    keyword: string;
-    pref: string;
-    city: string;
-    town?: string;
-  }> = [];
-
-  for (const pref of prefCand) {
-    const cityMap: Record<string, string[]> =
-      (NTA_TOWN_SEEDS as any)[pref] || {};
-    const cityList = Object.keys(cityMap);
-    for (const city of cityList) {
-      const towns: string[] = (cityMap[city] || []).filter(Boolean);
-      if (towns.length) {
-        const pickCount = Math.min(
-          3,
-          Math.max(1, Math.floor(towns.length / 20))
-        );
-        for (let i = 0; i < pickCount; i++) {
-          const idx = (seedNum + i * 17) % towns.length;
-          const town = normalizeTown(towns[idx] ?? "");
-          pool.push({ keyword: `${pref}${city}${town}`, pref, city, town });
-        }
-      } else {
-        pool.push({ keyword: `${pref}${city}`, pref, city });
-      }
-    }
-  }
-  return shuffle(pool, seedNum).slice(0, take);
-}
-function normalizeTown(t: string | undefined) {
-  const s = (t ?? "")
-    .replace(/\d+丁目?/g, "")
-    .replace(/ビル|マンション|タワー|号館?|Annex|ANNEX/gi, "")
-    .trim();
-  return s;
-}
 function shuffle<T>(arr: T[], seed: number) {
   const a = arr.slice();
   for (let i = a.length - 1; i > 0; i--) {
@@ -153,37 +74,198 @@ function shuffle<T>(arr: T[], seed: number) {
   return a;
 }
 
-/** ========= 実DOM構造準拠のパーサ =========
- *  <table class="fixed normal"> の <tbody> 内の <tr>を走査
- *  - 法人番号：<th scope="row"> に 13桁
- *  - 商号/名称：1つ目の <td>
- *  - 所在地：   2つ目の <td>
- */
-function parseResultTableNTA(html: string): RawRow[] {
-  const out: RawRow[] = [];
+/** ========= 1) セッションCookie＋CSRFトークン取得 & 都道府県オプション抽出 ========= */
+async function getSessionAndToken(): Promise<{
+  cookie: string;
+  tokenName: string;
+  tokenValue: string;
+  prefectures: PrefOpt[];
+}> {
+  const pairs: string[] = [];
 
-  // class順が入れ替わってもマッチ
-  const tableRe =
-    /<table[^>]*class=["'][^"']*(?:\bfixed\b[^"']*\bnormal\b|\bnormal\b[^"']*\bfixed\b)[^"']*["'][^>]*>([\s\S]*?)<\/table>/i;
-  const m = tableRe.exec(html);
-  if (!m) return out;
-  const table = m[1];
+  const collect = (setCookieHeader: string | null) => {
+    if (!setCookieHeader) return;
+    // 複数Set-Cookieヘッダをまとめて拾う
+    const found = Array.from(
+      setCookieHeader.matchAll(/(^|,)\s*([^=;,]+=[^;]+)/g)
+    )
+      .map((m) => (m[2] || "").trim())
+      .filter(Boolean);
+    for (const p of found) if (!pairs.includes(p)) pairs.push(p);
+  };
+
+  // トップページでCookieとトークンを得る
+  const top = await fetchWithTimeout(
+    "https://www.houjin-bangou.nta.go.jp/",
+    {},
+    7000
+  );
+  collect(top.headers.get("set-cookie"));
+  const html = await top.text();
+
+  // トークン名と値
+  const tokenNameMatch = html.match(
+    /name="([^"]*CNSFWTokenProcessor\.request\.token)"\s+value="([^"]+)"/
+  );
+  if (!tokenNameMatch) throw new Error("CSRF token not found");
+  const tokenName = tokenNameMatch[1];
+  const tokenValue = tokenNameMatch[2];
+
+  // 都道府県 select のオプションを抽出（値=コード、テキスト=名称）
+  const prefBlockMatch = html.match(
+    /<select[^>]+id=["']addr_pref["'][\s\S]*?<\/select>/i
+  );
+  const prefectures: PrefOpt[] = [];
+  if (prefBlockMatch) {
+    const optRe = /<option\s+value="([^"]*)"\s*>([^<]+)<\/option>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = optRe.exec(prefBlockMatch[0]))) {
+      const code = (m[1] || "").trim();
+      const name = strip(m[2] || "");
+      if (code && name && code !== "99" && code !== "") {
+        prefectures.push({ code, name });
+      }
+    }
+  }
+
+  return {
+    cookie: pairs.join("; "),
+    tokenName,
+    tokenValue,
+    prefectures,
+  };
+}
+
+/** ========= 2) 市区町村リスト取得（/index.html?event=select, JSON） ========= */
+async function fetchCities(
+  cookie: string,
+  tokenName: string,
+  tokenValue: string,
+  prefCode: string
+): Promise<CityOpt[]> {
+  const body = JSON.stringify({
+    [tokenName]: tokenValue,
+    prefectureLst: prefCode,
+  });
+
+  const r = await fetchWithTimeout(
+    "https://www.houjin-bangou.nta.go.jp/index.html?event=select",
+    {
+      method: "POST",
+      headers: {
+        cookie,
+        "content-type": "application/json",
+      },
+      body,
+    },
+    8000
+  );
+  if (!r.ok) return [];
+  const j = await r.json().catch(() => ({}));
+  const list: any[] = Array.isArray(j?.cityInfLst) ? j.cityInfLst : [];
+  const out: CityOpt[] = [];
+  for (const it of list) {
+    const code = String(it?.code ?? "").trim();
+    const name = String(it?.name ?? "").trim();
+    if (code && name) out.push({ code, name });
+  }
+  return out;
+}
+
+/** ========= 3) 検索本体 POST（/kensaku-kekka.html, form-urlencoded） ========= */
+async function searchOnce(
+  cookie: string,
+  tokenName: string,
+  tokenValue: string,
+  prefCode: string,
+  cityCode: string,
+  page = 1,
+  viewNum = 10
+): Promise<{
+  rows: RawRow[];
+  htmlSig: Record<string, boolean>;
+  resultCount?: number;
+}> {
+  const form = new URLSearchParams();
+  form.set(tokenName, tokenValue);
+  // 検索条件（実ページに合わせて必須最小限）
+  form.set("houzinNmShTypeRbtn", "2"); // 部分一致
+  form.set("houzinNmTxtf", ""); // 名称空
+  form.set("houzinAddrShTypeRbtn", "1"); // 都道府県で検索
+  form.set("prefectureLst", prefCode);
+  form.set("cityLst", cityCode);
+  form.set("tyoumeTxtf", ""); // 丁目番地空
+  form.set("kokugaiTxtf", ""); // 国外空
+  form.set("orderRbtn", "1"); // 商号等五十音順（昇順）
+  form.set("closeCkbx", "1"); // 登記閉鎖等を含める
+  form.set("historyCkbx", ""); // 変更履歴は既定OFF
+  form.set("viewNumAnc", String(viewNum));
+  form.set("viewPageNo", String(page));
+  form.set("searchFlg", "1");
+
+  const r = await fetchWithTimeout(
+    "https://www.houjin-bangou.nta.go.jp/kensaku-kekka.html",
+    {
+      method: "POST",
+      headers: {
+        cookie,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: form.toString(),
+    },
+    10000
+  );
+  if (!r.ok) return { rows: [], htmlSig: {} };
+
+  const html = await r.text();
+
+  const htmlSig = {
+    hasResultTitle:
+      /<title>検索結果一覧｜国税庁法人番号公表サイト<\/title>/.test(html),
+    hasTableFixedNormal:
+      /<table[^>]*class=["'][^"']*(?:\bfixed\b[^"']*\bnormal\b|\bnormal\b[^"']*\bfixed\b)[^"']*["'][^>]*>/i.test(
+        html
+      ),
+    hasPaginate: /<div class="paginate">/i.test(html),
+    robotsNoindex:
+      /<meta[^>]+name=["']robots["'][^>]+content=["']noindex,nofollow,noarchive["']/i.test(
+        html
+      ),
+  };
+
+  // 件数
+  const cm = /<p class="srhResult"><strong>([\d,]+)<\/strong>件/i.exec(html);
+  const resultCount = cm ? Number((cm[1] || "0").replace(/,/g, "")) : undefined;
+
+  return {
+    rows: parseResultTable(html),
+    htmlSig,
+    resultCount,
+  };
+}
+
+/** ========= 検索結果テーブルを実DOM仕様に合わせてパース ========= */
+function parseResultTable(html: string): RawRow[] {
+  const out: RawRow[] = [];
+  const tableMatch =
+    /<table[^>]*class=["'][^"']*(?:\bfixed\b[^"']*\bnormal\b|\bnormal\b[^"']*\bfixed\b)[^"']*["'][^>]*>([\s\S]*?)<\/table>/i.exec(
+      html
+    );
+  if (!tableMatch) return out;
+  const table = tableMatch[1];
 
   const rows = table.match(/<tr[\s\S]*?<\/tr>/gi) || [];
   for (const tr of rows) {
-    // まず<TH>（法人番号用）を拾う
     const ths = tr.match(/<th[\s\S]*?<\/th>/gi) || [];
     const tds = tr.match(/<td[\s\S]*?<\/td>/gi) || [];
     if (!ths.length || tds.length < 2) continue;
 
     const numTxt = strip(ths[0] ?? "");
     const num = ((numTxt.match(/\b\d{13}\b/) || [])[0] || "").trim();
-
     const nameTxt = strip(tds[0] ?? "").slice(0, 200);
     const addrTxt = strip(tds[1] ?? "").slice(0, 300);
 
     if (/^\d{13}$/.test(num) && nameTxt) {
-      // 検索後画面の「履歴等」はJSで /henkorireki-johoto.html?selHouzinNo=... を開く
       const detail = `https://www.houjin-bangou.nta.go.jp/henkorireki-johoto.html?selHouzinNo=${num}`;
       out.push({
         corporate_number: num,
@@ -196,73 +278,7 @@ function parseResultTableNTA(html: string): RawRow[] {
   return out;
 }
 
-/** ========= 1回の検索試行（location / searchString） =========
- *  公式UIはPOSTだが、GETクエリ（location= / searchString=）でも一覧HTMLが返る挙動があるためまずはGETで高速叩き。
- *  取得HTMLの署名（シグネチャ）も返す。
- */
-async function crawlOnceWithCookie(
-  keyword: string,
-  page = 1,
-  cookie = ""
-): Promise<{
-  rows: RawRow[];
-  htmlSig: Record<string, boolean>;
-  resultCount?: number;
-}> {
-  const tries = [
-    `https://www.houjin-bangou.nta.go.jp/kensaku-kekka.html?location=${encodeURIComponent(
-      keyword
-    )}&page=${page}`,
-    `https://www.houjin-bangou.nta.go.jp/kensaku-kekka.html?searchString=${encodeURIComponent(
-      keyword
-    )}&page=${page}`,
-  ];
-
-  let lastSig: Record<string, boolean> = {};
-  let lastCount: number | undefined;
-
-  for (const url of tries) {
-    try {
-      const r = await fetchWithTimeout(
-        url,
-        { headers: cookie ? { cookie } : {} },
-        7000
-      );
-      if (!r.ok) continue;
-      const html = await r.text();
-
-      // 検索結果画面の要素に基づくシグネチャ
-      lastSig = {
-        hasResultTitle:
-          /<title>検索結果一覧｜国税庁法人番号公表サイト<\/title>/.test(html),
-        hasTableFixedNormal:
-          /\btable\b[^>]*\bclass=["'][^"']*(fixed\s+normal|normal\s+fixed)[^"']*["']/.test(
-            html
-          ),
-        hasPaginate: /<div class="paginate">/i.test(html),
-        noindexNofollow:
-          /<meta[^>]+name=["']robots["'][^>]+content=["']noindex,nofollow,noarchive["']/i.test(
-            html
-          ),
-        jsRequiredNotice:
-          /このサイトではJavascript機能をOnにしてご利用ください。/i.test(html),
-      };
-
-      // 件数（「<p class="srhResult"><strong>13,378</strong>件 見つかりました。」）
-      const cm = /<p class="srhResult"><strong>([\d,]+)<\/strong>件/.exec(html);
-      if (cm) lastCount = Number(cm[1].replace(/,/g, "") || "0");
-
-      const rows = parseResultTableNTA(html);
-      if (rows.length)
-        return { rows, htmlSig: lastSig, resultCount: lastCount };
-    } catch {
-      // 次の手に回す
-    }
-  }
-  return { rows: [], htmlSig: lastSig, resultCount: lastCount };
-}
-
-/** ========= Supabase ========= */
+/** ========= Supabase 接続 ========= */
 function getAdmin(): { sb: any; usingServiceRole: boolean } {
   if (!SUPABASE_URL) throw new Error("NEXT_PUBLIC_SUPABASE_URL is missing");
   if (SERVICE_ROLE)
@@ -295,26 +311,53 @@ export async function POST(req: Request) {
     const body: any = await req.json().catch(() => ({}));
     const filters: Filters = body?.filters ?? {};
     const want: number = clamp(body?.want ?? 20, 1, 200);
+    const hops: number = clamp(body?.hops ?? 1, 0, 3);
     const seedStr: string = String(body?.seed || Math.random()).slice(2);
     const seedNum = Number((seedStr || "").replace(/\D/g, "")) || Date.now();
-    const hops: number = clamp(body?.hops ?? 2, 0, 3); // 既定 2ページ
-    const fast: boolean = body?.fast !== false; // true=高速（キーワード少なめ）
 
-    trace.push(`want=${want} seed=${seedStr} hops=${hops} fast=${fast}`);
+    trace.push(`want=${want} hops=${hops} seed=${seedStr}`);
 
-    // ---- Cookie先取り（重要）----
-    const cookie = await getSessionCookie();
+    // 1) Cookie & Token & Pref一覧
+    const { cookie, tokenName, tokenValue, prefectures } =
+      await getSessionAndToken();
+    trace.push(`pref_count=${prefectures.length}`);
 
-    // ---- キーワード（location）----
-    const keywords = buildFastKeywords(filters, seedNum, fast ? 6 : 10);
-    if (!keywords.length) {
+    // フィルタに指定があれば優先、なければ東京都/大阪府
+    const targetPrefNames =
+      filters.prefectures && filters.prefectures.length
+        ? filters.prefectures
+        : ["東京都", "大阪府"];
+
+    const targetPrefs = prefectures.filter((p) =>
+      targetPrefNames.some((name) => p.name === name)
+    );
+    // 指定名がマッチしなければ、先頭から数件を使う
+    const prefPool = targetPrefs.length ? targetPrefs : prefectures.slice(0, 3);
+
+    // 2) Prefごとに City を取得
+    const pickedCities: Array<{ pref: PrefOpt; city: CityOpt }> = [];
+    for (const pref of prefPool) {
+      const cities = await fetchCities(
+        cookie,
+        tokenName,
+        tokenValue,
+        pref.code
+      );
+      if (!cities.length) continue;
+      const rnd = shuffle(cities, seedNum);
+      // 取り過ぎない（高速にPDCA）
+      for (const c of rnd.slice(0, 3)) pickedCities.push({ pref, city: c });
+    }
+    trace.push(`picked_pairs=${pickedCities.length}`);
+
+    if (!pickedCities.length) {
       return NextResponse.json(
         {
           new_cache: 0,
           to_insert_count: 0,
           step: { a2_crawled: 0, a3_picked: 0, a4_filled: 0, a5_inserted: 0 },
           rows_preview: [],
-          keywords_used: [],
+          keywords_used: [], // 旧設計互換：今回はpref/cityペアなので空
           html_sig: {},
           trace,
         },
@@ -322,51 +365,51 @@ export async function POST(req: Request) {
       );
     }
 
-    // ---- クロール（各キーワード 1..(1+hops)ページ）----
+    // 3) 検索POSTを実行（各Cityで 1..(1+hops)ページ）
     const bag: RawRow[] = [];
-    const keywords_used: string[] = [];
-    let lastHtmlSig: Record<string, boolean> = {};
-    let lastResultCount: number | undefined;
+    let lastSig: Record<string, boolean> = {};
+    let lastCount: number | undefined;
 
-    // 1呼び出しあたりのHTTP上限（安定性優先）
-    const MAX_TOTAL_HITS = Math.min(18, (1 + hops) * keywords.length);
+    // 上限（リクエストし過ぎで504にならないように）
+    const MAX_HITS = Math.min(20, pickedCities.length * (1 + hops));
+    let hits = 0;
 
-    let hitCount = 0;
-    for (const k of keywords) {
-      keywords_used.push(k.keyword);
+    for (const pair of pickedCities) {
       for (let p = 1; p <= 1 + hops; p++) {
-        const { rows, htmlSig, resultCount } = await crawlOnceWithCookie(
-          k.keyword,
+        const { rows, htmlSig, resultCount } = await searchOnce(
+          cookie,
+          tokenName,
+          tokenValue,
+          pair.pref.code,
+          pair.city.code,
           p,
-          cookie
+          10
         );
-        lastHtmlSig = htmlSig;
-        if (typeof resultCount === "number") lastResultCount = resultCount;
+        lastSig = htmlSig;
+        if (typeof resultCount === "number") lastCount = resultCount;
 
         for (const r of rows) {
           if (!/^\d{13}$/.test(r.corporate_number)) continue;
-          if (!r.name) continue; // company_name NOT NULL 対応
+          if (!r.name) continue;
           bag.push(r);
         }
-        hitCount++;
+        hits++;
         if (bag.length >= Math.max(80, want * 3)) break;
-        if (hitCount >= MAX_TOTAL_HITS) break;
+        if (hits >= MAX_HITS) break;
       }
       if (bag.length >= Math.max(80, want * 3)) break;
-      if (hitCount >= MAX_TOTAL_HITS) break;
+      if (hits >= MAX_HITS) break;
     }
 
     const a2_crawled = bag.length;
 
-    // ---- 重複除去（corporate_number一意）----
+    // 4) 重複除去
     const map = new Map<string, RawRow>();
     for (const r of bag)
       if (!map.has(r.corporate_number)) map.set(r.corporate_number, r);
     const deduped = Array.from(map.values());
     const a3_picked = deduped.length;
-
-    // ---- 詳細補完（今回スキップ：高速モード）----
-    const a4_filled = 0;
+    const a4_filled = 0; // 高速モード：詳細補完なし
 
     if (!deduped.length) {
       return NextResponse.json(
@@ -375,15 +418,15 @@ export async function POST(req: Request) {
           to_insert_count: 0,
           step: { a2_crawled, a3_picked, a4_filled, a5_inserted: 0 },
           rows_preview: [],
-          keywords_used,
-          html_sig: { ...lastHtmlSig, resultCount: lastResultCount },
+          using_service_role: SERVICE_ROLE ? true : false,
+          html_sig: { ...lastSig, resultCount: lastCount },
           trace,
         },
         { status: 200 }
       );
     }
 
-    // ---- DB insert（SELECT→INSERTで重複回避）----
+    // 5) DB Insert（SELECT→INSERT）
     const { sb, usingServiceRole } = getAdmin();
     const nums = deduped.map((r) => r.corporate_number);
 
@@ -399,8 +442,7 @@ export async function POST(req: Request) {
           error: exErr.message,
           hint: "重複チェックに失敗",
           step: { a2_crawled, a3_picked, a4_filled, a5_inserted: 0 },
-          keywords_used,
-          html_sig: { ...lastHtmlSig, resultCount: lastResultCount },
+          html_sig: { ...lastSig, resultCount: lastCount },
           trace,
         },
         { status: 500 }
@@ -413,13 +455,13 @@ export async function POST(req: Request) {
     const now = new Date().toISOString();
     const toInsert = deduped
       .filter((r) => !existed.has(r.corporate_number))
-      .slice(0, want * 2) // 取り過ぎ防止
+      .slice(0, want * 2)
       .map((r) => ({
         tenant_id: tenantId,
         corporate_number: r.corporate_number,
-        company_name: r.name, // 非NULL
+        company_name: r.name,
         address: r.address ?? null,
-        detail_url: r.detail_url ?? null, // 変更履歴ページ
+        detail_url: r.detail_url ?? null,
         source: "nta-crawl",
         scraped_at: now,
       }));
@@ -442,8 +484,7 @@ export async function POST(req: Request) {
               ? "SUPABASE_SERVICE_ROLE_KEY をサーバに設定するか、RLSで匿名INSERTを許可してください。"
               : "権限/カラム制約を確認してください。",
             step: { a2_crawled, a3_picked, a4_filled, a5_inserted: 0 },
-            keywords_used,
-            html_sig: { ...lastHtmlSig, resultCount: lastResultCount },
+            html_sig: { ...lastSig, resultCount: lastCount },
             trace,
           },
           { status: 500 }
@@ -466,8 +507,7 @@ export async function POST(req: Request) {
         step: { a2_crawled, a3_picked, a4_filled, a5_inserted: inserted_new },
         rows_preview,
         using_service_role: usingServiceRole,
-        keywords_used,
-        html_sig: { ...lastHtmlSig, resultCount: lastResultCount },
+        html_sig: { ...lastSig, resultCount: lastCount },
         trace,
       },
       { status: 200 }
