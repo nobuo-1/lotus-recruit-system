@@ -7,9 +7,7 @@ import { createClient } from "@supabase/supabase-js";
 import { NTA_TOWN_SEEDS } from "@/constants/ntaTownSeeds.generated";
 
 /** ===== Types ===== */
-type Filters = {
-  prefectures?: string[];
-};
+type Filters = { prefectures?: string[] };
 type RawRow = {
   corporate_number: string;
   name: string | null;
@@ -234,7 +232,7 @@ async function crawlByAddressKeyword(
   return [];
 }
 
-/** Supabase クライアント（ServiceRole → Anon フォールバック）。型は any に寄せて型深度を回避 */
+/** Supabase クライアント（ServiceRole → Anon フォールバック） */
 function getAdminClient(): { sb: any; usingServiceRole: boolean } {
   if (!SUPABASE_URL) {
     throw new Error("NEXT_PUBLIC_SUPABASE_URL is missing");
@@ -258,7 +256,7 @@ function getAdminClient(): { sb: any; usingServiceRole: boolean } {
 
 /** ===== Handler: POST =====
  * 入力: { filters, want, seed, dryRun? }
- * 出力: { new_cache, saved_rows, tried, keywords_used, rows_preview[], rls_blocked?, trace[], error?, hint? }
+ * 出力: { inserted_new, tried, keywords_used, rows_preview[], using_service_role?, trace[], error?, hint? }
  */
 export async function POST(req: Request) {
   const trace: string[] = [];
@@ -306,8 +304,7 @@ export async function POST(req: Request) {
     const addrPool = buildAddressKeywords(filters, seedNum);
     if (!addrPool.length) {
       return NextResponse.json({
-        new_cache: 0,
-        saved_rows: 0,
+        inserted_new: 0,
         tried: 0,
         keywords_used: [],
         rows_preview: [],
@@ -348,8 +345,7 @@ export async function POST(req: Request) {
 
     if (!bag.length) {
       return NextResponse.json({
-        new_cache: 0,
-        saved_rows: 0,
+        inserted_new: 0,
         tried,
         keywords_used: keywordsUsed.slice(0, 40),
         rows_preview: [],
@@ -379,8 +375,7 @@ export async function POST(req: Request) {
     // dryRun は保存なしで返す
     if (dryRun) {
       return NextResponse.json({
-        new_cache: 0,
-        saved_rows: 0,
+        inserted_new: 0,
         tried,
         keywords_used: keywordsUsed.slice(0, 40),
         rows_preview,
@@ -389,7 +384,7 @@ export async function POST(req: Request) {
       } as any);
     }
 
-    // === 保存 ===
+    // === 保存（新規のみ INSERT。onConflict は使わない） ===
     if (!SUPABASE_URL) {
       return NextResponse.json(
         {
@@ -437,33 +432,37 @@ export async function POST(req: Request) {
       scraped_at: now,
     }));
 
-    const { error: upErr } = await sb
-      .from("nta_corporates_cache")
-      .upsert(payload as any, { onConflict: "tenant_id,corporate_number" });
+    const toInsert = payload.filter((p) => !existed.has(p.corporate_number));
+    let inserted_new = 0;
 
-    if (upErr) {
-      const rlsBlocked =
-        !usingServiceRole &&
-        /row-level security|permission denied|RLS/i.test(upErr.message || "");
-      return NextResponse.json(
-        {
-          error: upErr.message,
-          rls_blocked: rlsBlocked || undefined,
-          hint: rlsBlocked
-            ? "SUPABASE_SERVICE_ROLE_KEY をサーバ環境変数に追加するか、RLSポリシーで匿名挿入を許可してください。"
-            : "DBの権限・onConflict列・テーブル名を確認してください。",
-          trace,
-          rows_preview,
-        } as any,
-        { status: 500 }
-      );
+    if (toInsert.length) {
+      const { data, error } = await sb
+        .from("nta_corporates_cache")
+        .insert(toInsert as any)
+        .select("corporate_number");
+
+      if (error) {
+        const rlsBlocked =
+          !usingServiceRole &&
+          /row-level security|permission denied|RLS/i.test(error.message || "");
+        return NextResponse.json(
+          {
+            error: error.message,
+            rls_blocked: rlsBlocked || undefined,
+            hint: rlsBlocked
+              ? "SUPABASE_SERVICE_ROLE_KEY をサーバ環境変数に追加するか、RLSポリシーで匿名挿入を許可してください。"
+              : "DBの権限・テーブル名・列名を確認してください。",
+            trace,
+            rows_preview,
+          } as any,
+          { status: 500 }
+        );
+      }
+      inserted_new = (data || []).length;
     }
 
-    const newCount = nums.filter((n) => !existed.has(n)).length;
-
     return NextResponse.json({
-      new_cache: newCount,
-      saved_rows: payload.length,
+      inserted_new,
       tried,
       keywords_used: keywordsUsed.slice(0, 40),
       rows_preview,
