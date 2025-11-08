@@ -9,6 +9,7 @@ import { createClient } from "@supabase/supabase-js";
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 const SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 
 /** ===== Types ===== */
 type Filters = {
@@ -220,7 +221,19 @@ function extractIndustry(s: string): string | null {
   return m ? m[2].trim() : null;
 }
 
-/** --- DuckDuckGoでHP推定（回数とタイムアウトを短縮） --- */
+/** --- URL 正規化 --- */
+function originOf(u: string): string | null {
+  try {
+    const url = new URL(u);
+    const proto = url.protocol === "http:" || url.protocol === "https:";
+    if (!proto) return null;
+    return `${url.protocol}//${url.hostname}`;
+  } catch {
+    return null;
+  }
+}
+
+/** --- DuckDuckGoでHP推定（軽量） --- */
 const DDG = ["https://html.duckduckgo.com/html/?q="];
 const BAD_DOMAINS = [
   "nta.go.jp",
@@ -255,16 +268,21 @@ function looksLikeCorpSite(u: string): boolean {
     return false;
   }
 }
-async function guessHomepage(
+async function ddgGuessHomepage(
   company: string,
-  addr?: string | null
+  addr?: string | null,
+  timeoutMs = 5000
 ): Promise<string | null> {
-  const queries = [`${company} ${addr || ""} 公式`, `${company} ${addr || ""}`];
+  const queries = [
+    `${company} ${addr || ""} 公式`,
+    `${company} ${addr || ""}`,
+    `${company} 公式`,
+  ];
   for (const q0 of queries) {
     const q = encodeURIComponent(q0.trim());
     for (const base of DDG) {
       try {
-        const r = await fetchWithTimeout(base + q, {}, 5000);
+        const r = await fetchWithTimeout(base + q, {}, timeoutMs);
         if (!r.ok) continue;
         const html = await r.text();
         const links = Array.from(
@@ -278,12 +296,66 @@ async function guessHomepage(
         const candidates = [...links, ...any];
         for (const u of candidates) {
           if (!looksLikeCorpSite(u)) continue;
-          return new URL(u).origin;
+          const o = originOf(u);
+          if (o) return o;
         }
       } catch {}
     }
   }
   return null;
+}
+
+/** --- LLM（ChatGPT）フォールバックでHP推定（任意） --- */
+async function llmGuessHomepage(
+  company: string,
+  addr?: string | null,
+  budgetMs = 4000
+): Promise<string | null> {
+  if (!OPENAI_API_KEY) return null;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), budgetMs);
+  try {
+    const body = {
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content:
+            "You output ONLY the official homepage URL (scheme+domain root) of the Japanese company. If unsure, output NONE.",
+        },
+        {
+          role: "user",
+          content:
+            `Company: ${company}\nAddress: ${addr || ""}\n` +
+            "Return just one https URL of the official corporate site (root like https://example.co.jp). If not found, return NONE.",
+        },
+      ],
+      temperature: 0,
+      max_tokens: 40,
+    };
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      signal: ctl.signal,
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) return null;
+    const j: any = await res.json().catch(() => ({}));
+    const text: string = j?.choices?.[0]?.message?.content?.trim?.() || "NONE";
+    if (!text || /^none$/i.test(text)) return null;
+    const url = text.split(/\s+/)[0].trim();
+    if (!/^https?:\/\//i.test(url)) return null;
+    if (!looksLikeCorpSite(url)) return null;
+    const o = originOf(url);
+    return o;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** --- HP内リンクからお問い合わせ/会社概要/メール/電話を探索 --- */
@@ -418,7 +490,7 @@ export async function POST(req: Request) {
       1,
       Math.min(2000, Math.floor(Number(body?.want) || 60))
     );
-    const tryLLM: boolean = !!body?.try_llm;
+    const tryLLM: boolean = body?.try_llm !== false; // 既定: LLMも使う（環境変数があれば）
     const filters: Filters | undefined = body?.filters;
 
     // 全体ソフトタイムアウト（既定45秒）
@@ -499,13 +571,28 @@ export async function POST(req: Request) {
       const addr = String(c.address || "");
       const prefs = extractPrefectures(addr);
 
-      // 3-1) HP推定
+      // 3-1) HP推定（DDG → LLM フォールバック）
       let website: string | null = null;
       try {
         if (timeLeft() > 2000) {
-          website = await guessHomepage(name, addr);
+          website =
+            (await ddgGuessHomepage(name, addr, Math.min(5000, timeLeft()))) ||
+            (tryLLM && timeLeft() > 2500
+              ? await llmGuessHomepage(name, addr, Math.min(4000, timeLeft()))
+              : null);
         }
       } catch {}
+
+      if (!website) {
+        // 住所+社名で検索すると出るケースをLLMで再挑戦（最後の望み）
+        if (!website && tryLLM && timeLeft() > 2000) {
+          website = await llmGuessHomepage(
+            `${name}`,
+            addr || undefined,
+            Math.min(3000, timeLeft())
+          );
+        }
+      }
 
       if (!website) {
         rejected.push({
@@ -706,7 +793,7 @@ export async function POST(req: Request) {
       }
     }
 
-    // 5) DB保存（rejected）— ★一意制約が無い場合のフォールバックを追加
+    // 5) DB保存（rejected）— 一意制約が無い場合のフォールバックあり
     let rejected_saved = 0;
     if (rejected.length) {
       const tryUpsertRejected = async () => {
