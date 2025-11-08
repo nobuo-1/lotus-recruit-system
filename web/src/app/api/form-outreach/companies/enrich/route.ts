@@ -124,10 +124,14 @@ function extractPrefectures(addr?: string | null): string[] | null {
   return hit ? [hit] : null;
 }
 
-/** --- HTTP helpers --- */
+/** --- HTTP helpers（短めのタイムアウトを既定化） --- */
 const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari";
-async function fetchWithTimeout(url: string, init: any = {}, ms = 10000) {
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit = {},
+  ms = 6000
+) {
   const ctl = new AbortController();
   const id = setTimeout(() => ctl.abort(), ms);
   try {
@@ -215,11 +219,8 @@ function extractIndustry(s: string): string | null {
   return m ? m[2].trim() : null;
 }
 
-/** --- DuckDuckGoでHP推定（精度UP：会社名+所在地の複数クエリ） --- */
-const DDG = [
-  "https://duckduckgo.com/html/?q=",
-  "https://html.duckduckgo.com/html/?q=",
-];
+/** --- DuckDuckGoでHP推定（回数とタイムアウトを短縮） --- */
+const DDG = ["https://html.duckduckgo.com/html/?q="]; // 1種類に絞る
 const BAD_DOMAINS = [
   "nta.go.jp",
   "houjin-bangou.nta.go.jp",
@@ -257,17 +258,12 @@ async function guessHomepage(
   company: string,
   addr?: string | null
 ): Promise<string | null> {
-  const queries = [
-    `${company} ${addr || ""} 公式`,
-    `${company} ${addr || ""}`,
-    `${company} 企業 会社`,
-    `${company} コーポレート`,
-  ];
+  const queries = [`${company} ${addr || ""} 公式`, `${company} ${addr || ""}`]; // ← 最大2クエリに制限
   for (const q0 of queries) {
     const q = encodeURIComponent(q0.trim());
     for (const base of DDG) {
       try {
-        const r = await fetchWithTimeout(base + q, {}, 10000);
+        const r = await fetchWithTimeout(base + q, {}, 5000); // ← 5s
         if (!r.ok) continue;
         const html = await r.text();
         const links = Array.from(
@@ -281,9 +277,7 @@ async function guessHomepage(
         const candidates = [...links, ...any];
         for (const u of candidates) {
           if (!looksLikeCorpSite(u)) continue;
-          const origin = new URL(u).origin;
-          // 会社名が<title>やURLに含まれるなら優先
-          if (origin && /[a-z]/i.test(origin)) return origin;
+          return new URL(u).origin;
         }
       } catch {}
     }
@@ -334,7 +328,7 @@ function pickDetailLinks(baseHtml: string, baseUrl: string): string[] {
       if (!items.includes(u)) items.push(u);
     } catch {}
   });
-  return items.slice(0, 10);
+  return items.slice(0, 5); // ← 最大5件まで
 }
 
 function passesFilters(
@@ -427,6 +421,15 @@ export async function POST(req: Request) {
     const tryLLM: boolean = !!body?.try_llm;
     const filters: Filters | undefined = body?.filters;
 
+    // ★ 全体のソフト・タイムアウト（規定45秒：必要に応じて body.timeout_ms で調整可能）
+    const started = Date.now();
+    const SOFT_TIMEOUT_MS = Math.min(
+      Math.max(10000, Number(body?.timeout_ms) || 45000),
+      54000
+    );
+    const timeLeft = () => SOFT_TIMEOUT_MS - (Date.now() - started);
+    const timedOut = () => timeLeft() <= 0;
+
     const { sb } = getAdmin();
     const nowIso = new Date().toISOString();
 
@@ -475,9 +478,11 @@ export async function POST(req: Request) {
       (existedRej || []).map((r: any) => String(r.corporate_number))
     );
 
-    // 3) HP探索 & 詳細抽出
+    // 3) HP探索 & 詳細抽出（時間予算を守りつつ）
     const rowsForInsert: any[] = [];
     const rejected: any[] = [];
+
+    // 時間切れを避けるため、処理候補は「多めに渡されても」時間に応じて途中打ち切り
     const picked = candidates
       .filter(
         (c: any) =>
@@ -487,15 +492,19 @@ export async function POST(req: Request) {
       .slice(0, want * 2);
 
     for (const c of picked) {
+      if (timedOut()) break;
+
       const corpNo = String(c.corporate_number || "");
       const name = String(c.company_name || "");
       const addr = String(c.address || "");
       const prefs = extractPrefectures(addr);
 
-      // 3-1) HP推定
+      // 3-1) HP推定（短めタイムアウト）
       let website: string | null = null;
       try {
-        website = await guessHomepage(name, addr);
+        if (timeLeft() > 2000) {
+          website = await guessHomepage(name, addr);
+        }
       } catch {}
 
       if (!website) {
@@ -523,10 +532,14 @@ export async function POST(req: Request) {
         continue;
       }
 
-      // 3-2) TOP取得
+      // 3-2) TOP取得（7s）
       let baseHtml = "";
       try {
-        const r = await fetchWithTimeout(website, {}, 12000);
+        const r = await fetchWithTimeout(
+          website,
+          {},
+          Math.min(7000, timeLeft())
+        );
         if (r.ok) baseHtml = await r.text();
       } catch {}
       const baseText = htmlToText(baseHtml);
@@ -537,16 +550,18 @@ export async function POST(req: Request) {
       let phone: string | null =
         extractTelAll(baseHtml)[0] || extractPhoneJP(baseText);
 
-      // 3-3) 詳細リンク探索
+      // 3-3) 詳細リンク探索（最大5件）
       const detailLinks = pickDetailLinks(baseHtml, website);
 
-      // 3-4) 詳細抽出
+      // 3-4) 詳細抽出（1リンク 5–6s、十分揃えば即break）
       let contactFormUrl: string | null = null;
       let est: string | null = extractEstablishedOn(baseText);
       let cap: number | null = extractCapitalJPY(baseText);
       let ind: string | null = extractIndustry(baseText);
 
       for (const u of detailLinks) {
+        if (timedOut()) break;
+
         try {
           if (/^mailto:/i.test(u)) {
             if (!email)
@@ -561,7 +576,7 @@ export async function POST(req: Request) {
             continue;
           }
 
-          const r = await fetchWithTimeout(u, {}, 10000);
+          const r = await fetchWithTimeout(u, {}, Math.min(6000, timeLeft()));
           if (!r.ok) continue;
           const html = await r.text();
           const text = htmlToText(html);
@@ -642,10 +657,10 @@ export async function POST(req: Request) {
         established_on: est,
       });
 
-      if (rowsForInsert.length >= want) break;
+      if (rowsForInsert.length >= want) break; // 目標到達
     }
 
-    // 4) DB保存（prospects）
+    // 4) DB保存
     let rows: ProspectRow[] = [];
     let inserted = 0;
     if (rowsForInsert.length) {
@@ -687,12 +702,13 @@ export async function POST(req: Request) {
     }
 
     // 5) DB保存（rejected）
+    // 504対策の早期打ち切りでも、ここまで来た分は保存
+    // 失敗しても致命ではないのでエラーにしない
     if (rejected.length) {
       await (sb as any).from("form_prospects_rejected").upsert(rejected, {
         onConflict: "tenant_id,corporate_number",
         ignoreDuplicates: true,
       });
-      // 失敗しても致命ではないため握りつぶし（UI側に rejected を返却）
     }
 
     return NextResponse.json({ rows, inserted, rejected }, { status: 200 });
