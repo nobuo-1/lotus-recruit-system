@@ -19,6 +19,7 @@ import {
 const LS_KEY = "fo_manual_fetch_latest";
 const LS_FETCH_COUNT = "fo_manual_fetch_count";
 const LS_REJECT_KEY = "fo_manual_fetch_rejected";
+const TWELVE_H_MS = 12 * 60 * 60 * 1000;
 
 /** ===== Types ===== */
 type StepState = "idle" | "running" | "done" | "error";
@@ -30,7 +31,7 @@ type AddedRow = {
   website: string | null;
   contact_email: string | null;
   contact_form_url?: string | null;
-  phone?: string | null; // ← 電話
+  phone?: string | null;
   industry?: string | null;
   company_size?: string | null;
   prefectures?: string[] | null;
@@ -48,7 +49,7 @@ type RejectedRow = {
   website?: string | null;
   contact_email?: string | null;
   contact_form_url?: string | null;
-  phone?: string | null; // ← 電話
+  phone?: string | null;
   industry_large?: string | null;
   industry_small?: string | null;
   company_size?: string | null;
@@ -59,6 +60,7 @@ type RejectedRow = {
   capital?: number | null;
   established_on?: string | null;
   reject_reasons: string[];
+  created_at?: string | null;
 };
 
 type Filters = {
@@ -107,7 +109,7 @@ const FLOW_A_TITLES = [
   "3. ランダム地域/企業抽出",
   "4. 詳細補完（名称/住所）",
   "5. キャッシュ保存",
-  "6. 実行数到達まで反復",
+  "6. 取得件数到達まで反復",
 ];
 const FLOW_B_TITLES = [
   "7. 新規キャッシュ分のHP推定",
@@ -118,14 +120,14 @@ const FLOW_B_TITLES = [
 export default function ManualFetch() {
   /** ===== State ===== */
   const [tenantId, setTenantId] = useState<string | null>(null);
-  const [msg, setMsg] = useState("");
+  const [msg, setMsg] = useState<string>("");
   const totalSteps = FLOW_A_TITLES.length + FLOW_B_TITLES.length;
   const [s, setS] = useState<StepState[]>(Array(totalSteps).fill("idle"));
   const [activeIdx, setActiveIdx] = useState<number>(-1);
 
   const [added, setAdded] = useState<AddedRow[]>([]);
   const [rejected, setRejected] = useState<RejectedRow[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState<boolean>(false);
 
   const [filters, setFilters] = useState<Filters>({
     prefectures: [],
@@ -140,11 +142,11 @@ export default function ManualFetch() {
     updated_at: null,
   });
 
-  const [countModalOpen, setCountModalOpen] = useState(false);
+  const [countModalOpen, setCountModalOpen] = useState<boolean>(false);
   const [fetchTotal, setFetchTotal] = useState<number>(60);
 
   const abortRef = useRef<AbortController | null>(null);
-  const cancelledRef = useRef(false);
+  const cancelledRef = useRef<boolean>(false);
 
   /** Debug pane */
   const [crawlDebug, setCrawlDebug] = useState<CrawlDebug | null>(null);
@@ -152,13 +154,16 @@ export default function ManualFetch() {
 
   /** rows_preview ページング */
   const ROWS_PER_PAGE = 10;
-  const [rowsPage, setRowsPage] = useState(1);
-  const previewRows = useMemo(
-    () => crawlDebug?.rows_preview ?? [],
+  const [rowsPage, setRowsPage] = useState<number>(1);
+
+  const previewRows: CrawlPreviewRow[] = useMemo<CrawlPreviewRow[]>(
+    () => (crawlDebug?.rows_preview ?? []) as CrawlPreviewRow[],
     [crawlDebug?.rows_preview]
   );
+
   const pageCount = Math.max(1, Math.ceil(previewRows.length / ROWS_PER_PAGE));
-  const pagedPreview = useMemo(() => {
+
+  const pagedPreview = useMemo<CrawlPreviewRow[]>(() => {
     const start = (rowsPage - 1) * ROWS_PER_PAGE;
     return previewRows.slice(start, start + ROWS_PER_PAGE);
   }, [previewRows, rowsPage]);
@@ -181,7 +186,8 @@ export default function ManualFetch() {
         if (!meRes.ok)
           meRes = await fetch("/api/me/tenant/", { cache: "no-store" });
         const me = await meRes.json().catch(() => ({}));
-        const tid = me?.tenant_id ?? me?.profile?.tenant_id ?? null;
+        const tid: string | null =
+          me?.tenant_id ?? me?.profile?.tenant_id ?? null;
         setTenantId(tid);
 
         // filters
@@ -226,27 +232,52 @@ export default function ManualFetch() {
           updated_at: incoming.updated_at ?? null,
         });
 
-        // keep "added"
+        // keep "added"（直近12時間のみ）
         const raw = localStorage.getItem(LS_KEY);
         if (raw) {
           const obj = JSON.parse(raw);
           const ts = obj?.ts ? new Date(obj.ts).getTime() : 0;
-          if (Date.now() - ts < 24 * 3600 * 1000) setAdded(obj.rows ?? []);
-          else localStorage.removeItem(LS_KEY);
+          if (Date.now() - ts < TWELVE_H_MS) {
+            const now = Date.now();
+            const rows = Array.isArray(obj.rows)
+              ? (obj.rows as AddedRow[])
+              : [];
+            setAdded(
+              rows.filter((r: AddedRow) => {
+                const t = r?.created_at ? Date.parse(r.created_at) : ts;
+                return Number.isFinite(t) && now - t <= TWELVE_H_MS;
+              })
+            );
+          } else {
+            localStorage.removeItem(LS_KEY);
+          }
         }
-        // keep "rejected"
+
+        // keep "rejected"（直近12時間のみ）
         const rejRaw = localStorage.getItem(LS_REJECT_KEY);
         if (rejRaw) {
           const obj = JSON.parse(rejRaw);
           const ts = obj?.ts ? new Date(obj.ts).getTime() : 0;
-          if (Date.now() - ts < 24 * 3600 * 1000)
-            setRejected(Array.isArray(obj.rows) ? obj.rows : []);
-          else localStorage.removeItem(LS_REJECT_KEY);
+          if (Date.now() - ts < TWELVE_H_MS) {
+            const now = Date.now();
+            const rows: RejectedRow[] = Array.isArray(obj.rows)
+              ? (obj.rows as RejectedRow[])
+              : [];
+            setRejected(
+              rows.filter((r: RejectedRow) => {
+                const t = r?.created_at ? Date.parse(r.created_at!) : ts;
+                return Number.isFinite(t) && now - t <= TWELVE_H_MS;
+              })
+            );
+          } else {
+            localStorage.removeItem(LS_REJECT_KEY);
+          }
         }
+
         // last fetch count
         const last = Number(localStorage.getItem(LS_FETCH_COUNT));
         if (Number.isFinite(last) && last > 0)
-          setFetchTotal(Math.max(10, Math.min(2000, last)));
+          setFetchTotal(Math.max(1, Math.min(2000, last)));
       } catch (e: any) {
         setMsg(String(e?.message || e));
       }
@@ -277,7 +308,7 @@ export default function ManualFetch() {
     await runLoop(fetchTotal);
   };
 
-  /** 実行ループ */
+  /** 実行ループ（取得件数ベースで A/B を反復） */
   const runLoop = async (total: number) => {
     if (!tenantId) return;
     setMsg("");
@@ -299,24 +330,28 @@ export default function ManualFetch() {
       setS((a) => a.map((v, i) => (i === 0 ? "done" : v)));
       setActiveIdx(-1);
 
-      // ---- Phase A ----
-      let savedCache = 0;
+      // ---- 取得件数で制御：Phase A と B を反復 ----
+      let obtained = 0; // form_prospects に今回追加できた数
       let attempts = 0;
-      const MAX_ATTEMPTS = Math.ceil(total / 5) + 10;
-      const BATCH = Math.min(25, Math.max(8, Math.floor(total / 4)));
+      const MAX_ATTEMPTS = Math.ceil(total / 5) + 30;
+      const BATCH = Math.min(
+        25,
+        Math.max(8, Math.floor(Math.max(10, total) / 4))
+      );
+      const sinceAtStart = new Date().toISOString();
 
-      while (savedCache < total && attempts < MAX_ATTEMPTS) {
+      while (obtained < total && attempts < MAX_ATTEMPTS) {
         if (cancelledRef.current) throw new Error("ABORTED");
         attempts++;
-        const want = Math.min(BATCH, total - savedCache);
+        const want = Math.min(BATCH, Math.max(1, total - obtained));
         const seed = `${Date.now()}-${attempts}`;
 
-        // A-2
+        // A-2 ～ A-5（クロール＆キャッシュ）
         setActiveIdx(1);
         setS((a) => a.map((v, i) => (i === 1 ? "running" : v)));
         await nextFrame();
 
-        const r = await fetch("/api/form-outreach/companies/crawl", {
+        const rCrawl = await fetch("/api/form-outreach/companies/crawl", {
           method: "POST",
           headers: {
             "x-tenant-id": tenantId,
@@ -325,7 +360,7 @@ export default function ManualFetch() {
           body: JSON.stringify({ filters, want, seed }),
           signal: abortRef.current.signal,
         });
-        const j = await safeJson(r);
+        const j = await safeJson(rCrawl);
 
         const a2 = Number(j?.step?.a2_crawled || 0);
         const a3 = Number(j?.step?.a3_picked || 0);
@@ -348,46 +383,130 @@ export default function ManualFetch() {
           to_insert_count: toInsert,
           using_service_role: usingSrv,
           html_sig: j?.html_sig || {},
-          rows_preview: Array.isArray(j?.rows_preview) ? j.rows_preview : [],
-          trace: Array.isArray(j?.trace) ? j.trace : [],
+          rows_preview: Array.isArray(j?.rows_preview)
+            ? (j.rows_preview as CrawlPreviewRow[])
+            : [],
+          trace: Array.isArray(j?.trace) ? (j.trace as string[]) : [],
           warning: j?.warning,
           project_ref: projectRef,
           db_url_host: dbUrlHost,
           db_probe_found: probeFound,
         });
 
-        // A-2 result
         setS((a) =>
           a.map((v, idx) => (idx === 1 ? (a2 > 0 ? "done" : "error") : v))
         );
-
-        // A-3
         setActiveIdx(2);
         setS((a) =>
           a.map((v, idx) => (idx === 2 ? (a3 > 0 ? "done" : "error") : v))
         );
-
-        // A-4
         setActiveIdx(3);
         setS((a) => a.map((v, idx) => (idx === 3 ? "done" : v)));
-
-        // A-5
         setActiveIdx(4);
         setS((a) => a.map((v, idx) => (idx === 4 ? "done" : v)));
 
-        // A-6
+        // A-6（反復の進行表示）
         setActiveIdx(5);
-        setS((a) => a.map((v, idx) => (idx === 5 ? "running" : v)));
-        await delay(120);
-
-        savedCache += newCache;
-
         setS((a) => a.map((v, idx) => (idx === 5 ? "done" : v)));
+        setActiveIdx(-1);
+
+        if (!rCrawl.ok)
+          throw new Error(j?.error || `crawl failed (${rCrawl.status})`);
+
+        // ---- Phase B（このループで即時実行）----
+        setActiveIdx(6);
+        setS((a) => a.map((v, idx) => (idx === 6 ? "running" : v)));
+        await delay(100);
+        setS((a) => a.map((v, idx) => (idx === 6 ? "done" : v)));
+
+        setActiveIdx(7);
+        setS((a) => a.map((v, idx) => (idx === 7 ? "running" : v)));
+        const enrichRes = await fetch("/api/form-outreach/companies/enrich", {
+          method: "POST",
+          headers: {
+            "x-tenant-id": tenantId,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            since: sinceAtStart,
+            want: Math.max(1, total - obtained),
+            try_llm: false,
+          }),
+          signal: abortRef.current.signal,
+        });
+        const ej = await safeJson(enrichRes);
+        setS((a) => a.map((v, idx) => (idx === 7 ? "done" : v)));
+
+        const lastIdx = FLOW_A_TITLES.length + 2;
+        setActiveIdx(lastIdx);
+        setS((a) => a.map((v, idx) => (idx === lastIdx ? "running" : v)));
+        await delay(80);
+
+        if (!enrichRes.ok) {
+          setS((a) => a.map((v, idx) => (idx === lastIdx ? "error" : v)));
+          throw new Error(ej?.error || `enrich failed (${enrichRes.status})`);
+        }
+
+        // 直近12時間のみ反映
+        const now = Date.now();
+
+        const rowsRaw: AddedRow[] = Array.isArray(ej?.rows)
+          ? (ej.rows as AddedRow[])
+          : [];
+        const rows: AddedRow[] = rowsRaw.filter((r: AddedRow) => {
+          const t = r?.created_at ? Date.parse(r.created_at) : now;
+          return Number.isFinite(t) && now - t <= TWELVE_H_MS;
+        });
+
+        if (rows.length) {
+          setAdded((prev) => {
+            const merged = [...rows, ...prev].filter((r: AddedRow) => {
+              const t = r?.created_at ? Date.parse(r.created_at) : now;
+              return Number.isFinite(t) && now - t <= TWELVE_H_MS;
+            });
+            localStorage.setItem(
+              LS_KEY,
+              JSON.stringify({ ts: new Date().toISOString(), rows: merged })
+            );
+            return merged;
+          });
+        }
+
+        const rejAll: RejectedRow[] = Array.isArray(ej?.rejected)
+          ? (ej.rejected as RejectedRow[])
+          : [];
+        const rej = rejAll.filter((r: RejectedRow) => {
+          const t = r?.created_at ? Date.parse(r.created_at!) : now;
+          return Number.isFinite(t) && now - t <= TWELVE_H_MS;
+        });
+        if (rej.length) {
+          setRejected((prev) => {
+            const next = dedupeRejected([...rej, ...prev]).filter(
+              (r: RejectedRow) => {
+                const t = r?.created_at ? Date.parse(r.created_at!) : now;
+                return Number.isFinite(t) && now - t <= TWELVE_H_MS;
+              }
+            );
+            localStorage.setItem(
+              LS_REJECT_KEY,
+              JSON.stringify({ ts: new Date().toISOString(), rows: next })
+            );
+            return next;
+          });
+        }
+
+        const insertedNow = Number.isFinite(ej?.inserted as number)
+          ? Number(ej?.inserted as number)
+          : rows.length; // inserted が無い場合は rows.length を採用
+        obtained += Math.max(0, insertedNow);
+
+        setS((a) => a.map((v, idx) => (idx === lastIdx ? "done" : v)));
         setActiveIdx(-1);
 
         setMsg(
           [
-            `キャッシュ保存進行：${savedCache}/${total} 件  (raw:${a2}, pick:${a3}, fill:${a4}, ins:${newCache}, to_insert:${toInsert})`,
+            `取得進行（prospects）：${obtained}/${total} 件  (+${insertedNow})`,
+            `NTA: raw=${a2}, pick=${a3}, ins(cache)=${newCache}, to_insert(cache)=${toInsert}`,
             `権限: ${usingSrv ? "service-role" : "anon"}${
               j?.warning ? " / 警告あり" : ""
             }`,
@@ -397,77 +516,11 @@ export default function ManualFetch() {
           ].join("\n")
         );
 
-        if (!r.ok) throw new Error(j?.error || `crawl failed (${r.status})`);
-
-        if (newCache === 0) await delay(240);
+        if (insertedNow === 0 && newCache === 0) await delay(300);
       }
-
-      // ---- Phase B ----
-      const since = new Date(Date.now() - 15 * 60 * 1000).toISOString();
-
-      setActiveIdx(6);
-      setS((a) => a.map((v, idx) => (idx === 6 ? "running" : v)));
-      await delay(160);
-      setS((a) => a.map((v, idx) => (idx === 6 ? "done" : v)));
-
-      setActiveIdx(7);
-      setS((a) => a.map((v, idx) => (idx === 7 ? "running" : v)));
-
-      const enrichRes = await fetch("/api/form-outreach/companies/enrich", {
-        method: "POST",
-        headers: {
-          "x-tenant-id": tenantId,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ since, want: total, try_llm: false }),
-        signal: abortRef.current.signal,
-      });
-      const ej = await safeJson(enrichRes);
-
-      setS((a) => a.map((v, idx) => (idx === 7 ? "done" : v)));
-
-      const lastIdx = FLOW_A_TITLES.length + 2;
-      setActiveIdx(lastIdx);
-      setS((a) => a.map((v, idx) => (idx === lastIdx ? "running" : v)));
-      await delay(120);
-
-      if (!enrichRes.ok) {
-        setS((a) => a.map((v, idx) => (idx === lastIdx ? "error" : v)));
-        throw new Error(ej?.error || `enrich failed (${enrichRes.status})`);
-      }
-
-      const rows: AddedRow[] = Array.isArray(ej?.rows) ? ej.rows : [];
-      if (rows.length) {
-        setAdded((prev) => {
-          const next = [...rows, ...prev];
-          localStorage.setItem(
-            LS_KEY,
-            JSON.stringify({ ts: new Date().toISOString(), rows: next })
-          );
-          return next;
-        });
-      }
-
-      // ★ 修正：APIのrejected（= form_prospects_rejected反映）をそのままUIへ表示
-      const rej: RejectedRow[] = Array.isArray(ej?.rejected) ? ej.rejected : [];
-      if (rej.length) {
-        setRejected((prev) => {
-          const next = dedupeRejected([...rej, ...prev]);
-          localStorage.setItem(
-            LS_REJECT_KEY,
-            JSON.stringify({ ts: new Date().toISOString(), rows: next })
-          );
-          return next;
-        });
-      }
-
-      setS((a) => a.map((v, idx) => (idx === lastIdx ? "done" : v)));
-      setActiveIdx(-1);
 
       setMsg(
-        `完了：キャッシュ新規 ${savedCache} 件 → prospects追加 ${
-          Number.isFinite(ej?.inserted) ? ej.inserted : rows.length
-        } 件 / 不適合 ${rej.length} 件`
+        `完了：取得件数を満たしました（${Math.max(0, obtained)}/${total} 件）`
       );
     } catch (e: any) {
       setActiveIdx(-1);
@@ -484,7 +537,7 @@ export default function ManualFetch() {
     if (!confirm("今回追加分をすべて取り消して削除します。よろしいですか？"))
       return;
     try {
-      const ids = added.map((r) => r.id);
+      const ids = added.map((r: AddedRow) => r.id);
       const r = await fetch("/api/form-outreach/companies/cancel-additions", {
         method: "POST",
         headers: {
@@ -744,7 +797,7 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                       </div>
                     </div>
 
-                    {/* rows_preview ページング対応（上限なし） */}
+                    {/* rows_preview ページング対応 */}
                     <div className="rounded border border-neutral-200">
                       <div className="px-3 py-2 border-b border-neutral-200 bg-neutral-50 font-semibold flex items-center justify-between">
                         <span>rows_preview（プレビュー）</span>
@@ -793,7 +846,7 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-neutral-200">
-                            {pagedPreview.map((r) => (
+                            {pagedPreview.map((r: CrawlPreviewRow) => (
                               <tr key={r.corporate_number}>
                                 <td className="px-2 py-1 font-mono">
                                   {r.corporate_number}
@@ -853,7 +906,7 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden">
           <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 bg-neutral-50">
             <div className="text-sm font-medium text-neutral-800">
-              今回追加（新しい順）
+              今回追加（直近12時間・新しい順）
             </div>
             <div className="flex items-center gap-2">
               <button
@@ -887,7 +940,7 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-200">
-                {added.map((c) => (
+                {added.map((c: AddedRow) => (
                   <tr key={c.id}>
                     <td className="px-3 py-2">{c.company_name || "-"}</td>
                     <td className="px-3 py-2">
@@ -962,7 +1015,7 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden mt-6">
           <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 bg-neutral-50">
             <div className="text-sm font-medium text-neutral-800">
-              フィルタ不適合（重複除去済み / 直近取得が上）
+              フィルタ不適合（直近12時間・重複除去済み / 直近取得が上）
             </div>
             <div className="flex items-center gap-2 text-xs text-neutral-500">
               表示件数: {rejected.length}
@@ -990,7 +1043,7 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-200">
-                {rejected.map((r, idx) => (
+                {rejected.map((r: RejectedRow, idx: number) => (
                   <tr key={idx}>
                     <td className="px-3 py-2">{r.company_name}</td>
                     <td className="px-3 py-2">
@@ -1045,7 +1098,7 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                     <td className="px-3 py-2">
                       <ul className="list-disc list-inside space-y-0.5">
                         {Array.from(new Set(r.reject_reasons || [])).map(
-                          (rr, i) => (
+                          (rr: string, i: number) => (
                             <li key={i} className="text-xs text-neutral-700">
                               {rr}
                             </li>
@@ -1098,7 +1151,7 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
         <CountModal
           defaultValue={fetchTotal}
           onCloseAction={() => setCountModalOpen(false)}
-          onApplyAction={(n) => {
+          onApplyAction={(n: number) => {
             setFetchTotal(n);
             confirmAndRun();
           }}
@@ -1152,12 +1205,12 @@ function CountModal({
   onApplyAction: (n: number) => void;
 }) {
   const [n, setN] = useState<number>(defaultValue ?? 60);
-  const clampVal = (v: number) => Math.max(10, Math.min(2000, Math.floor(v)));
+  const clampVal = (v: number) => Math.max(1, Math.min(2000, Math.floor(v)));
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-      <div className="w-[520px] max-w-[96vw] rounded-2xl bg-white shadow-xl border border-neutral-200 overflow-hidden">
+      <div className="w=[520px] max-w-[96vw] rounded-2xl bg-white shadow-xl border border-neutral-200 overflow-hidden">
         <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200">
-          <div className="font-semibold">実行件数の指定</div>
+          <div className="font-semibold">取得件数の指定</div>
           <button
             onClick={onCloseAction}
             className="rounded-lg px-2 py-1 border border-neutral-300 hover:bg-neutral-50 text-sm"
@@ -1167,30 +1220,31 @@ function CountModal({
         </div>
         <div className="p-4 space-y-3">
           <p className="text-sm text-neutral-700">
-            収集する企業数を指定してください（10〜2000件）。
+            今回「form_prospects」に追加する目標件数を指定してください（1〜2000件）。
           </p>
           <div className="flex items-center gap-3">
             <input
               type="range"
-              min={10}
+              min={1}
               max={2000}
-              step={10}
+              step={1}
               value={n}
               onChange={(e) => setN(clampVal(Number(e.target.value)))}
               className="w-full"
             />
             <input
               type="number"
-              min={10}
+              min={1}
               max={2000}
-              step={10}
+              step={1}
               value={n}
               onChange={(e) => setN(clampVal(Number(e.target.value)))}
               className="w-28 rounded-lg border border-neutral-300 px-3 py-2 text-sm"
             />
           </div>
           <p className="text-[11px] text-neutral-500">
-            ※ 大きい値を指定すると完了まで時間がかかる可能性があります。
+            ※
+            取得件数は実際に「サイト到達→抽出→保存」できた件数でカウントします。
           </p>
         </div>
         <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-neutral-200">
@@ -1204,7 +1258,7 @@ function CountModal({
             onClick={() => onApplyAction(n)}
             className="rounded-lg px-3 py-1 border border-neutral-300 text-sm hover:bg-neutral-50"
           >
-            実行する
+            開始する
           </button>
         </div>
       </div>
