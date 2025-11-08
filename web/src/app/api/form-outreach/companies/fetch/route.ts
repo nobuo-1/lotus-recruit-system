@@ -4,11 +4,8 @@ export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-// 郵便番号 → 町丁名シード（自動生成ファイル）
-import {
-  NTA_TOWN_SEEDS,
-  listSeedTowns,
-} from "@/constants/ntaTownSeeds.generated";
+import fs from "node:fs/promises";
+import path from "node:path";
 
 /** ---------- Types ---------- */
 type SizeRange = "1-9" | "10-49" | "50-249" | "250+";
@@ -19,11 +16,11 @@ type Filters = {
   keywords?: string[];
   industries_large?: string[];
   industries_small?: string[];
-  capital_min?: number | null; // JPY
-  capital_max?: number | null; // JPY
+  capital_min?: number | null;
+  capital_max?: number | null;
   established_from?: string | null; // YYYY-MM-DD
   established_to?: string | null; // YYYY-MM-DD
-  max?: number; // backward-compat
+  max?: number;
 };
 
 type Candidate = {
@@ -46,6 +43,8 @@ type Candidate = {
 type Rejected = Candidate & { reject_reasons: string[] };
 
 type CacheRow = {
+  id?: string | null;
+  tenant_id?: string | null;
   corporate_number: string | null;
   company_name: string | null;
   address: string | null;
@@ -58,8 +57,8 @@ type CacheRow = {
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || ""; // 任意
-const NTA_CORP_API_KEY = process.env.NTA_CORP_API_KEY || ""; // 任意（あれば API 補完）
+// 任意：あればHP解決に使う。未設定でも可。
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 
 /** ---------- Utils ---------- */
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -115,6 +114,12 @@ const JP_PREFS = [
   "鹿児島県",
   "沖縄県",
 ];
+
+function prefecturesFromAddress(addr?: string | null): string[] {
+  if (!addr) return [];
+  const hit = JP_PREFS.filter((p) => addr.includes(p));
+  return hit.length ? hit.slice(0, 2) : [];
+}
 
 function normalizeUrl(u?: string | null): string | undefined {
   if (!u) return;
@@ -174,69 +179,6 @@ function parseYenAmount(raw: string): number | null {
   if (unit === "万") return Math.round(n * 10_000);
   return Math.round(n);
 }
-function deobfuscateEmails(text: string): string[] {
-  const alt = text
-    .replace(/\s*\[at\]\s*/gi, "@")
-    .replace(/\s*\(at\)\s*/gi, "@")
-    .replace(/\s*＠\s*/g, "@")
-    .replace(/\s*\[dot\]\s*/gi, ".")
-    .replace(/\s*\(dot\)\s*/gi, ".")
-    .replace(/＜?アットマーク＞?/g, "@")
-    .replace(/＜?ドット＞?/g, ".");
-  const re = /[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}(?:\.[A-Z]{2,})?/gi;
-  return Array.from(new Set(alt.match(re) ?? []));
-}
-function extractEmails(
-  text: string,
-  html?: string,
-  siteHost?: string
-): string[] {
-  const pool = new Set<string>();
-  for (const e of deobfuscateEmails(text)) pool.add(e);
-
-  if (html) {
-    const mailtoRe = /href=["']mailto:([^"']+)["']/gi;
-    let m: RegExpExecArray | null;
-    while ((m = mailtoRe.exec(html))) {
-      const raw = decodeURIComponent(m[1] || "");
-      for (const e of deobfuscateEmails(raw)) pool.add(e);
-    }
-    const ldRe =
-      /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
-    while ((m = ldRe.exec(html))) {
-      try {
-        const j = JSON.parse(m[1]);
-        const cand = (j?.email as string) || (j?.contactPoint?.email as string);
-        if (typeof cand === "string") {
-          for (const e of deobfuscateEmails(cand)) pool.add(e);
-        }
-      } catch {}
-    }
-  }
-  const arr = [...pool];
-  if (siteHost) {
-    const main = arr.find((e) =>
-      e.toLowerCase().endsWith(`@${siteHost.toLowerCase()}`)
-    );
-    if (main) return [main, ...arr.filter((x) => x !== main)];
-  }
-  return arr;
-}
-function extractCompanySizeToRange(text: string): SizeRange | null {
-  const t = text.replace(/[,\uFF0C\u3000]/g, "");
-  const re =
-    /(従業員|従業員数|社員|スタッフ)[^\d]{0,8}(約|およそ)?\s*([0-9]{1,6})\s*(名|人)\s*(規模|程度|前後|以上|超|未満|以下)?/i;
-  const m = re.exec(t);
-  if (!m) return null;
-  let n = Number(m[3]);
-  if (!Number.isFinite(n) || n <= 0) return null;
-  const mod = (m[5] || "").toString();
-  if (/未満|以下/.test(mod)) n = Math.max(0, n - 1);
-  if (n <= 9) return "1-9";
-  if (n <= 49) return "10-49";
-  if (n <= 249) return "50-249";
-  return "250+";
-}
 function extractCapital(text: string): number | null {
   const t = toHalfWidthDigits(text);
   const re = /資本金[^\d０-９]{0,6}([0-9０-９.,]+)\s*(億|万)?\s*円?/i;
@@ -262,19 +204,71 @@ function extractEstablishedOn(text: string): string | null {
   if (!y || y < 1900 || y > 2100) return null;
   return `${y}-${mm}-${dd}`;
 }
-function extractHQPrefecture(html: string, text: string): string[] {
-  const prefs = new Set<string>();
-  const hqBlock =
-    /会社概要[\s\S]{0,1200}?本社[\s\S]{0,600}|本社[\s\S]{0,1000}?所在地|所在地[\s\S]{0,1000}?本社/;
-  const sec = hqBlock.exec(html)?.[0] || "";
-  const target = (sec || text).slice(0, 4000);
-  for (const p of JP_PREFS) if (target.includes(p)) prefs.add(p);
-  return [...prefs];
+function extractCompanySizeToRange(text: string): SizeRange | null {
+  const t = text.replace(/[,\uFF0C\u3000]/g, "");
+  const re =
+    /(従業員|従業員数|社員|スタッフ)[^\d]{0,8}(約|およそ)?\s*([0-9]{1,6})\s*(名|人)\s*(規模|程度|前後|以上|超|未満|以下)?/i;
+  const m = re.exec(t);
+  if (!m) return null;
+  let n = Number(m[3]);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const mod = (m[5] || "").toString();
+  if (/未満|以下/.test(mod)) n = Math.max(0, n - 1);
+  if (n <= 9) return "1-9";
+  if (n <= 49) return "10-49";
+  if (n <= 249) return "50-249";
+  return "250+";
 }
-function resolveLinks(
+function extractEmailsFrom(
   html: string,
-  base: string
-): Array<{ href: string; label: string }> {
+  text: string,
+  host?: string
+): string[] {
+  const pool = new Set<string>();
+  const deob = (s: string) =>
+    s
+      .replace(/\s*\[at\]\s*/gi, "@")
+      .replace(/\s*\(at\)\s*/gi, "@")
+      .replace(/\s*＠\s*/g, "@")
+      .replace(/\s*\[dot\]\s*/gi, ".")
+      .replace(/\s*\(dot\)\s*/gi, ".")
+      .replace(/＜?アットマーク＞?/g, "@")
+      .replace(/＜?ドット＞?/g, ".");
+  const re = /[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}(?:\.[A-Z]{2,})?/gi;
+
+  for (const e of deob(text).match(re) ?? []) pool.add(e);
+
+  // mailto:
+  const mailtoRe = /href=["']mailto:([^"']+)["']/gi;
+  let m: RegExpExecArray | null;
+  while ((m = mailtoRe.exec(html))) {
+    const raw = decodeURIComponent(m[1] || "");
+    for (const e of deob(raw).match(re) ?? []) pool.add(e);
+  }
+  // JSON-LD
+  const ldRe =
+    /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  while ((m = ldRe.exec(html))) {
+    try {
+      const j = JSON.parse(m[1]);
+      const cand = (j?.email as string) || (j?.contactPoint?.email as string);
+      if (typeof cand === "string") {
+        for (const e of deob(cand).match(re) ?? []) pool.add(e);
+      }
+    } catch {}
+  }
+
+  const arr = [...pool];
+  if (host) {
+    const main = arr.find((e) =>
+      e.toLowerCase().endsWith(`@${host.toLowerCase()}`)
+    );
+    if (main) return [main, ...arr.filter((x) => x !== main)];
+  }
+  return arr;
+}
+
+function resolveLinks(html: string, base: string) {
   const out: Array<{ href: string; label: string }> = [];
   const re = /<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\s]*?)<\/a>/gi;
   let m: RegExpExecArray | null;
@@ -290,10 +284,7 @@ function resolveLinks(
   }
   return out;
 }
-async function findContactForm(
-  url: string,
-  html: string
-): Promise<string | null> {
+async function findContactForm(url: string, html: string) {
   const links = resolveLinks(html, url);
   const hit = links.find(({ href, label }) =>
     /contact|inquiry|お問い合わせ|お問合せ|問合せ/i.test(href + " " + label)
@@ -318,193 +309,131 @@ async function findContactForm(
   }
   return null;
 }
-function prefecturesFromAddress(addr?: string | null): string[] {
-  if (!addr) return [];
-  const hit = JP_PREFS.filter((p) => addr.includes(p));
-  return hit.length ? hit.slice(0, 2) : [];
-}
-function keyForRejected(c: Rejected): string {
-  const num = (c.corporate_number || "").toLowerCase();
-  const n = (c.company_name || "").toLowerCase();
-  return `${num}__${n}`;
-}
-function dedupeCands(cands: Candidate[]): Candidate[] {
-  const seen = new Set<string>();
-  const out: Candidate[] = [];
-  for (const cand of cands) {
-    const key = `${(cand.corporate_number || "").toLowerCase()}__${(
-      cand.company_name || ""
-    ).toLowerCase()}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      out.push(cand);
-    }
-  }
-  return out;
-}
 
-/** JSON 深部から会社っぽいノードを収集 */
-function deepCollectCorporateLike(root: any): any[] {
-  const out: any[] = [];
-  const st = [root];
-  while (st.length) {
-    const cur = st.pop();
-    if (!cur) continue;
-    if (Array.isArray(cur)) {
-      for (const v of cur) st.push(v);
+/** ---------- JSONL → キャッシュ（nta_corporates_cache）ブートストラップ ---------- */
+async function bootstrapCacheFromFiles(
+  sb: any,
+  tenantId: string,
+  prefFilter?: string[]
+): Promise<{ inserted: number; files: number }> {
+  const root = path.resolve(process.cwd(), "data", "cache");
+  let dir: string[] = [];
+  try {
+    dir = await fs.readdir(root);
+  } catch {
+    return { inserted: 0, files: 0 }; // ディレクトリなし
+  }
+
+  const files = dir.filter((n) => /\.jsonl$/i.test(n));
+  if (!files.length) return { inserted: 0, files: 0 };
+
+  let inserted = 0;
+  let seenLine = 0;
+
+  // ざっくり prefectures でファイル名フィルタ（なければ全読み）
+  const prefSet = new Set((prefFilter || []).filter(Boolean));
+  const targets = files.filter((n) => {
+    if (!prefSet.size) return true;
+    return [...prefSet].some((p) => n.includes(p));
+  });
+
+  for (const name of targets) {
+    const full = path.join(root, name);
+    let text = "";
+    try {
+      text = await fs.readFile(full, "utf8");
+    } catch {
       continue;
     }
-    if (typeof cur === "object") {
-      const keys = Object.keys(cur);
-      const hasNum = keys.some((k) => /corporate[_]?number/i.test(k));
-      const hasName = keys.some((k) => /(name|corporationName)/i.test(k));
-      if (hasNum && hasName) out.push(cur);
-      for (const k of keys) st.push(cur[k]);
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    if (!lines.length) continue;
+
+    // JSONL → バルク upsert
+    const batch: CacheRow[] = [];
+    for (const ln of lines) {
+      seenLine++;
+      try {
+        const j = JSON.parse(ln);
+        const corporate_number = (j.corporate_number ?? "").trim() || null;
+        const company_name = (j.name ?? "").trim() || null;
+        const address = j.address || null;
+        const detail_url = j.source_url || null;
+        const source = "nta-jsonl";
+        const scraped_at = j.scraped_at || new Date().toISOString();
+        if (!corporate_number || !company_name) continue;
+
+        batch.push({
+          tenant_id: tenantId,
+          corporate_number,
+          company_name,
+          address,
+          detail_url,
+          source,
+          scraped_at,
+        });
+      } catch {}
+      if (batch.length >= 800) {
+        const { error } = await sb
+          .from("nta_corporates_cache")
+          .upsert(batch as any, { onConflict: "tenant_id,corporate_number" });
+        if (!error) inserted += batch.length;
+        batch.length = 0;
+        await sleep(10);
+      }
+    }
+    if (batch.length) {
+      const { error } = await sb
+        .from("nta_corporates_cache")
+        .upsert(batch as any, { onConflict: "tenant_id,corporate_number" });
+      if (!error) inserted += batch.length;
     }
   }
-  return out;
+  return { inserted, files: targets.length };
 }
 
-/** ---------- Data Sources ---------- */
-
-/** 1) キャッシュ（nta_corporates_cache）優先 */
-async function fetchFromCache(
+/** キャッシュから候補を作る（pref フィルタ対応・乱択） */
+async function pickCandidatesFromCache(
   sb: any,
+  tenantId: string,
   filters: Filters,
   want: number,
   seed: string
 ): Promise<Candidate[]> {
-  const take = Math.max(want * 40, 200);
-  const { data, error } = await sb
+  const take = Math.max(want * 50, 300);
+  let q = sb
     .from("nta_corporates_cache")
-    .select(
-      "corporate_number, company_name, address, detail_url, source, scraped_at"
-    )
+    .select("corporate_number, company_name, address")
+    .eq("tenant_id", tenantId)
     .order("scraped_at", { ascending: false })
     .limit(take);
 
-  if (error || !data) return [];
+  const { data, error } = await q;
+  if (error || !Array.isArray(data) || data.length === 0) return [];
 
-  // ★ 型述語を使わずキャストで明示（TS2677/never 回避）
-  const arr: CacheRow[] = Array.isArray(data)
-    ? (data as any as CacheRow[])
-    : [];
-  const pool = arr
-    .filter((r) => r && r.company_name && r.corporate_number)
-    .map((r) => ({
-      company_name: String(r.company_name),
-      corporate_number: String(r.corporate_number),
-      hq_address: r.address || null,
-      website: null,
-      prefectures: prefecturesFromAddress(r.address || null),
-    }));
-
-  // 都道府県フィルタ（指定があれば）
+  // 都道府県フィルタ
   const prefSet = new Set((filters.prefectures || []).filter(Boolean));
+  const pool = (data as any[]).map((r) => ({
+    company_name: String(r.company_name || ""),
+    corporate_number: String(r.corporate_number || ""),
+    hq_address: r.address || null,
+    prefectures: prefecturesFromAddress(r.address || null),
+    website: null,
+  }));
   const filtered = prefSet.size
     ? pool.filter((c) => (c.prefectures || []).some((p) => prefSet.has(p)))
     : pool;
 
-  // 擬似シャッフル
+  // シャッフル
+  const arr = filtered.slice();
   const seedN = Number(String(seed).replace(/\D/g, "")) || Date.now();
-  for (let i = filtered.length - 1; i > 0; i--) {
+  for (let i = arr.length - 1; i > 0; i--) {
     const j = (seedN + i) % (i + 1);
-    [filtered[i], filtered[j]] = [filtered[j], filtered[i]];
+    [arr[i], arr[j]] = [arr[j], arr[i]];
   }
-  return filtered.slice(0, Math.max(want * 2, 60));
+  return arr.slice(0, Math.max(want * 3, 80));
 }
 
-/** 2) 国税庁 API（町丁シードで網羅） */
-async function fetchFromNTA(
-  filters: Filters,
-  want: number,
-  seed: string
-): Promise<Candidate[]> {
-  if (!NTA_CORP_API_KEY) return [];
-
-  // 対象都道府県の決定
-  const prefPool =
-    (filters.prefectures && filters.prefectures.length
-      ? filters.prefectures
-      : Object.keys(NTA_TOWN_SEEDS)) || [];
-
-  // 住所クエリ（pref+city+town）を網羅的に生成（丁目は生成側で除去済み）
-  const addresses: string[] = [];
-  for (const pref of prefPool) {
-    const cities = Object.keys(NTA_TOWN_SEEDS[pref] || {});
-    for (const city of cities) {
-      const towns = listSeedTowns(pref, city);
-      // 町丁ごとに「東京都渋谷区宇田川町」等のクエリを生成
-      for (const town of towns) {
-        addresses.push(`${pref}${city}${town}`);
-      }
-      // 市区単位でも1本入れておく（ヒット補助）
-      addresses.push(`${pref}${city}`);
-    }
-    // 都道府県単位も少量入れる（保険）
-    addresses.push(pref);
-  }
-
-  // シードで順序を安定シャッフル
-  const seedN = Number(String(seed).replace(/\D/g, "")) || Date.now();
-  for (let i = addresses.length - 1; i > 0; i--) {
-    const j = (seedN + i) % (i + 1);
-    [addresses[i], addresses[j]] = [addresses[j], addresses[i]];
-  }
-
-  // 呼び出し過多を防ぐために上限を設定（必要十分に多め）
-  const MAX_ADDR = Math.min(addresses.length, Math.max(want * 6, 240));
-  const pick = addresses.slice(0, MAX_ADDR);
-
-  const base = "https://api.houjin-bangou.nta.go.jp/4/address";
-  const out: Candidate[] = [];
-
-  for (const addr of pick) {
-    const qs = new URLSearchParams({
-      id: NTA_CORP_API_KEY,
-      address: addr,
-      type: "12",
-      mode: "2",
-      target: "1",
-      divide: "1",
-    });
-    const url = `${base}?${qs.toString()}`;
-    try {
-      const r = await fetchWithTimeout(url, {}, 12000);
-      const txt = await r.text();
-      if (!r.ok) continue;
-      let j: any = {};
-      try {
-        j = JSON.parse(txt);
-      } catch {
-        continue;
-      }
-      const rows = deepCollectCorporateLike(j);
-      for (const x of rows) {
-        const num = String(
-          x?.corporate_number ?? x?.corporateNumber ?? ""
-        ).trim();
-        const nm = String(x?.name ?? x?.corporationName ?? "").trim();
-        const ad = String(x?.address ?? x?.location ?? "").trim() || null;
-        if (!num || !nm) continue;
-        out.push({
-          company_name: nm,
-          corporate_number: num,
-          hq_address: ad,
-          website: null,
-          prefectures: prefecturesFromAddress(ad),
-        });
-        if (out.length >= want * 6) break; // 十分に確保できたら次へ
-      }
-    } catch {}
-    if (out.length >= want * 6) break;
-    await sleep(50);
-  }
-
-  return dedupeCands(out).slice(0, Math.max(60, want * 3));
-}
-
-/** 公式HP 解決（LLM 任意） */
+/** 公式HP 解決（未設定でもOK） */
 async function resolveHomepageWithLLM(
   c: Candidate
 ): Promise<string | undefined> {
@@ -562,10 +491,9 @@ async function verifyAndEnrichWebsite(c: Candidate): Promise<Candidate | null> {
       host = new URL(site).host;
     } catch {}
 
-    const emails = extractEmails(text, html, host);
+    const emails = extractEmailsFrom(html, text, host);
     const contact_form_url = await findContactForm(site, html);
     const sizeExtracted = extractCompanySizeToRange(text);
-    const prefs = extractHQPrefecture(html, text);
 
     return {
       ...c,
@@ -574,7 +502,6 @@ async function verifyAndEnrichWebsite(c: Candidate): Promise<Candidate | null> {
       contact_form_url,
       company_size: sizeExtracted ?? c.company_size ?? null,
       company_size_extracted: sizeExtracted ?? null,
-      prefectures: (prefs.length ? prefs : c.prefectures ?? []).slice(0, 4),
       capital: c.capital ?? extractCapital(text) ?? null,
       established_on: c.established_on ?? extractEstablishedOn(text) ?? null,
     };
@@ -662,7 +589,28 @@ function matchesFilters(
   return { ok: reasons.length === 0, reasons };
 }
 
-/** ---------- Handler: POST (Batch) ---------- */
+function dedupeCands(cands: Candidate[]): Candidate[] {
+  const seen = new Set<string>();
+  const out: Candidate[] = [];
+  for (const cand of cands) {
+    const key = `${(cand.corporate_number || "").toLowerCase()}__${(
+      cand.company_name || ""
+    ).toLowerCase()}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(cand);
+    }
+  }
+  return out;
+}
+
+function keyForRejected(c: Rejected): string {
+  const num = (c.corporate_number || "").toLowerCase();
+  const n = (c.company_name || "").toLowerCase();
+  return `${num}__${n}`;
+}
+
+/** ---------- Handler: POST (Batch; NTA API 未使用) ---------- */
 export async function POST(req: Request) {
   try {
     if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
@@ -684,9 +632,16 @@ export async function POST(req: Request) {
     const want: number = clamp(body?.want ?? filters.max ?? 12, 1, 200);
     const seed: string = String(body?.seed || Math.random()).slice(2);
 
-    const admin: any = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY); // ← any で軽量化（TS2589/2345 回避）
+    const admin: any = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-    // 既存 website / corporate_number を収集（重複避け）
+    // ① JSONL → キャッシュへ（初回ブート）※ NTA APIは使わない
+    const cacheStat = await bootstrapCacheFromFiles(
+      admin,
+      tenantId,
+      filters.prefectures
+    );
+
+    // ② 既存 website / corporate_number を収集（重複避け）
     const [exWeb, exCorp] = await Promise.all([
       admin.from("form_prospects").select("website").eq("tenant_id", tenantId),
       admin
@@ -714,105 +669,105 @@ export async function POST(req: Request) {
         .filter(Boolean)
     );
 
+    // ③ キャッシュから母集団を作る
+    const basePool = await pickCandidatesFromCache(
+      admin,
+      tenantId,
+      filters,
+      want,
+      seed
+    );
+    if (!basePool.length) {
+      // キャッシュが空
+      return NextResponse.json({
+        inserted: 0,
+        rows: [],
+        rejected: [],
+        error:
+          "候補が見つかりません。NTA API を無効化中のため、web/data/cache/*.jsonl からの取り込みが必要です。",
+        note:
+          cacheStat.files > 0
+            ? `cache_bootstrap: files=${cacheStat.files}, inserted=${cacheStat.inserted}`
+            : "cache_bootstrap: no files",
+      });
+    }
+
+    // ④ LLMでHP解決（任意）→ 到達・抽出 → フィルタ
+    const CONCURRENCY = 8;
     let accepted: Candidate[] = [];
     let rejected: Rejected[] = [];
 
-    const MAX_ROUNDS = 6;
-    const CONCURRENCY = 8;
-    const TIME_BUDGET = 28_000;
-    const t0 = Date.now();
+    // 法人番号重複（既存）を先に除外
+    const base = dedupeCands(
+      basePool.filter(
+        (c) =>
+          !!c.company_name &&
+          !!(c.corporate_number || "").trim() &&
+          !existingCorpNum.has((c.corporate_number || "").trim())
+      )
+    );
 
-    for (let round = 1; round <= MAX_ROUNDS; round++) {
-      const remain = Math.max(0, want - accepted.length);
-      if (remain === 0) break;
-
-      // A) キャッシュ優先
-      const fromCache = await fetchFromCache(
-        admin,
-        filters,
-        remain,
-        `${seed}-cache-${round}`
+    // HP解決
+    const withSite: Candidate[] = [];
+    for (let i = 0; i < base.length; i += CONCURRENCY) {
+      const chunk = base.slice(i, i + CONCURRENCY);
+      const solved = await Promise.all(
+        chunk.map(async (cand) => {
+          if (!cand.website) cand.website = await resolveHomepageWithLLM(cand);
+          return cand;
+        })
       );
-
-      // B) 不足分は国税庁 API（町丁名シードで網羅）
-      const needApi = accepted.length + fromCache.length < want;
-      const fromApi = needApi
-        ? await fetchFromNTA(filters, remain, `${seed}-nta-${round}`)
-        : [];
-
-      // base 候補の重複除去 + 既存法人番号除外
-      const base = dedupeCands([...fromCache, ...fromApi]).filter((c) => {
-        const num = (c.corporate_number || "").trim();
-        return !!c.company_name && !!num && !existingCorpNum.has(num);
-      });
-
-      if (!base.length) {
-        if (Date.now() - t0 > TIME_BUDGET) break;
-        await sleep(120);
-        continue;
-      }
-
-      // C-1) 公式HP解決（LLM 任意）
-      const withSite: Candidate[] = [];
-      for (let i = 0; i < base.length; i += CONCURRENCY) {
-        const chunk = base.slice(i, i + CONCURRENCY);
-        const solved = await Promise.all(
-          chunk.map(async (cand) => {
-            if (!cand.website)
-              cand.website = await resolveHomepageWithLLM(cand);
-            return cand;
-          })
-        );
-        withSite.push(...solved);
-        if (Date.now() - t0 > TIME_BUDGET) break;
-      }
-
-      // 公式サイト未解決は reject
-      const resolvable = withSite.filter((x) => !!x.website);
-      const unresolved = withSite.filter((x) => !x.website);
-      for (const ng of unresolved) {
-        rejected.push({ ...ng, reject_reasons: ["公式サイト未解決"] });
-      }
-      if (!resolvable.length) {
-        if (Date.now() - t0 > TIME_BUDGET) break;
-        continue;
-      }
-
-      // C-2) 到達/抽出 → 最終フィルタ
-      for (let i = 0; i < resolvable.length; i += CONCURRENCY) {
-        const chunk = resolvable.slice(i, i + CONCURRENCY);
-        const verified = await Promise.all(
-          chunk.map((cand) => verifyAndEnrichWebsite(cand))
-        );
-
-        for (const cc of verified) {
-          if (!cc) continue;
-          const webKey = String(cc.website || "").toLowerCase();
-          if (existingWebsite.has(webKey)) {
-            rejected.push({ ...cc, reject_reasons: ["既存URLと重複"] });
-            continue;
-          }
-          const fin = matchesFilters(cc, filters);
-          if (fin.ok) {
-            accepted.push(cc);
-            existingWebsite.add(webKey);
-            if (accepted.length >= want) break;
-          } else {
-            rejected.push({ ...cc, reject_reasons: fin.reasons });
-          }
-        }
-        if (accepted.length >= want) break;
-        if (Date.now() - t0 > TIME_BUDGET) break;
-      }
-
-      accepted = dedupeCands(accepted).slice(0, want);
-      if (Date.now() - t0 > TIME_BUDGET) break;
-      await sleep(80);
+      withSite.push(...solved);
     }
 
-    // 保存
-    const toInsert = accepted.slice(0, want);
-    const rows = toInsert.map((c) => ({
+    // 未解決は reject
+    const resolvable = withSite.filter((x) => !!x.website);
+    const unresolved = withSite.filter((x) => !x.website);
+    for (const ng of unresolved) {
+      rejected.push({ ...ng, reject_reasons: ["公式サイト未解決"] });
+    }
+    if (!resolvable.length) {
+      // サイト解決ゼロでも、不適合は返すのでUIに出る
+      return NextResponse.json({
+        inserted: 0,
+        rows: [],
+        rejected,
+        note:
+          cacheStat.files > 0
+            ? `cache_bootstrap: files=${cacheStat.files}, inserted=${cacheStat.inserted}`
+            : undefined,
+      });
+    }
+
+    for (let i = 0; i < resolvable.length; i += CONCURRENCY) {
+      const chunk = resolvable.slice(i, i + CONCURRENCY);
+      const verified = await Promise.all(
+        chunk.map((c) => verifyAndEnrichWebsite(c))
+      );
+
+      for (const cc of verified) {
+        if (!cc) continue;
+        const webKey = String(cc.website || "").toLowerCase();
+        if (existingWebsite.has(webKey)) {
+          rejected.push({ ...cc, reject_reasons: ["既存URLと重複"] });
+          continue;
+        }
+        const fin = matchesFilters(cc, filters);
+        if (fin.ok) {
+          accepted.push(cc);
+          existingWebsite.add(webKey);
+          if (accepted.length >= want) break;
+        } else {
+          rejected.push({ ...cc, reject_reasons: fin.reasons });
+        }
+      }
+      if (accepted.length >= want) break;
+    }
+
+    accepted = dedupeCands(accepted).slice(0, want);
+
+    // ⑤ form_prospects へ保存
+    const rows = accepted.map((c) => ({
       tenant_id: tenantId,
       company_name: c.company_name,
       website: c.website || null,
@@ -822,7 +777,7 @@ export async function POST(req: Request) {
         [c.industry_large, c.industry_small].filter(Boolean).join(" / ") ||
         null,
       company_size: c.company_size_extracted ?? c.company_size ?? null,
-      job_site_source: "nta-cache+nta-api+web",
+      job_site_source: "nta-cache+web",
       status: "new",
       prefectures: c.prefectures ?? [],
       corporate_number: c.corporate_number ?? null,
@@ -851,7 +806,7 @@ export async function POST(req: Request) {
       const ex = dedupedRejectedMap.get(k);
       if (!ex) dedupedRejectedMap.set(k, it);
       else {
-        const merged: Rejected = {
+        dedupedRejectedMap.set(k, {
           ...ex,
           reject_reasons: Array.from(
             new Set([
@@ -859,8 +814,7 @@ export async function POST(req: Request) {
               ...(it.reject_reasons || []),
             ])
           ),
-        };
-        dedupedRejectedMap.set(k, merged);
+        });
       }
     }
     const dedupedRejected = Array.from(dedupedRejectedMap.values());
@@ -869,9 +823,10 @@ export async function POST(req: Request) {
       inserted: inserted?.length || 0,
       rows: inserted || [],
       rejected: dedupedRejected.slice(0, Math.max(60, want * 3)),
-      note: !OPENAI_API_KEY
-        ? "OPENAI_API_KEY 未設定のため HP 解決は非LLM優先で実行しています。"
-        : undefined,
+      note:
+        cacheStat.files > 0
+          ? `cache_bootstrap: files=${cacheStat.files}, inserted=${cacheStat.inserted}`
+          : undefined,
     });
   } catch (e: unknown) {
     const msg = (e as Error)?.message || String(e);
