@@ -1,14 +1,17 @@
 // web/src/app/form-outreach/companies/fetch/page.tsx
 "use client";
+
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import AppHeader from "@/components/AppHeader";
 import Link from "next/link";
 import { CheckCircle, XCircle, Loader2, Play } from "lucide-react";
 
+/** ===== LocalStorage Keys ===== */
 const LS_KEY = "fo_manual_fetch_latest";
 const LS_FETCH_COUNT = "fo_manual_fetch_count";
 const LS_REJECT_KEY = "fo_manual_fetch_rejected";
 
+/** ===== Types ===== */
 type StepState = "idle" | "running" | "done" | "error";
 
 type AddedRow = {
@@ -47,21 +50,13 @@ type RejectedRow = {
   reject_reasons: string[];
 };
 
-type RunResult = {
-  inserted?: number;
-  rows?: AddedRow[];
-  rejected?: RejectedRow[];
-  error?: string;
-  note?: string;
-};
-
 type Filters = {
   prefectures: string[];
   employee_size_ranges: string[];
   keywords: string[];
   industries_large: string[];
   industries_small: string[];
-  // 新規レンジ系
+  // レンジ系
   capital_min?: number | null;
   capital_max?: number | null;
   established_from?: string | null; // YYYY-MM-DD
@@ -69,27 +64,33 @@ type Filters = {
   updated_at?: string | null;
 };
 
-// フロー可視化（任意に増減）
-const FLOW_TITLES = [
-  "条件読み込み/表示",
-  "国税庁から候補抽出（ランダム地域）",
-  "登記付与（資本金・設立）",
-  "事前フィルタ（資本金/設立）",
-  "公式HP解決（LLM）",
-  "到達性チェック（HTTP）",
-  "メール/フォーム抽出",
-  "従業員規模推定",
-  "都道府県/業種推定",
-  "保存（DB）/ 不適合集計",
+/** ===== Flow Titles =====
+ * Phase A: 1〜6（NTA→キャッシュ）
+ * Phase B: 7〜9（HP解決→抽出→prospects保存）
+ */
+const FLOW_A_TITLES = [
+  "1. 条件読み込み/表示",
+  "2. 国税庁をクロール",
+  "3. ランダム地域/企業抽出",
+  "4. 詳細補完（名称/住所）",
+  "5. キャッシュ保存（nta_corporates_cache）",
+  "6. 実行数到達まで反復",
+];
+
+const FLOW_B_TITLES = [
+  "7. 新規キャッシュ分のHP推定",
+  "8. 到達性チェック/会社概要抽出",
+  "9. form_prospects保存/反映",
 ];
 
 export default function ManualFetch() {
+  /** ===== State ===== */
   const [tenantId, setTenantId] = useState<string | null>(null);
   const [msg, setMsg] = useState("");
-  const [s, setS] = useState<StepState[]>(
-    Array(FLOW_TITLES.length).fill("idle")
-  );
+  const totalSteps = FLOW_A_TITLES.length + FLOW_B_TITLES.length;
+  const [s, setS] = useState<StepState[]>(Array(totalSteps).fill("idle"));
   const [activeIdx, setActiveIdx] = useState<number>(-1);
+
   const [added, setAdded] = useState<AddedRow[]>([]);
   const [rejected, setRejected] = useState<RejectedRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -109,25 +110,26 @@ export default function ManualFetch() {
 
   const [countModalOpen, setCountModalOpen] = useState(false);
   const [fetchTotal, setFetchTotal] = useState<number>(60);
+
   const abortRef = useRef<AbortController | null>(null);
   const cancelledRef = useRef(false);
 
+  /** ===== Effects: tenant & filters & restore local ===== */
   useEffect(() => {
     (async () => {
       try {
-        // me
+        // me/tenant
         let meRes = await fetch("/api/me/tenant", { cache: "no-store" });
         if (!meRes.ok)
           meRes = await fetch("/api/me/tenant/", { cache: "no-store" });
         const me = await meRes.json().catch(() => ({}));
-        setTenantId(me?.tenant_id ?? me?.profile?.tenant_id ?? null);
+        const tid = me?.tenant_id ?? me?.profile?.tenant_id ?? null;
+        setTenantId(tid);
 
         // filters
         const fRes = await fetch("/api/form-outreach/settings/filters", {
           cache: "no-store",
-          headers: me?.tenant_id
-            ? { "x-tenant-id": String(me.tenant_id) }
-            : undefined,
+          headers: tid ? { "x-tenant-id": String(tid) } : undefined,
         });
         const fj = await fRes.json().catch(() => ({}));
         const incoming = fj?.filters ?? {};
@@ -166,7 +168,7 @@ export default function ManualFetch() {
           updated_at: incoming.updated_at ?? null,
         });
 
-        // keep "added"
+        // keep "added" within 24h
         const raw = localStorage.getItem(LS_KEY);
         if (raw) {
           const obj = JSON.parse(raw);
@@ -174,6 +176,7 @@ export default function ManualFetch() {
           if (Date.now() - ts < 24 * 3600 * 1000) setAdded(obj.rows ?? []);
           else localStorage.removeItem(LS_KEY);
         }
+
         // keep "rejected"
         const rejRaw = localStorage.getItem(LS_REJECT_KEY);
         if (rejRaw) {
@@ -184,6 +187,7 @@ export default function ManualFetch() {
           else localStorage.removeItem(LS_REJECT_KEY);
         }
 
+        // last fetch count
         const last = Number(localStorage.getItem(LS_FETCH_COUNT));
         if (Number.isFinite(last) && last > 0)
           setFetchTotal(Math.max(10, Math.min(2000, last)));
@@ -191,24 +195,23 @@ export default function ManualFetch() {
         setMsg(String(e?.message || e));
       }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const anyRunning = loading; // シンプルに実行状態で判定
+  const anyRunning = loading;
 
-  /** 実行/中止ボタンのクリック */
+  /** ===== Actions ===== */
   const handleRunButton = () => {
     if (anyRunning) {
-      // 中止
       cancelledRef.current = true;
       abortRef.current?.abort();
       setMsg("実行を中止しています…");
       return;
     }
-    // 実行開始（件数モーダル）
-    if (!tenantId)
-      return setMsg(
-        "テナントが解決できませんでした。ログインを確認してください。"
-      );
+    if (!tenantId) {
+      setMsg("テナントが解決できませんでした。ログインを確認してください。");
+      return;
+    }
     setCountModalOpen(true);
   };
 
@@ -218,40 +221,53 @@ export default function ManualFetch() {
     await runLoop(fetchTotal);
   };
 
-  /** 逐次保存 & 逐次レンダリング。必ず total 件を目指し、上限試行まで自動再試行 */
+  /** 実行ループ：Phase A（crawl）→ Phase B（enrich） */
   const runLoop = async (total: number) => {
     if (!tenantId) return;
     setMsg("");
     setLoading(true);
     cancelledRef.current = false;
-    setS(Array(FLOW_TITLES.length).fill("idle"));
+
+    // Steps init
+    setS(Array(totalSteps).fill("idle"));
     setActiveIdx(-1);
     abortRef.current?.abort();
     abortRef.current = new AbortController();
 
     try {
-      // 0: 条件表示（固定）
+      /** ---- Phase 0: 条件表示（A-1） ---- */
       setActiveIdx(0);
       setS((a) => a.map((v, i) => (i === 0 ? "running" : "idle")));
       await delay(180);
       setS((a) => a.map((v, i) => (i === 0 ? "done" : v)));
       setActiveIdx(-1);
 
-      let done = 0;
+      /** ---- Phase A: NTA → キャッシュ保存（1〜6） ---- */
+      let savedCache = 0;
       let attempts = 0;
-      const MAX_ATTEMPTS = Math.ceil(total / 5) + 10; // 充分な再試行枠
-      const BATCH = Math.min(25, Math.max(8, Math.floor(total / 4))); // 自動バッチ
+      const MAX_ATTEMPTS = Math.ceil(total / 5) + 10;
+      const BATCH = Math.min(25, Math.max(8, Math.floor(total / 4)));
 
-      while (done < total && attempts < MAX_ATTEMPTS) {
+      while (savedCache < total && attempts < MAX_ATTEMPTS) {
         if (cancelledRef.current) throw new Error("ABORTED");
         attempts++;
-        const want = Math.min(BATCH, total - done);
+        const want = Math.min(BATCH, total - savedCache);
         const seed = `${Date.now()}-${attempts}`;
 
-        // フローの擬似進行（API待ちの間、1→FLOW_TITLES.length-2 を順回し）
-        const anim = animateSteps(setS, setActiveIdx, FLOW_TITLES.length);
+        // A-2〜A-5: アニメ進行（視覚的フィードバック）
+        for (let i = 1; i <= 4; i++) {
+          setActiveIdx(i);
+          setS((a) =>
+            a.map((v, idx) =>
+              idx === i ? "running" : idx < i && v === "idle" ? "done" : v
+            )
+          );
+          await delay(160);
+          setS((a) => a.map((v, idx) => (idx === i ? "done" : v)));
+        }
 
-        const r = await fetch("/api/form-outreach/companies/fetch", {
+        // 実API: crawl
+        const r = await fetch("/api/form-outreach/companies/crawl", {
           method: "POST",
           headers: {
             "x-tenant-id": tenantId,
@@ -260,86 +276,97 @@ export default function ManualFetch() {
           body: JSON.stringify({ filters, want, seed }),
           signal: abortRef.current.signal,
         });
-        const j: RunResult = await safeJson(r);
+        const j = await safeJson(r);
 
-        // 保存（末尾ステップ）を明示
-        anim.stop();
-        const lastIdx = FLOW_TITLES.length - 1;
-        setActiveIdx(lastIdx);
-        setS((a) =>
-          a.map((v, i) =>
-            i === lastIdx
-              ? "running"
-              : i < lastIdx
-              ? a[i] === "idle"
-                ? "done"
-                : a[i]
-              : v
-          )
-        );
+        // A-5 → A-6（保存反映）
+        setActiveIdx(5);
+        setS((a) => a.map((v, idx) => (idx === 5 ? "running" : v)));
         await delay(120);
 
         if (!r.ok) {
-          if (cancelledRef.current) throw new Error("ABORTED");
-          throw new Error(j?.error || `fetch failed (${r.status})`);
+          setS((a) => a.map((v, idx) => (idx === 5 ? "error" : v)));
+          throw new Error(j?.error || `crawl failed (${r.status})`);
         }
 
-        const rows = j.rows ?? [];
-        if (rows.length) {
-          setAdded((prev) => {
-            const next = [...rows, ...prev];
-            localStorage.setItem(
-              LS_KEY,
-              JSON.stringify({ ts: new Date().toISOString(), rows: next })
-            );
-            return next;
-          });
-        }
-        if (Array.isArray(j.rejected) && j.rejected.length) {
-          const rejList: RejectedRow[] = j.rejected as RejectedRow[];
-          setRejected((prev) => {
-            const next = dedupeRejected([...rejList, ...prev]);
-            localStorage.setItem(
-              LS_REJECT_KEY,
-              JSON.stringify({ ts: new Date().toISOString(), rows: next })
-            );
-            return next;
-          });
-        }
+        const newCache = Math.max(0, Number(j?.new_cache || 0));
+        savedCache += newCache;
 
-        const inc = Number.isFinite(j.inserted)
-          ? Number(j.inserted)
-          : rows.length;
-        done += inc;
-
-        setS((a) => a.map((v, i) => (i === lastIdx ? "done" : v)));
+        setS((a) => a.map((v, idx) => (idx === 5 ? "done" : v)));
         setActiveIdx(-1);
-        setMsg(`取得進行中：${done}/${total} 件`);
+        setMsg(`キャッシュ保存進行：${savedCache}/${total} 件`);
 
-        if (inc === 0) {
-          await delay(240);
-          continue;
-        }
+        if (newCache === 0) await delay(240);
       }
 
+      /** ---- Phase B: エンリッチ（7〜9） ---- */
+      const since = new Date(Date.now() - 15 * 60 * 1000).toISOString(); // 直近15分の新規キャッシュを対象
+
+      // B-7: HP推定
+      setActiveIdx(6);
+      setS((a) => a.map((v, idx) => (idx === 6 ? "running" : v)));
+      await delay(160);
+      setS((a) => a.map((v, idx) => (idx === 6 ? "done" : v)));
+
+      // B-8: 到達/抽出（実APIに合わせてB-8〜9まとめて実行）
+      setActiveIdx(7);
+      setS((a) => a.map((v, idx) => (idx === 7 ? "running" : v)));
+
+      const enrichRes = await fetch("/api/form-outreach/companies/enrich", {
+        method: "POST",
+        headers: {
+          "x-tenant-id": tenantId,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ since, want: total, try_llm: true }),
+        signal: abortRef.current.signal,
+      });
+      const ej = await safeJson(enrichRes);
+
+      // B-8 done
+      setS((a) => a.map((v, idx) => (idx === 7 ? "done" : v)));
+
+      // B-9: 保存反映
+      const lastIdx = FLOW_A_TITLES.length + 2; // 0-based index: B-9
+      setActiveIdx(lastIdx);
+      setS((a) => a.map((v, idx) => (idx === lastIdx ? "running" : v)));
+      await delay(120);
+
+      if (!enrichRes.ok) {
+        setS((a) => a.map((v, idx) => (idx === lastIdx ? "error" : v)));
+        throw new Error(ej?.error || `enrich failed (${enrichRes.status})`);
+      }
+
+      const rows: AddedRow[] = Array.isArray(ej?.rows) ? ej.rows : [];
+      if (rows.length) {
+        setAdded((prev) => {
+          const next = [...rows, ...prev];
+          localStorage.setItem(
+            LS_KEY,
+            JSON.stringify({ ts: new Date().toISOString(), rows: next })
+          );
+          return next;
+        });
+      }
+
+      setS((a) => a.map((v, idx) => (idx === lastIdx ? "done" : v)));
+      setActiveIdx(-1);
+
       setMsg(
-        done >= total
-          ? `実行完了：${done}/${total} 件保存`
-          : `完了（不足）：${done}/${total} 件。条件を厳格に満たす候補が不足しました。`
+        `完了：キャッシュ新規 ${savedCache} 件 → prospects追加 ${
+          Number.isFinite(ej?.inserted) ? ej.inserted : rows.length
+        } 件`
       );
     } catch (e: any) {
       setActiveIdx(-1);
       setS((arr) => arr.map((v) => (v === "running" ? "error" : v)));
-      if (String(e?.message || e) === "ABORTED") {
-        setMsg("実行を中止しました。");
-      } else {
-        setMsg(String(e?.message || e));
-      }
+      if (String(e?.message || e) === "ABORTED") setMsg("実行を中止しました。");
+      else setMsg(String(e?.message || e));
     } finally {
       setLoading(false);
     }
   };
 
+  /** 取消（今回追加分を削除） */
   const cancelAdditions = async () => {
     if (!tenantId || added.length === 0) return;
     if (!confirm("今回追加分をすべて取り消して削除します。よろしいですか？"))
@@ -379,7 +406,6 @@ export default function ManualFetch() {
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j?.error || "manual add failed");
 
-      // 追加先の一覧に反映
       if (j?.row) {
         setAdded((prev) => {
           const next = [j.row as AddedRow, ...prev];
@@ -390,7 +416,6 @@ export default function ManualFetch() {
           return next;
         });
       }
-      // 不適合からは除去
       setRejected((prev) => {
         const next = prev.filter((x) => !sameRejected(x, row));
         localStorage.setItem(
@@ -417,6 +442,7 @@ export default function ManualFetch() {
     });
   };
 
+  /** フィルタ表示用サマリ */
   const summaryParts = useMemo(() => {
     const pref = filters.prefectures.length
       ? filters.prefectures.join(" / ")
@@ -449,17 +475,19 @@ export default function ManualFetch() {
     return { pref, size, kw, ind, cap, est };
   }, [filters]);
 
+  /** ===== Render ===== */
   return (
     <>
       <AppHeader showBack />
       <main className="mx-auto max-w-6xl p-6">
+        {/* Header & Actions */}
         <div className="mb-4 flex items-start justify-between gap-3">
           <div className="min-w-0">
             <h1 className="text-2xl font-semibold text-neutral-900">
               企業リスト手動取得
             </h1>
             <p className="text-sm text-neutral-500">
-              進行をフローチャートで可視化。保存は逐次反映。紺色バッジは非表示。
+              二段フローで保存を逐次反映。アイコンの動きは従来通りです。
             </p>
             <p className="text-xs text-neutral-500 mt-1 break-words">
               テナント: <span className="font-mono">{tenantId ?? "-"}</span>
@@ -467,10 +495,7 @@ export default function ManualFetch() {
               現在のフィルタ:{" "}
               <span className="opacity-80">都道府県={summaryParts.pref}</span>
               <br />
-              <span className="opacity-80">
-                {/* ご要望: 「規模」の前で改行 */}
-                規模={summaryParts.size}
-              </span>
+              <span className="opacity-80">規模={summaryParts.size}</span>
               <br />
               <span className="opacity-80">資本金={summaryParts.cap}</span>
               <br />
@@ -509,22 +534,22 @@ export default function ManualFetch() {
           </div>
         </div>
 
-        {/* フローチャート */}
+        {/* Phase A */}
         <section className="rounded-2xl border border-neutral-200 p-4 mb-4">
           <div className="mb-3 flex items-center justify-between">
-            <div className="text-sm font-medium text-neutral-800">フロー</div>
-            <div className="flex items-center gap-2">
-              <Link
-                href="/form-outreach/settings/filters"
-                className="rounded-lg border border-neutral-200 px-3 py-2 text-xs hover:bg-neutral-50"
-              >
-                取得フィルタ設定へ
-              </Link>
+            <div className="text-sm font-medium text-neutral-800">
+              Phase A: NTAクロール → キャッシュ保存
             </div>
+            <Link
+              href="/form-outreach/settings/filters"
+              className="rounded-lg border border-neutral-200 px-3 py-2 text-xs hover:bg-neutral-50"
+            >
+              取得フィルタ設定へ
+            </Link>
           </div>
 
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-3 lg:grid-cols-5">
-            {FLOW_TITLES.map((title, idx) => (
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-3 lg:grid-cols-6">
+            {FLOW_A_TITLES.map((title, idx) => (
               <FlowNode
                 key={title}
                 title={title}
@@ -535,7 +560,27 @@ export default function ManualFetch() {
           </div>
         </section>
 
-        {/* 逐次レンダリングテーブル（今回追加） */}
+        {/* Phase B */}
+        <section className="rounded-2xl border border-neutral-200 p-4 mb-4">
+          <div className="mb-3 text-sm font-medium text-neutral-800">
+            Phase B: HP解決 → 会社概要抽出 → form_prospects保存
+          </div>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+            {FLOW_B_TITLES.map((title, bIdx) => {
+              const idx = FLOW_A_TITLES.length + bIdx;
+              return (
+                <FlowNode
+                  key={title}
+                  title={title}
+                  state={s[idx]}
+                  active={activeIdx === idx}
+                />
+              );
+            })}
+          </div>
+        </section>
+
+        {/* 今回追加テーブル */}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden">
           <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 bg-neutral-50">
             <div className="text-sm font-medium text-neutral-800">
@@ -642,7 +687,7 @@ export default function ManualFetch() {
           </div>
         </section>
 
-        {/* フィルタ不適合（横スクロール対応 + 手動追加） */}
+        {/* 不適合一覧（手動追加可） */}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden mt-6">
           <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 bg-neutral-50">
             <div className="text-sm font-medium text-neutral-800">
@@ -790,6 +835,8 @@ export default function ManualFetch() {
   );
 }
 
+/** ===== UI Parts ===== */
+
 function FlowNode({
   title,
   state,
@@ -892,10 +939,12 @@ function CountModal({
   );
 }
 
-/** ===== helpers ===== */
+/** ===== Helpers ===== */
+
 function delay(ms: number) {
   return new Promise((res) => setTimeout(res, ms));
 }
+
 async function safeJson(res: Response) {
   try {
     const t = await res.text();
@@ -903,35 +952,6 @@ async function safeJson(res: Response) {
   } catch {
     return {};
   }
-}
-
-/** API待機中に 1→(FLOW_TITLES.length-2) を順に running→done で進める簡易アニメーション */
-function animateSteps(
-  setS: React.Dispatch<React.SetStateAction<StepState[]>>,
-  setActiveIdx: React.Dispatch<React.SetStateAction<number>>,
-  totalSteps: number
-) {
-  let stopped = false;
-  (async () => {
-    for (let i = 1; i <= Math.max(1, totalSteps - 2); i++) {
-      if (stopped) break;
-      setActiveIdx(i);
-      setS((a) =>
-        a.map((v, idx) =>
-          idx === i ? "running" : idx < i && v === "idle" ? "done" : v
-        )
-      );
-      await delay(180);
-      if (stopped) break;
-      setS((a) => a.map((v, idx) => (idx === i ? "done" : v)));
-    }
-  })();
-  return {
-    stop: () => {
-      stopped = true;
-      setActiveIdx(-1);
-    },
-  };
 }
 
 function normalizeSite(u?: string | null) {
@@ -960,7 +980,6 @@ function dedupeRejected(list: RejectedRow[]): RejectedRow[] {
     const existed = map.get(key);
     if (!existed) map.set(key, r);
     else {
-      // 不採用理由はマージ
       const mergedReasons = Array.from(
         new Set([
           ...(existed.reject_reasons || []),
