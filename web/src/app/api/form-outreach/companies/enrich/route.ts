@@ -11,16 +11,13 @@ const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 const SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
 
-/** Google Custom Search (任意) */
 const GOOGLE_CSE_KEY = process.env.GOOGLE_CSE_KEY || "";
 const GOOGLE_CSE_CX = process.env.GOOGLE_CSE_CX || "";
-
-/** Google Maps Places API (任意) */
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || "";
 
 /** ========= Types ========= */
 type EnrichBody = {
-  since?: string; // ISO
+  since?: string;
   want?: number;
   try_llm?: boolean;
 };
@@ -45,7 +42,7 @@ type AddedRow = {
   industry?: string | null;
   company_size?: string | null;
   prefectures?: string[] | null;
-  job_site_source?: string | null; // ← "google" | "map" など
+  job_site_source?: string | null; // "google" | "map" など
   source_site?: string | null;
   corporate_number?: string | null;
   hq_address?: string | null;
@@ -112,7 +109,6 @@ function normalizeUrl(u?: string | null): string | null {
   try {
     const url = new URL(/^https?:\/\//i.test(u) ? u : `https://${u}`);
     url.hash = "";
-    // www.の有無は正規化（wwwは残す）
     if (url.pathname === "") url.pathname = "/";
     return url.toString();
   } catch {
@@ -123,8 +119,8 @@ function normalizeUrl(u?: string | null): string | null {
 function isLikelyOfficial(url: string, company?: string | null): boolean {
   const badHosts = [
     "facebook.com",
-    "twitter.com",
     "x.com",
+    "twitter.com",
     "instagram.com",
     "linkedin.com",
     "indeed.com",
@@ -134,14 +130,10 @@ function isLikelyOfficial(url: string, company?: string | null): boolean {
     "en-gage.net",
     "mynavi",
     "doda",
-    "r-agent",
     "townwork",
     "recruit",
-    "hataractive",
     "yahoo.co.jp",
     "wikipedia.org",
-    "ja.wikipedia.org",
-    "biz-journal",
     "note.com",
   ];
   try {
@@ -151,10 +143,8 @@ function isLikelyOfficial(url: string, company?: string | null): boolean {
     return false;
   }
   if (company) {
-    const lc = company.toLowerCase();
-    // “会社名”を含むドメイン/タイトルが望ましいが、ここではドメイン匹配のみ簡易に
-    // ここは必要に応じて強化可能
-    if (url.toLowerCase().includes(lc.replace(/\s+/g, ""))) return true;
+    const lc = company.toLowerCase().replace(/\s+/g, "");
+    if (url.toLowerCase().includes(lc)) return true;
   }
   return true;
 }
@@ -163,7 +153,6 @@ async function headOk(url: string): Promise<boolean> {
   try {
     const r = await fetchWithTimeout(url, { method: "HEAD" }, 6000);
     if (r.ok) return true;
-    // 一部サイトはHEAD拒否、GETで確認
     const g = await fetchWithTimeout(url, { method: "GET" }, 8000);
     return g.ok;
   } catch {
@@ -171,12 +160,12 @@ async function headOk(url: string): Promise<boolean> {
   }
 }
 
-/** ========= Google 検索 → 公式HP候補 ========= */
+/** ========= Google 検索 ========= */
 async function findWebsiteByGoogleCSE(
   company: string,
   address?: string | null
 ): Promise<string | null> {
-  if (!GOOGLE_CSE_KEY || !GOOGLE_CSE_CX) return null; // 未設定ならスキップ
+  if (!GOOGLE_CSE_KEY || !GOOGLE_CSE_CX) return null;
   const q = encodeURIComponent(`${company} ${address || ""}`.trim());
   const url = `https://www.googleapis.com/customsearch/v1?key=${GOOGLE_CSE_KEY}&cx=${GOOGLE_CSE_CX}&num=5&q=${q}`;
   try {
@@ -190,18 +179,16 @@ async function findWebsiteByGoogleCSE(
       if (!isLikelyOfficial(link, company)) continue;
       if (await headOk(link)) return link;
     }
-  } catch {
-    // noop
-  }
+  } catch {}
   return null;
 }
 
-/** ========= Google Maps → Place Details website フォールバック ========= */
+/** ========= Google Maps ========= */
 async function findWebsiteByGoogleMaps(
   company: string,
   address?: string | null
 ): Promise<string | null> {
-  if (!GOOGLE_MAPS_API_KEY) return null; // 未設定ならスキップ
+  if (!GOOGLE_MAPS_API_KEY) return null;
   const query = encodeURIComponent(`${company} ${address || ""}`.trim());
   const textSearch = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${query}&language=ja&key=${GOOGLE_MAPS_API_KEY}`;
   try {
@@ -209,9 +196,6 @@ async function findWebsiteByGoogleMaps(
     if (!r.ok) return null;
     const j = (await r.json()) as any;
     const cand: any[] = Array.isArray(j?.results) ? j.results : [];
-    if (!cand.length) return null;
-
-    // スコア高い順に詳細へ
     for (const c of cand) {
       const placeId: string | undefined = c?.place_id;
       if (!placeId) continue;
@@ -226,21 +210,16 @@ async function findWebsiteByGoogleMaps(
       const site = normalizeUrl(siteRaw);
       if (site && (await headOk(site))) return site;
     }
-  } catch {
-    // noop
-  }
+  } catch {}
   return null;
 }
 
 /** ========= Supabase ========= */
-function getAdmin(): {
-  sb: any;
-  usingServiceRole: boolean;
-} {
+function getAdmin() {
   if (!SUPABASE_URL) throw new Error("NEXT_PUBLIC_SUPABASE_URL is missing");
   if (SERVICE_ROLE) {
     return {
-      sb: createClient(SUPABASE_URL, SERVICE_ROLE) as any,
+      sb: createClient(SUPABASE_URL, SERVICE_ROLE),
       usingServiceRole: true,
     };
   }
@@ -248,20 +227,16 @@ function getAdmin(): {
     throw new Error(
       "SUPABASE_SERVICE_ROLE_KEY / NEXT_PUBLIC_SUPABASE_ANON_KEY missing"
     );
-  return {
-    sb: createClient(SUPABASE_URL, ANON_KEY) as any,
-    usingServiceRole: false,
-  };
+  return { sb: createClient(SUPABASE_URL, ANON_KEY), usingServiceRole: false };
 }
 
-/** ========= 直近キャッシュの取得 ========= */
+/** ========= 直近キャッシュ ========= */
 async function loadRecentCache(
   sb: any,
   tenantId: string,
   sinceISO: string,
   limit: number
 ): Promise<CacheRow[]> {
-  // 直近の nta_corporates_cache から未処理の候補を取得（必要なら適宜条件を足す）
   const { data, error } = await sb
     .from("nta_corporates_cache")
     .select(
@@ -270,12 +245,12 @@ async function loadRecentCache(
     .eq("tenant_id", tenantId)
     .gte("scraped_at", sinceISO)
     .order("scraped_at", { ascending: false })
-    .limit(Math.max(10, limit * 3)); // 少し多めに持ってくる
+    .limit(Math.max(10, limit * 3));
   if (error) throw new Error(error.message);
   return (data || []) as CacheRow[];
 }
 
-/** ========= 既存prospects重複チェック ========= */
+/** ========= 重複存在チェック ========= */
 async function existsProspect(
   sb: any,
   tenantId: string,
@@ -293,7 +268,7 @@ async function existsProspect(
   return (count ?? 0) > 0;
 }
 
-/** ========= prospects へUPSERT ========= */
+/** ========= 競合安全なUPSERT（重複時は既存を返す） ========= */
 async function upsertProspect(
   sb: any,
   row: Omit<AddedRow, "id" | "created_at"> & { created_at?: string | null }
@@ -301,42 +276,79 @@ async function upsertProspect(
   const now = new Date().toISOString();
   const payload = { ...row, created_at: row.created_at ?? now };
 
-  // UPSERT（テーブル側にユニークが無い場合は挿入→重複エラーを許容）
+  // まず素直に INSERT（同時実行で衝突したら 23505 を拾う）
   let ins = await sb
     .from("form_prospects")
-    .upsert(payload, {
-      onConflict: "tenant_id,corporate_number",
-      ignoreDuplicates: false,
-    })
+    .insert(payload)
     .select("*")
     .limit(1)
     .maybeSingle();
 
-  // onConflict列が存在しないなどで失敗した場合のフォールバック
-  if (ins.error && /on conflict|conflict target/i.test(ins.error.message)) {
-    ins = await sb
+  if (!ins.error) {
+    return (ins.data || null) as AddedRow | null;
+  }
+
+  const msg: string = String(ins.error?.message || "");
+  const isDup =
+    ins.error?.code === "23505" ||
+    /duplicate key value|ux_fpr_tenant_corpnum/i.test(msg);
+
+  if (!isDup) {
+    throw new Error(ins.error.message);
+  }
+
+  // 重複：ユニークは (tenant_id, corporate_number) 想定
+  if (row.corporate_number) {
+    // 既存行を取りにいく
+    const ex = await sb
       .from("form_prospects")
-      .insert(payload)
       .select("*")
+      .eq("tenant_id", row.tenant_id)
+      .eq("corporate_number", row.corporate_number)
       .limit(1)
       .maybeSingle();
+
+    if (!ex.error && ex.data) {
+      // 既存があり、空欄が多い場合は控えめに更新（website 等）
+      const patch: Record<string, any> = {};
+      if (row.website && !ex.data.website) patch.website = row.website;
+      if (row.job_site_source && !ex.data.job_site_source)
+        patch.job_site_source = row.job_site_source;
+      if (row.hq_address && !ex.data.hq_address)
+        patch.hq_address = row.hq_address;
+
+      if (Object.keys(patch).length) {
+        await sb
+          .from("form_prospects")
+          .update(patch)
+          .eq("tenant_id", row.tenant_id)
+          .eq("corporate_number", row.corporate_number);
+        const ex2 = await sb
+          .from("form_prospects")
+          .select("*")
+          .eq("tenant_id", row.tenant_id)
+          .eq("corporate_number", row.corporate_number)
+          .limit(1)
+          .maybeSingle();
+        if (!ex2.error && ex2.data) return ex2.data as AddedRow;
+      }
+      return ex.data as AddedRow;
+    }
   }
-  if (ins.error) throw new Error(ins.error.message);
-  return (ins.data || null) as AddedRow | null;
+
+  // corporate_number が無い重複や取得失敗時は諦める
+  return null;
 }
 
 /** ========= rejected へ INSERT ========= */
-async function insertRejected(
-  sb: any,
-  r: RejectedRow & { tenant_id: string }
-): Promise<void> {
+async function insertRejected(sb: any, r: RejectedRow & { tenant_id: string }) {
   const now = new Date().toISOString();
   const payload = { ...r, created_at: now };
   const { error } = await sb.from("form_prospects_rejected").insert(payload);
   if (error) throw new Error(error.message);
 }
 
-/** ========= メイン処理 ========= */
+/** ========= メイン ========= */
 export async function POST(req: Request) {
   const trace: string[] = [];
   try {
@@ -357,7 +369,6 @@ export async function POST(req: Request) {
 
     const { sb } = getAdmin();
 
-    // 候補取得
     const candidates = await loadRecentCache(sb, tenantId, since, want);
     trace.push(`candidates=${candidates.length} since=${since}`);
 
@@ -378,14 +389,14 @@ export async function POST(req: Request) {
         continue;
       }
 
-      // 1) Google 検索（社名 + 所在地）
+      // 1) Google 検索
       let website: string | null = await findWebsiteByGoogleCSE(
         name,
         c.address
       );
       let source: "google" | "map" | null = website ? "google" : null;
 
-      // 2) 見つからなければ Google Maps
+      // 2) ダメなら Maps
       if (!website) {
         const viaMap = await findWebsiteByGoogleMaps(name, c.address);
         if (viaMap) {
@@ -395,7 +406,6 @@ export async function POST(req: Request) {
       }
 
       if (!website) {
-        // 公式HPが解決できない → 不適合として理由を保存
         rejected.push({
           company_name: name,
           corporate_number: c.corporate_number || null,
@@ -409,7 +419,7 @@ export async function POST(req: Request) {
         continue;
       }
 
-      // 重複チェック
+      // 既存重複（楽観チェック）
       const dup = await existsProspect(
         sb,
         tenantId,
@@ -417,7 +427,6 @@ export async function POST(req: Request) {
         website
       );
       if (dup) {
-        // 既存なら今回はスキップ（重複理由を控えておく）
         rejected.push({
           company_name: name,
           website,
@@ -428,7 +437,6 @@ export async function POST(req: Request) {
         continue;
       }
 
-      // prospectsへ登録
       const saved = await upsertProspect(sb, {
         tenant_id: tenantId,
         company_name: name,
@@ -451,18 +459,17 @@ export async function POST(req: Request) {
         rows.push(saved);
         inserted += 1;
       } else {
-        // 理由不明で保存できなかった場合もrejectedへ
         rejected.push({
           company_name: name,
           website,
           corporate_number: c.corporate_number || null,
           hq_address: c.address || null,
-          reject_reasons: ["prospectsへの保存に失敗"],
+          reject_reasons: ["prospectsへの保存に失敗（重複競合の可能性）"],
         });
       }
     }
 
-    // 不適合はまとめてINSERT（重い場合は必要に応じてバルク化）
+    // 不適合を反映
     for (const r of rejected) {
       await insertRejected(sb, { ...r, tenant_id: tenantId });
     }
