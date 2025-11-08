@@ -4,7 +4,7 @@ export const runtime = "nodejs";
 export const maxDuration = 30;
 
 import { NextResponse } from "next/server";
-import { createClient, SupabaseClient } from "@supabase/supabase-js";
+import { createClient } from "@supabase/supabase-js";
 
 /** ========= Types ========= */
 type Filters = { prefectures?: string[] };
@@ -17,14 +17,10 @@ type RawRow = {
 type PrefOpt = { code: string; name: string };
 type CityOpt = { code: string; name: string };
 
-/** ========= ENV (サーバ優先で解決) ========= */
-const SUPABASE_URL =
-  process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+/** ========= ENV ========= */
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 const SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
-const ANON_KEY =
-  process.env.SUPABASE_ANON_KEY ||
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-  "";
+const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
 
 /** ========= HTTP helpers ========= */
 const UA =
@@ -70,14 +66,13 @@ function strip(fragment: string) {
 function shuffle<T>(arr: T[], seed: number) {
   const a = arr.slice();
   for (let i = a.length - 1; i > 0; i--) {
-    const j = (seed + i) % (i + 1);
+    const j = (seed + i * 9301 + 49297) % (i + 1);
     [a[i], a[j]] = [a[j], a[i]];
   }
   return a;
 }
-function parseProjectRef(url: string) {
-  const m = /^https?:\/\/([^.]+)\.supabase\.co/i.exec(url || "");
-  return m?.[1] || null;
+function range(n: number) {
+  return Array.from({ length: n }, (_, i) => i + 1);
 }
 
 /** ========= 1) Cookie/Token/Pref ========= */
@@ -169,8 +164,9 @@ async function searchOnce(
   tokenValue: string,
   prefCode: string,
   cityCode: string,
-  page = 1,
-  viewNum = 10
+  page: number,
+  viewNum: number,
+  order: number
 ): Promise<{
   rows: RawRow[];
   htmlSig: Record<string, boolean>;
@@ -178,14 +174,14 @@ async function searchOnce(
 }> {
   const form = new URLSearchParams();
   form.set(tokenName, tokenValue);
-  form.set("houzinNmShTypeRbtn", "2");
+  form.set("houzinNmShTypeRbtn", "2"); // 名称: 部分一致
   form.set("houzinNmTxtf", "");
-  form.set("houzinAddrShTypeRbtn", "1");
+  form.set("houzinAddrShTypeRbtn", "1"); // 所在地: 都道府県
   form.set("prefectureLst", prefCode);
   form.set("cityLst", cityCode);
   form.set("tyoumeTxtf", "");
   form.set("kokugaiTxtf", "");
-  form.set("orderRbtn", "1");
+  form.set("orderRbtn", String(order)); // ★ ランダム順序
   form.set("closeCkbx", "1");
   form.set("historyCkbx", "");
   form.set("viewNumAnc", String(viewNum));
@@ -223,7 +219,7 @@ async function searchOnce(
   return { rows: parseResultTable(html), htmlSig, resultCount };
 }
 
-/** ========= parse ========= */
+/** ========= parse (フリガナ除去対応) ========= */
 function parseResultTable(html: string): RawRow[] {
   const out: RawRow[] = [];
   const tableMatch =
@@ -241,7 +237,14 @@ function parseResultTable(html: string): RawRow[] {
 
     const numTxt = strip(ths[0] ?? "");
     const num = ((numTxt.match(/\b\d{13}\b/) || [])[0] || "").trim();
-    const nameTxt = strip(tds[0] ?? "").slice(0, 200);
+
+    // ★ フリガナ(div.furigana...) を nameセルから除去してからstrip
+    const nameCellHtml = (tds[0] ?? "").replace(
+      /<div[^>]*class=["'][^"']*\bfurigana\b[^"']*["'][^>]*>[\s\S]*?<\/div>/gi,
+      ""
+    );
+    const nameTxt = strip(nameCellHtml).slice(0, 200);
+
     const addrTxt = strip(tds[1] ?? "").slice(0, 300);
 
     if (/^\d{13}$/.test(num) && nameTxt) {
@@ -257,35 +260,22 @@ function parseResultTable(html: string): RawRow[] {
   return out;
 }
 
-/** ========= Supabase Client (public schema 明示 & server優先) ========= */
-function getAdmin(): {
-  sb: SupabaseClient;
-  usingServiceRole: boolean;
-  project_ref: string | null;
-  db_url_host: string | null;
-} {
-  if (!SUPABASE_URL)
-    throw new Error("SUPABASE_URL / NEXT_PUBLIC_SUPABASE_URL is missing");
-  const usingServiceRole = !!SERVICE_ROLE;
-  const key = SERVICE_ROLE || ANON_KEY; // サービスロール優先
-  if (!key) throw new Error("SUPABASE keys not provided");
-
-  const sb = createClient(SUPABASE_URL, key, {
-    auth: { persistSession: false, autoRefreshToken: false },
-    db: { schema: "public" },
-  });
-
-  const project_ref = parseProjectRef(SUPABASE_URL);
-  const db_url_host = (() => {
-    try {
-      const u = new URL(SUPABASE_URL);
-      return u.host;
-    } catch {
-      return null;
-    }
-  })();
-
-  return { sb, usingServiceRole, project_ref, db_url_host };
+/** ========= Supabase ========= */
+function getAdmin(): { sb: any; usingServiceRole: boolean } {
+  if (!SUPABASE_URL) throw new Error("NEXT_PUBLIC_SUPABASE_URL is missing");
+  if (SERVICE_ROLE)
+    return {
+      sb: createClient(SUPABASE_URL, SERVICE_ROLE) as any,
+      usingServiceRole: true,
+    };
+  if (!ANON_KEY)
+    throw new Error(
+      "SUPABASE_SERVICE_ROLE_KEY / NEXT_PUBLIC_SUPABASE_ANON_KEY missing"
+    );
+  return {
+    sb: createClient(SUPABASE_URL, ANON_KEY) as any,
+    usingServiceRole: false,
+  };
 }
 
 /** ========= Handler ========= */
@@ -312,17 +302,18 @@ export async function POST(req: Request) {
       await getSessionAndToken();
     trace.push(`pref_count=${prefectures.length}`);
 
-    const targetPrefNames =
+    // ★ 都道府県ランダム選定（フィルタがあればその中からランダム、無ければ全体から）
+    const prefCandidates =
       filters.prefectures && filters.prefectures.length
-        ? filters.prefectures
-        : ["東京都", "大阪府"];
-    const targetPrefs = prefectures.filter((p) =>
-      targetPrefNames.some((name) => p.name === name)
+        ? prefectures.filter((p) => filters.prefectures!.includes(p.name))
+        : prefectures;
+    const prefPool = shuffle(prefCandidates, seedNum).slice(
+      0,
+      Math.min(6, prefCandidates.length || 3)
     );
-    const prefPool = targetPrefs.length ? targetPrefs : prefectures.slice(0, 3);
 
     const pickedCities: Array<{ pref: PrefOpt; city: CityOpt }> = [];
-    for (const pref of prefPool) {
+    for (const [idx, pref] of prefPool.entries()) {
       const cities = await fetchCities(
         cookie,
         tokenName,
@@ -330,8 +321,10 @@ export async function POST(req: Request) {
         pref.code
       );
       if (!cities.length) continue;
-      for (const c of shuffle(cities, seedNum).slice(0, 3))
+      // 都市もランダムに1〜3件
+      for (const c of shuffle(cities, seedNum + idx * 101).slice(0, 3)) {
         pickedCities.push({ pref, city: c });
+      }
     }
     trace.push(`picked_pairs=${pickedCities.length}`);
 
@@ -346,7 +339,6 @@ export async function POST(req: Request) {
           html_sig: {},
           trace,
           using_service_role: !!SERVICE_ROLE,
-          project_ref: parseProjectRef(SUPABASE_URL),
         },
         { status: 200 }
       );
@@ -356,11 +348,45 @@ export async function POST(req: Request) {
     let lastSig: Record<string, any> = {};
     let lastCount: number | undefined;
 
-    const MAX_HITS = Math.min(20, pickedCities.length * (1 + hops));
-    let hits = 0;
+    const VIEW_NUM = 10;
 
-    for (const pair of pickedCities) {
-      for (let p = 1; p <= 1 + hops; p++) {
+    // ★ ランダム順序（1:昇順, 2:降順, 3:所在地順, 4:法人番号順）
+    const ORDERS = [1, 2, 3, 4];
+
+    for (const [i, pair] of pickedCities.entries()) {
+      const order = ORDERS[(seedNum + i) % ORDERS.length];
+
+      // まず1回叩いて件数を把握
+      const pre = await searchOnce(
+        cookie,
+        tokenName,
+        tokenValue,
+        pair.pref.code,
+        pair.city.code,
+        1,
+        VIEW_NUM,
+        order
+      );
+      lastSig = pre.htmlSig;
+      if (typeof pre.resultCount === "number") lastCount = pre.resultCount;
+      for (const r of pre.rows) {
+        if (/^\d{13}$/.test(r.corporate_number) && r.name) bag.push(r);
+      }
+
+      // 総ページ数→ランダムページ選定
+      const totalPages =
+        typeof pre.resultCount === "number" && pre.resultCount > 0
+          ? Math.ceil(pre.resultCount / VIEW_NUM)
+          : 1;
+
+      const pages = shuffle(range(totalPages), seedNum + i * 13)
+        .slice(0, Math.max(1, 1 + hops))
+        .sort((a, b) => a - b); // （順不同でも良い）
+
+      // 既に1ページ目は取得済みなので省く
+      const uniquePages = Array.from(new Set(pages.filter((p) => p !== 1)));
+
+      for (const p of uniquePages) {
         const { rows, htmlSig, resultCount } = await searchOnce(
           cookie,
           tokenName,
@@ -368,22 +394,19 @@ export async function POST(req: Request) {
           pair.pref.code,
           pair.city.code,
           p,
-          10
+          VIEW_NUM,
+          order
         );
         lastSig = htmlSig;
         if (typeof resultCount === "number") lastCount = resultCount;
-
         for (const r of rows) {
           if (!/^\d{13}$/.test(r.corporate_number)) continue;
           if (!r.name) continue;
           bag.push(r);
         }
-        hits++;
         if (bag.length >= Math.max(80, want * 3)) break;
-        if (hits >= MAX_HITS) break;
       }
       if (bag.length >= Math.max(80, want * 3)) break;
-      if (hits >= MAX_HITS) break;
     }
 
     const a2_crawled = bag.length;
@@ -401,16 +424,15 @@ export async function POST(req: Request) {
       detail_url: r.detail_url,
     }));
 
-    const { sb, usingServiceRole, project_ref, db_url_host } = getAdmin();
+    const { sb, usingServiceRole } = getAdmin();
     let inserted_new = 0;
+    let rlsWarning: string | undefined;
     let toInsert: any[] = [];
-    let db_probe_found = 0;
 
     if (deduped.length) {
       const nums = deduped.map((r) => r.corporate_number);
 
-      // 既存チェック
-      const { data: existedRows, error: exErr } = await sb
+      const { data: existedRows, error: exErr } = await (sb as any)
         .from("nta_corporates_cache")
         .select("corporate_number")
         .eq("tenant_id", tenantId)
@@ -425,8 +447,6 @@ export async function POST(req: Request) {
             html_sig: { ...lastSig, resultCount: lastCount },
             trace,
             using_service_role: usingServiceRole,
-            project_ref,
-            db_url_host,
           },
           { status: 500 }
         );
@@ -442,7 +462,7 @@ export async function POST(req: Request) {
         .map((r) => ({
           tenant_id: tenantId,
           corporate_number: r.corporate_number,
-          company_name: r.name,
+          company_name: r.name, // ★ フリガナ無しの正式名称のみ
           address: r.address ?? null,
           detail_url: r.detail_url ?? null,
           source: "nta-crawl",
@@ -450,22 +470,21 @@ export async function POST(req: Request) {
         }));
 
       if (toInsert.length) {
-        // upsert → 失敗なら insert へフォールバック
-        let data: any[] | null = null;
-        let error: any = null;
+        const tryUpsert = async () => {
+          const { data, error } = await (sb as any)
+            .from("nta_corporates_cache")
+            .upsert(toInsert, {
+              onConflict: "tenant_id,corporate_number",
+              ignoreDuplicates: true,
+            })
+            .select("corporate_number");
+          return { data, error };
+        };
 
-        const up = await sb
-          .from("nta_corporates_cache")
-          .upsert(toInsert, {
-            onConflict: "tenant_id,corporate_number",
-            ignoreDuplicates: true,
-          })
-          .select("corporate_number");
-        data = up.data;
-        error = up.error;
+        let { data, error } = await tryUpsert();
 
         if (error && /no unique|ON CONFLICT/i.test(error.message || "")) {
-          const ins = await sb
+          const ins = await (sb as any)
             .from("nta_corporates_cache")
             .insert(toInsert)
             .select("corporate_number");
@@ -474,16 +493,20 @@ export async function POST(req: Request) {
         }
 
         if (error) {
+          const rlsBlocked = /row-level security|permission denied|RLS/i.test(
+            error.message || ""
+          );
           return NextResponse.json(
             {
               error: error.message,
-              hint: "テーブルのユニーク制約/権限/制約を確認してください（service role であればRLSは無視されます）。",
+              rls_blocked: rlsBlocked || undefined,
+              hint: rlsBlocked
+                ? "RLSによりINSERTが拒否。SERVICE_ROLE か RLS緩和を設定してください。"
+                : "テーブルのユニーク制約/権限/制約を確認してください。",
               step: { a2_crawled, a3_picked, a4_filled, a5_inserted: 0 },
               html_sig: { ...lastSig, resultCount: lastCount },
               trace,
               using_service_role: usingServiceRole,
-              project_ref,
-              db_url_host,
             },
             { status: 500 }
           );
@@ -491,19 +514,10 @@ export async function POST(req: Request) {
 
         inserted_new = Array.isArray(data) ? data.length : 0;
 
-        // ★ 保存直後に DB を再読込（「本当に入った？」を確認）★
-        const insertedNums =
-          Array.isArray(data) && data.length
-            ? data.map((d: any) => d.corporate_number)
-            : toInsert.map((x) => x.corporate_number);
-
-        const probe = await sb
-          .from("nta_corporates_cache")
-          .select("id", { count: "exact", head: true })
-          .eq("tenant_id", tenantId)
-          .in("corporate_number", insertedNums);
-
-        db_probe_found = probe.count || 0;
+        if (!usingServiceRole && toInsert.length > 0 && inserted_new === 0) {
+          rlsWarning =
+            "新規候補は検出されましたが保存できませんでした。RLSにより匿名INSERT拒否の可能性。SERVICE_ROLEの設定を推奨。";
+        }
       }
     }
 
@@ -516,10 +530,6 @@ export async function POST(req: Request) {
         using_service_role: usingServiceRole,
         html_sig: { ...lastSig, resultCount: lastCount },
         trace,
-        // ここを見れば「どのSupabaseに書いたか」が一目で分かる
-        project_ref,
-        db_url_host,
-        db_probe_found, // ← 実DB再読込で確認できた件数
       },
       { status: 200 }
     );
