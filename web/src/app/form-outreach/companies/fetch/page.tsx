@@ -4,7 +4,16 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import AppHeader from "@/components/AppHeader";
 import Link from "next/link";
-import { CheckCircle, XCircle, Loader2, Play } from "lucide-react";
+import {
+  CheckCircle,
+  XCircle,
+  Loader2,
+  Play,
+  ChevronsLeft,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsRight,
+} from "lucide-react";
 
 /** ===== LocalStorage Keys ===== */
 const LS_KEY = "fo_manual_fetch_latest";
@@ -21,11 +30,12 @@ type AddedRow = {
   website: string | null;
   contact_email: string | null;
   contact_form_url?: string | null;
-  phone_number?: string | null; // ← 追加
+  phone?: string | null; // ← 電話
   industry?: string | null;
   company_size?: string | null;
   prefectures?: string[] | null;
   job_site_source?: string | null;
+  source_site?: string | null;
   corporate_number?: string | null;
   hq_address?: string | null;
   capital?: number | null;
@@ -38,7 +48,7 @@ type RejectedRow = {
   website?: string | null;
   contact_email?: string | null;
   contact_form_url?: string | null;
-  phone_number?: string | null; // ← 追加
+  phone?: string | null; // ← 電話
   industry_large?: string | null;
   industry_small?: string | null;
   company_size?: string | null;
@@ -85,7 +95,7 @@ type CrawlDebug = {
   rows_preview?: CrawlPreviewRow[];
   trace?: string[];
   warning?: string;
-  project_ref?: string | null; // 接続先
+  project_ref?: string | null;
   db_url_host?: string | null;
   db_probe_found?: number;
 };
@@ -102,7 +112,7 @@ const FLOW_A_TITLES = [
 const FLOW_B_TITLES = [
   "7. 新規キャッシュ分のHP推定",
   "8. 到達性チェック/会社概要抽出",
-  "9. form_prospects保存/反映（フィルタ不適合を除外）",
+  "9. form_prospects保存/反映 + 不適合保存",
 ];
 
 export default function ManualFetch() {
@@ -139,6 +149,28 @@ export default function ManualFetch() {
   /** Debug pane */
   const [crawlDebug, setCrawlDebug] = useState<CrawlDebug | null>(null);
   const [showDebug, setShowDebug] = useState<boolean>(true);
+
+  /** rows_preview ページング */
+  const ROWS_PER_PAGE = 10;
+  const [rowsPage, setRowsPage] = useState(1);
+  const previewRows = useMemo(
+    () => crawlDebug?.rows_preview ?? [],
+    [crawlDebug?.rows_preview]
+  );
+  const pageCount = Math.max(1, Math.ceil(previewRows.length / ROWS_PER_PAGE));
+  const pagedPreview = useMemo(() => {
+    const start = (rowsPage - 1) * ROWS_PER_PAGE;
+    return previewRows.slice(start, start + ROWS_PER_PAGE);
+  }, [previewRows, rowsPage]);
+
+  useEffect(() => {
+    setRowsPage(1);
+  }, [previewRows.length]);
+
+  const goFirst = () => setRowsPage(1);
+  const goPrev = () => setRowsPage((p) => Math.max(1, p - 1));
+  const goNext = () => setRowsPage((p) => Math.min(pageCount, p + 1));
+  const goLast = () => setRowsPage(pageCount);
 
   /** ===== Effects: tenant & filters & restore local ===== */
   useEffect(() => {
@@ -302,6 +334,13 @@ export default function ManualFetch() {
         const toInsert = Number(j?.to_insert_count || 0);
         const usingSrv = !!j?.using_service_role;
 
+        // 追加：接続先 & プローブ
+        const projectRef: string | null =
+          j?.project_ref != null ? String(j.project_ref) : null;
+        const dbUrlHost: string | null =
+          j?.db_url_host != null ? String(j.db_url_host) : null;
+        const probeFound: number = Number(j?.db_probe_found ?? 0);
+
         // debug state
         setCrawlDebug({
           step: j?.step,
@@ -312,28 +351,37 @@ export default function ManualFetch() {
           rows_preview: Array.isArray(j?.rows_preview) ? j.rows_preview : [],
           trace: Array.isArray(j?.trace) ? j.trace : [],
           warning: j?.warning,
-          project_ref: j?.project_ref ?? null,
-          db_url_host: j?.db_url_host ?? null,
-          db_probe_found: Number(j?.db_probe_found ?? 0),
+          project_ref: projectRef,
+          db_url_host: dbUrlHost,
+          db_probe_found: probeFound,
         });
 
-        // A-2 result〜A-6
+        // A-2 result
         setS((a) =>
           a.map((v, idx) => (idx === 1 ? (a2 > 0 ? "done" : "error") : v))
         );
+
+        // A-3
         setActiveIdx(2);
         setS((a) =>
           a.map((v, idx) => (idx === 2 ? (a3 > 0 ? "done" : "error") : v))
         );
+
+        // A-4
         setActiveIdx(3);
         setS((a) => a.map((v, idx) => (idx === 3 ? "done" : v)));
+
+        // A-5
         setActiveIdx(4);
         setS((a) => a.map((v, idx) => (idx === 4 ? "done" : v)));
+
+        // A-6
         setActiveIdx(5);
         setS((a) => a.map((v, idx) => (idx === 5 ? "running" : v)));
         await delay(120);
 
         savedCache += newCache;
+
         setS((a) => a.map((v, idx) => (idx === 5 ? "done" : v)));
         setActiveIdx(-1);
 
@@ -343,10 +391,14 @@ export default function ManualFetch() {
             `権限: ${usingSrv ? "service-role" : "anon"}${
               j?.warning ? " / 警告あり" : ""
             }`,
+            `Probe: project_ref=${projectRef ?? "-"}, db_url_host=${
+              dbUrlHost ?? "-"
+            }, db_probe_found=${probeFound}`,
           ].join("\n")
         );
 
         if (!r.ok) throw new Error(j?.error || `crawl failed (${r.status})`);
+
         if (newCache === 0) await delay(240);
       }
 
@@ -367,7 +419,7 @@ export default function ManualFetch() {
           "x-tenant-id": tenantId,
           "content-type": "application/json",
         },
-        body: JSON.stringify({ since, want: total, try_llm: true, filters }), // ← filters を渡す
+        body: JSON.stringify({ since, want: total, try_llm: true }),
         signal: abortRef.current.signal,
       });
       const ej = await safeJson(enrichRes);
@@ -385,10 +437,6 @@ export default function ManualFetch() {
       }
 
       const rows: AddedRow[] = Array.isArray(ej?.rows) ? ej.rows : [];
-      const rejRows: RejectedRow[] = Array.isArray(ej?.rejected)
-        ? ej.rejected
-        : [];
-
       if (rows.length) {
         setAdded((prev) => {
           const next = [...rows, ...prev];
@@ -399,9 +447,13 @@ export default function ManualFetch() {
           return next;
         });
       }
-      if (rejRows.length) {
+      // ← 不適合もAPIから受け取り表示
+      const rej: RejectedRow[] = Array.isArray(ej?.rejected_rows)
+        ? ej.rejected_rows
+        : [];
+      if (rej.length) {
         setRejected((prev) => {
-          const next = dedupeRejected([...rejRows, ...prev]);
+          const next = dedupeRejected([...rej, ...prev]);
           localStorage.setItem(
             LS_REJECT_KEY,
             JSON.stringify({ ts: new Date().toISOString(), rows: next })
@@ -414,9 +466,9 @@ export default function ManualFetch() {
       setActiveIdx(-1);
 
       setMsg(
-        `完了：prospects追加 ${
+        `完了：キャッシュ新規 ${savedCache} 件 → prospects追加 ${
           Number.isFinite(ej?.inserted) ? ej.inserted : rows.length
-        } 件 / 不適合 ${rejRows.length} 件`
+        } 件 / 不適合 ${rej.length} 件`
       );
     } catch (e: any) {
       setActiveIdx(-1);
@@ -621,7 +673,7 @@ export default function ManualFetch() {
         {/* Phase B */}
         <section className="rounded-2xl border border-neutral-200 p-4 mb-4">
           <div className="mb-3 text-sm font-medium text-neutral-800">
-            Phase B: HP解決 → 会社概要抽出 → form_prospects保存
+            Phase B: HP解決 → 会社概要抽出 → form_prospects保存 + 不適合保存
           </div>
           <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
             {FLOW_B_TITLES.map((title, bIdx) => {
@@ -692,17 +744,43 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                         </pre>
                       </div>
                     </div>
-                    <div className="rounded border border-neutral-200 p-2">
-                      <div className="font-semibold mb-1">trace</div>
-                      <pre className="whitespace-pre-wrap">
-                        {(crawlDebug.trace || []).join("\n")}
-                      </pre>
-                    </div>
 
+                    {/* rows_preview ページング対応（上限なし） */}
                     <div className="rounded border border-neutral-200">
-                      <div className="px-3 py-2 border-b border-neutral-200 bg-neutral-50 font-semibold">
-                        rows_preview（最大12件）
+                      <div className="px-3 py-2 border-b border-neutral-200 bg-neutral-50 font-semibold flex items-center justify-between">
+                        <span>rows_preview（プレビュー）</span>
+                        <span className="text-xs text-neutral-500">
+                          {previewRows.length} 件 / {pageCount} ページ
+                        </span>
                       </div>
+
+                      <div className="flex items-center gap-1 px-3 py-2">
+                        <PagerButton
+                          onClick={goFirst}
+                          disabled={rowsPage === 1}
+                        >
+                          <ChevronsLeft className="h-4 w-4" />
+                        </PagerButton>
+                        <PagerButton onClick={goPrev} disabled={rowsPage === 1}>
+                          <ChevronLeft className="h-4 w-4" />
+                        </PagerButton>
+                        <span className="mx-2 text-xs text-neutral-600">
+                          {rowsPage} / {pageCount}
+                        </span>
+                        <PagerButton
+                          onClick={goNext}
+                          disabled={rowsPage === pageCount}
+                        >
+                          <ChevronRight className="h-4 w-4" />
+                        </PagerButton>
+                        <PagerButton
+                          onClick={goLast}
+                          disabled={rowsPage === pageCount}
+                        >
+                          <ChevronsRight className="h-4 w-4" />
+                        </PagerButton>
+                      </div>
+
                       <div className="overflow-x-auto">
                         <table className="min-w-[900px] w-full text-xs">
                           <thead className="bg-neutral-50 text-neutral-600">
@@ -716,7 +794,7 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-neutral-200">
-                            {(crawlDebug.rows_preview || []).map((r) => (
+                            {pagedPreview.map((r) => (
                               <tr key={r.corporate_number}>
                                 <td className="px-2 py-1 font-mono">
                                   {r.corporate_number}
@@ -740,8 +818,7 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                                 </td>
                               </tr>
                             ))}
-                            {(!crawlDebug.rows_preview ||
-                              crawlDebug.rows_preview.length === 0) && (
+                            {pagedPreview.length === 0 && (
                               <tr>
                                 <td
                                   colSpan={4}
@@ -754,6 +831,13 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                           </tbody>
                         </table>
                       </div>
+                    </div>
+
+                    <div className="rounded border border-neutral-200 p-2 mt-2">
+                      <div className="font-semibold mb-1">trace</div>
+                      <pre className="whitespace-pre-wrap">
+                        {(crawlDebug.trace || []).join("\n")}
+                      </pre>
                     </div>
                   </>
                 ) : (
@@ -784,14 +868,13 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
           </div>
 
           <div className="overflow-x-auto">
-            <table className="min-w-[1350px] w-full text-sm">
+            <table className="min-w-[1300px] w-full text-sm">
               <thead className="bg-neutral-50 text-neutral-600">
                 <tr>
                   <th className="px-3 py-3 text-left">企業名</th>
                   <th className="px-3 py-3 text-left">サイトURL</th>
                   <th className="px-3 py-3 text-left">メール</th>
                   <th className="px-3 py-3 text-left">電話</th>
-                  {/* ← 追加 */}
                   <th className="px-3 py-3 text-left">フォーム</th>
                   <th className="px-3 py-3 text-left">規模</th>
                   <th className="px-3 py-3 text-left">都道府県</th>
@@ -822,8 +905,7 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                       )}
                     </td>
                     <td className="px-3 py-2">{c.contact_email || "-"}</td>
-                    <td className="px-3 py-2">{c.phone_number || "-"}</td>
-                    {/* ← 追加 */}
+                    <td className="px-3 py-2">{c.phone || "-"}</td>
                     <td className="px-3 py-2">
                       {c.contact_form_url ? (
                         <a
@@ -852,7 +934,9 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                     <td className="px-3 py-2 break-all">
                       {c.hq_address || "-"}
                     </td>
-                    <td className="px-3 py-2">{c.job_site_source || "-"}</td>
+                    <td className="px-3 py-2">
+                      {c.job_site_source || c.source_site || "-"}
+                    </td>
                     <td className="px-3 py-2">
                       {c.created_at
                         ? c.created_at.replace("T", " ").replace("Z", "")
@@ -887,7 +971,7 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
           </div>
 
           <div className="overflow-x-auto">
-            <table className="min-w-[1550px] w-full text-sm">
+            <table className="min-w-[1500px] w-full text-sm">
               <thead className="bg-neutral-50 text-neutral-600">
                 <tr>
                   <th className="px-3 py-3 text-left">企業名</th>
@@ -899,7 +983,6 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                   <th className="px-3 py-3 text-left">本社所在地</th>
                   <th className="px-3 py-3 text-left">メール</th>
                   <th className="px-3 py-3 text-left">電話</th>
-                  {/* ← 追加 */}
                   <th className="px-3 py-3 text-left">フォーム</th>
                   <th className="px-3 py-3 text-left">推定規模</th>
                   <th className="px-3 py-3 text-left">業種</th>
@@ -938,8 +1021,7 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                       {r.hq_address || "-"}
                     </td>
                     <td className="px-3 py-2">{r.contact_email || "-"}</td>
-                    <td className="px-3 py-2">{r.phone_number || "-"}</td>
-                    {/* ← 追加 */}
+                    <td className="px-3 py-2">{r.phone || "-"}</td>
                     <td className="px-3 py-2">
                       {r.contact_form_url ? (
                         <a
@@ -1128,6 +1210,30 @@ function CountModal({
         </div>
       </div>
     </div>
+  );
+}
+
+function PagerButton({
+  children,
+  onClick,
+  disabled,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className={`rounded-md border px-2 py-1 text-xs ${
+        disabled
+          ? "border-neutral-200 text-neutral-300"
+          : "border-neutral-300 text-neutral-700 hover:bg-neutral-50"
+      }`}
+    >
+      {children}
+    </button>
   );
 }
 

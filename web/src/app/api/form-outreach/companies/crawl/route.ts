@@ -164,7 +164,8 @@ async function searchOnce(
   prefCode: string,
   cityCode: string,
   page = 1,
-  viewNum = 10
+  viewNum = 10,
+  town?: string | ""
 ): Promise<{
   rows: RawRow[];
   htmlSig: Record<string, boolean>;
@@ -177,7 +178,7 @@ async function searchOnce(
   form.set("houzinAddrShTypeRbtn", "1");
   form.set("prefectureLst", prefCode);
   form.set("cityLst", cityCode);
-  form.set("tyoumeTxtf", "");
+  form.set("tyoumeTxtf", town || ""); // ← 指定区は丁目まで
   form.set("kokugaiTxtf", "");
   form.set("orderRbtn", "1");
   form.set("closeCkbx", "1");
@@ -236,7 +237,6 @@ function parseResultTable(html: string): RawRow[] {
     const numTxt = strip(ths[0] ?? "");
     const num = ((numTxt.match(/\b\d{13}\b/) || [])[0] || "").trim();
 
-    // --- フリガナ除去: <div class="furigana">…</div> を事前に削除してからstrip ---
     const nameCell = (tds[0] || "").replace(
       /<div[^>]*class=["']?furigana["']?[^>]*>[\s\S]*?<\/div>/gi,
       ""
@@ -289,6 +289,36 @@ function getAdmin(): {
   };
 }
 
+/** ==== 住所から簡易“市区町村キー”抽出（偏り抑制用） ==== */
+function municipalityKey(addr?: string | null): string {
+  if (!addr) return "unknown";
+  const s = String(addr).replace(/\s/g, "");
+  // 「都/道/府/県」以降〜最初の「市/区/郡…（町/村/区/市）」まで
+  const m =
+    s.match(/^(?:.+?[都道府県])(.+?(?:市|区|郡.+?(?:町|村|区|市)?))/) ||
+    s.match(/^(?:.+?[都道府県])(.+?)(?:\d|丁目|番|号)/);
+  return m ? m[0] : s.slice(0, 10);
+}
+
+/** 指定区は“丁目”を入れる */
+function needTown(prefName: string, cityName: string): boolean {
+  const wards = [
+    "港区",
+    "千代田区",
+    "中央区",
+    "新宿区",
+    "渋谷区",
+    "大阪市北区",
+    "大阪市中央区",
+  ];
+  return wards.some((w) => cityName.includes(w));
+}
+function pickTown(seed: number) {
+  const choices = ["1丁目", "2丁目", "3丁目"];
+  const idx = Math.abs(seed) % choices.length;
+  return choices[idx];
+}
+
 /** ========= Handler ========= */
 export async function POST(req: Request) {
   const trace: string[] = [];
@@ -313,7 +343,7 @@ export async function POST(req: Request) {
       await getSessionAndToken();
     trace.push(`pref_count=${prefectures.length}`);
 
-    // --- 対象都道府県の決定 ---
+    // --- 対象都道府県の決定（従来の挙動を維持しつつ、ランダムサンプル） ---
     const specifiedPrefNames = Array.isArray(filters.prefectures)
       ? filters.prefectures.filter(Boolean)
       : [];
@@ -321,10 +351,11 @@ export async function POST(req: Request) {
     let prefPool =
       specifiedPrefNames.length > 0
         ? poolAll.filter((p) => specifiedPrefNames.includes(p.name))
-        : shuffle(poolAll, seedNum).slice(0, 8); // ← デフォは8都道府県をランダム
+        : shuffle(poolAll, seedNum).slice(0, 8);
 
     // --- 各都道府県からランダムに市区町村を抽出（均等にばらす） ---
-    const pickedCities: Array<{ pref: PrefOpt; city: CityOpt }> = [];
+    const pickedCities: Array<{ pref: PrefOpt; city: CityOpt; town?: string }> =
+      [];
     const CITIES_PER_PREF = 3;
     for (const pref of prefPool) {
       const cities = await fetchCities(
@@ -335,13 +366,17 @@ export async function POST(req: Request) {
       );
       if (!cities.length) continue;
       const chosen = shuffle(cities, (seedNum += 17)).slice(0, CITIES_PER_PREF);
-      for (const c of chosen) pickedCities.push({ pref, city: c });
+      for (const c of chosen) {
+        const town = needTown(pref.name, c.name)
+          ? pickTown((seedNum += 31))
+          : "";
+        pickedCities.push({ pref, city: c, town });
+      }
     }
     trace.push(`picked_pairs=${pickedCities.length}`);
 
     if (!pickedCities.length) {
       const { sb, usingServiceRole, project_ref, db_url_host } = getAdmin();
-      // DBプローブ（任意）
       const probe = await (sb as any)
         .from("nta_corporates_cache")
         .select("corporate_number", { count: "exact", head: true })
@@ -371,14 +406,14 @@ export async function POST(req: Request) {
     let lastCount: number | undefined;
 
     const VIEW_NUM = 10;
-    const PAGES_PER_CITY = Math.min(5, 1 + hops * 2); // ← 1市区町村あたり最大5ページ
-    const CITY_LIMIT = Math.max(5, Math.floor(want / 4)); // ← 取りすぎ防止
+    const PAGES_PER_CITY = Math.min(5, 1 + hops * 2);
+    const CITY_LIMIT = Math.max(5, Math.floor(want / 4));
 
     for (const pair of shuffle(pickedCities, (seedNum += 97)).slice(
       0,
       CITY_LIMIT
     )) {
-      // まず1ページ目で総件数を把握
+      // 1ページ目
       const first = await searchOnce(
         cookie,
         tokenName,
@@ -386,20 +421,23 @@ export async function POST(req: Request) {
         pair.pref.code,
         pair.city.code,
         1,
-        VIEW_NUM
+        VIEW_NUM,
+        pair.town
       );
       lastSig = first.htmlSig;
       if (typeof first.resultCount === "number") lastCount = first.resultCount;
-      for (const r of first.rows)
+
+      // ★行順ランダム
+      for (const r of shuffle(first.rows, (seedNum += 7)))
         if (/^\d{13}$/.test(r.corporate_number)) bag.push(r);
 
-      // 総ページ（安全上100ページ上限）
+      // 総ページ
       const totalPages = Math.max(
         1,
         Math.min(100, Math.ceil((lastCount || 0) / VIEW_NUM))
       );
 
-      // ランダムな他ページからも取得
+      // ランダム他ページ
       const visited = new Set<number>([1]);
       for (let k = 0; k < PAGES_PER_CITY - 1; k++) {
         if (bag.length >= Math.max(80, want * 3)) break;
@@ -414,10 +452,11 @@ export async function POST(req: Request) {
           pair.pref.code,
           pair.city.code,
           rnd,
-          VIEW_NUM
+          VIEW_NUM,
+          pair.town
         );
         lastSig = htmlSig;
-        for (const r of rows)
+        for (const r of shuffle(rows, (seedNum += 11)))
           if (/^\d{13}$/.test(r.corporate_number)) bag.push(r);
       }
 
@@ -432,14 +471,38 @@ export async function POST(req: Request) {
     const a3_picked = deduped.length;
     const a4_filled = 0;
 
-    const rows_preview = deduped.slice(0, 12).map((r) => ({
+    const { sb, usingServiceRole, project_ref, db_url_host } = getAdmin();
+
+    // ▼ ここで「不適合テーブル」にある法人番号を除外
+    const nums = deduped.map((r) => r.corporate_number);
+    const rej = await (sb as any)
+      .from("form_prospects_rejected")
+      .select("corporate_number")
+      .eq("tenant_id", tenantId)
+      .in("corporate_number", nums);
+    const rejectedSet = new Set<string>(
+      (rej?.data || []).map((x: any) => String(x.corporate_number))
+    );
+
+    // ▼ 市区町村あたり最大5件に制限（住所文字列からキー化）
+    const municipalityCount = new Map<string, number>();
+    const limited: RawRow[] = [];
+    for (const r of shuffle(deduped, (seedNum += 19))) {
+      if (rejectedSet.has(r.corporate_number)) continue; // 不適合除外
+      const key = municipalityKey(r.address);
+      const n = municipalityCount.get(key) || 0;
+      if (n >= 5) continue;
+      municipalityCount.set(key, n + 1);
+      limited.push(r);
+      if (limited.length >= want * 2) break; // 取りすぎ防止
+    }
+
+    const rows_preview = limited.map((r) => ({
       corporate_number: r.corporate_number,
       name: r.name,
       address: r.address,
       detail_url: r.detail_url,
-    }));
-
-    const { sb, usingServiceRole, project_ref, db_url_host } = getAdmin();
+    })); // ← 全件返す（UIで10件ページングする）
 
     // DBプローブ（任意の可視化）
     const probe = await (sb as any)
@@ -452,14 +515,14 @@ export async function POST(req: Request) {
     let rlsWarning: string | undefined;
     let toInsert: any[] = [];
 
-    if (deduped.length) {
-      const nums = deduped.map((r) => r.corporate_number);
+    if (limited.length) {
+      const nums2 = limited.map((r) => r.corporate_number);
 
       const { data: existedRows, error: exErr } = await (sb as any)
         .from("nta_corporates_cache")
         .select("corporate_number")
         .eq("tenant_id", tenantId)
-        .in("corporate_number", nums);
+        .in("corporate_number", nums2);
 
       if (exErr) {
         return NextResponse.json(
@@ -467,7 +530,7 @@ export async function POST(req: Request) {
             error: exErr.message,
             hint: "重複チェックに失敗",
             step: { a2_crawled, a3_picked, a4_filled, a5_inserted: 0 },
-            html_sig: { ...lastSig, resultCount: lastCount },
+            html_sig: lastSig,
             trace,
             using_service_role: usingServiceRole,
             project_ref,
@@ -482,9 +545,8 @@ export async function POST(req: Request) {
         (existedRows || []).map((r: any) => String(r.corporate_number))
       );
       const now = new Date().toISOString();
-      toInsert = deduped
+      toInsert = limited
         .filter((r) => !existed.has(r.corporate_number))
-        .slice(0, want * 2)
         .map((r) => ({
           tenant_id: tenantId,
           corporate_number: r.corporate_number,
@@ -504,7 +566,6 @@ export async function POST(req: Request) {
               ignoreDuplicates: true,
             })
             .select("corporate_number");
-
           return { data, error };
         };
 
@@ -531,7 +592,7 @@ export async function POST(req: Request) {
                 ? "RLSによりINSERTが拒否。SUPABASE_SERVICE_ROLE_KEY を設定するか、RLSポリシーでINSERTを許可してください。"
                 : "テーブルのユニーク制約/権限/制約を確認してください。",
               step: { a2_crawled, a3_picked, a4_filled, a5_inserted: 0 },
-              html_sig: { ...lastSig, resultCount: lastCount },
+              html_sig: lastSig,
               trace,
               using_service_role: usingServiceRole,
               project_ref,
@@ -558,7 +619,7 @@ export async function POST(req: Request) {
         step: { a2_crawled, a3_picked, a4_filled, a5_inserted: inserted_new },
         rows_preview,
         using_service_role: usingServiceRole,
-        html_sig: { ...lastSig, resultCount: lastCount },
+        html_sig: lastSig,
         trace,
         warning: rlsWarning,
         project_ref,
