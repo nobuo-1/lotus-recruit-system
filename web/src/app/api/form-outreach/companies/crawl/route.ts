@@ -186,20 +186,9 @@ async function crawlByAddressKeyword(
       const r = await fetchWithTimeout(url, {}, 15000);
       if (!r.ok) continue;
       const html = await r.text();
-
-      // JS必須・ブロック検出のヒントを trace に乗せるため HTML を返す
-      const blocked =
-        /enable javascript|アクセスが集中|ご利用の環境から|お探しのページは見つかりません/i.test(
-          html
-        );
       const rows = parseSearchHtml(html);
-      if (rows.length || blocked) {
-        // blocked の場合でも空配列を返し、上流で trace に記録する
-        return rows;
-      }
-    } catch {
-      // 次のURL候補へ
-    }
+      if (rows.length) return rows;
+    } catch {}
   }
   return [];
 }
@@ -212,7 +201,6 @@ async function fetchDetailAndFill(row: RawRow): Promise<RawRow> {
     if (!r.ok) return row;
     const html = await r.text();
 
-    // 会社名候補を多段で抽出（表・h1・meta・title）
     const nameCandidates: Array<string | null | undefined> = [
       /商号又は名称[^<]*<\/th>\s*<td[^>]*>([\s\S]{1,200}?)<\/td>/i
         .exec(html)?.[1]
@@ -307,10 +295,11 @@ export async function POST(req: Request) {
     if (!addrPool.length) {
       return NextResponse.json(
         {
-          inserted_new: 0,
+          new_cache: 0,
           tried: 0,
           keywords_used: [],
           rows_preview: [],
+          step: { a2_crawled: 0, a3_picked: 0, a4_filled: 0, a5_inserted: 0 },
           note: "seedなし",
           trace,
         },
@@ -320,13 +309,12 @@ export async function POST(req: Request) {
     trace.push(`addrPool=${addrPool.length}`);
 
     // クロール
-    const MAX_PAGES_PER_KEY = 3; // ← 強化：1→3
+    const MAX_PAGES_PER_KEY = 3;
     const DETAIL_CONCURRENCY = 6;
-    const DETAIL_FILL_CAP = 1200; // ← 強化：200→1200（NOT NULL対策）
+    const DETAIL_FILL_CAP = 1200;
     const bag: RawRow[] = [];
     const keywordsUsed: string[] = [];
     let tried = 0;
-    let blockedHints = 0;
 
     for (const k of addrPool) {
       if (bag.length >= Math.max(want * 8, 400)) break;
@@ -335,11 +323,6 @@ export async function POST(req: Request) {
 
       for (let page = 1; page <= MAX_PAGES_PER_KEY; page++) {
         const rows = await crawlByAddressKeyword(k.keyword, page);
-        if (!rows.length) {
-          // ページが JS 必須やブロックの可能性 → ヒントだけ数える
-          blockedHints++;
-          continue;
-        }
         for (const r of rows) {
           const num = String(r.corporate_number || "").trim();
           if (!/^\d{13}$/.test(num)) continue;
@@ -353,20 +336,17 @@ export async function POST(req: Request) {
         if (bag.length >= Math.max(want * 8, 400)) break;
       }
     }
-    trace.push(
-      `raw=${bag.length} tried=${tried} blocked_hints=${blockedHints}`
-    );
+    const a2_crawled = bag.length;
+    trace.push(`raw=${bag.length} tried=${tried}`);
 
     if (!bag.length) {
       return NextResponse.json(
         {
-          inserted_new: 0,
+          new_cache: 0,
           tried,
           keywords_used: keywordsUsed.slice(0, 40),
           rows_preview: [],
-          note: blockedHints
-            ? "検索ページがブロック/JS必須の可能性"
-            : "候補0件",
+          step: { a2_crawled, a3_picked: 0, a4_filled: 0, a5_inserted: 0 },
           trace,
         },
         { status: 200 }
@@ -378,32 +358,38 @@ export async function POST(req: Request) {
     for (const r of bag)
       if (!map.has(r.corporate_number)) map.set(r.corporate_number, r);
     let deduped = Array.from(map.values());
+    const a3_picked = deduped.length;
 
-    // 名称欠落は詳細補完（上限拡大）
+    // 名称欠落は詳細補完
     const need = deduped.filter((r) => !r.name).slice(0, DETAIL_FILL_CAP);
+    let filledNow = 0;
     for (let i = 0; i < need.length; i += DETAIL_CONCURRENCY) {
       const chunk = need.slice(i, i + DETAIL_CONCURRENCY);
       const got = await Promise.all(chunk.map((r) => fetchDetailAndFill(r)));
-      for (const g of got) map.set(g.corporate_number, g);
+      for (let idx = 0; idx < chunk.length; idx++) {
+        const before = chunk[idx];
+        const after = got[idx];
+        if (!before.name && after.name) filledNow++;
+        map.set(after.corporate_number, after);
+      }
     }
     deduped = Array.from(map.values());
+    const a4_filled = filledNow;
 
     // company_name NOT NULL 対策
     const withName = deduped.filter(
       (r) => !!(r.name && r.name.trim().length > 0)
     );
     const rows_preview = withName.slice(0, 20);
-    trace.push(
-      `after_detail_fill withName=${withName.length} / deduped=${deduped.length}`
-    );
 
     if (dryRun) {
       return NextResponse.json(
         {
-          inserted_new: 0,
+          new_cache: 0,
           tried,
           keywords_used: keywordsUsed.slice(0, 40),
           rows_preview,
+          step: { a2_crawled, a3_picked, a4_filled, a5_inserted: 0 },
           trace,
         },
         { status: 200 }
@@ -424,7 +410,13 @@ export async function POST(req: Request) {
 
     if (exErr) {
       return NextResponse.json(
-        { error: exErr.message, hint: "重複チェック失敗", rows_preview, trace },
+        {
+          error: exErr.message,
+          hint: "重複チェック失敗",
+          rows_preview,
+          step: { a2_crawled, a3_picked, a4_filled, a5_inserted: 0 },
+          trace,
+        },
         { status: 500 }
       );
     }
@@ -445,7 +437,7 @@ export async function POST(req: Request) {
         scraped_at: now,
       }));
 
-    let inserted_new = 0;
+    let new_cache = 0;
     if (toInsert.length) {
       const { data, error } = (sb as any)
         .from("nta_corporates_cache")
@@ -461,26 +453,29 @@ export async function POST(req: Request) {
             error: error.message,
             rls_blocked: rlsBlocked || undefined,
             hint: rlsBlocked
-              ? "サーバ環境に SUPABASE_SERVICE_ROLE_KEY を設定するか、RLSで匿名INSERTを許可してください。"
-              : "テーブル/カラム名・権限・NOT NULL・デフォルトを確認してください。",
+              ? "デプロイ環境に SUPABASE_SERVICE_ROLE_KEY を設定するか、RLSで匿名INSERTを許可してください。"
+              : "テーブル/カラム名・制約・権限を確認してください。",
             to_insert_count: toInsert.length,
             rows_preview,
+            step: { a2_crawled, a3_picked, a4_filled, a5_inserted: 0 },
+            using_service_role: usingServiceRole,
             trace,
           },
           { status: 500 }
         );
       }
-      inserted_new = (data || []).length;
+      new_cache = (data || []).length;
     }
 
     return NextResponse.json(
       {
-        inserted_new,
+        new_cache, // ← UIが読むキーに統一
         tried,
+        to_insert_count: toInsert.length,
+        using_service_role: usingServiceRole,
         keywords_used: keywordsUsed.slice(0, 40),
         rows_preview,
-        using_service_role: usingServiceRole,
-        to_insert_count: toInsert.length,
+        step: { a2_crawled, a3_picked, a4_filled, a5_inserted: new_cache }, // ← フロー可視化用
         trace,
       },
       { status: 200 }
@@ -518,6 +513,7 @@ export async function GET(req: Request) {
     ok: res.ok,
     preview_count: Array.isArray(j?.rows_preview) ? j.rows_preview.length : 0,
     preview: j?.rows_preview ?? [],
+    step: j?.step ?? {},
     trace: j?.trace ?? [],
   });
 }

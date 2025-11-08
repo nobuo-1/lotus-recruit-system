@@ -73,7 +73,7 @@ const FLOW_A_TITLES = [
   "2. 国税庁をクロール",
   "3. ランダム地域/企業抽出",
   "4. 詳細補完（名称/住所）",
-  "5. キャッシュ保存（nta_corporates_cache）",
+  "5. キャッシュ保存",
   "6. 実行数到達まで反復",
 ];
 
@@ -254,17 +254,15 @@ export default function ManualFetch() {
         const want = Math.min(BATCH, total - savedCache);
         const seed = `${Date.now()}-${attempts}`;
 
-        // A-2〜A-5: アニメ進行（視覚的フィードバック）
-        for (let i = 1; i <= 4; i++) {
-          setActiveIdx(i);
+        // A-2〜A-5 を「実行中」にしてから API を叩く（実測で後から確定）
+        [1, 2, 3, 4].forEach((idx) => {
+          setActiveIdx(idx);
           setS((a) =>
-            a.map((v, idx) =>
-              idx === i ? "running" : idx < i && v === "idle" ? "done" : v
+            a.map((v, i) =>
+              i === idx ? "running" : i < idx && v === "idle" ? "done" : v
             )
           );
-          await delay(160);
-          setS((a) => a.map((v, idx) => (idx === i ? "done" : v)));
-        }
+        });
 
         // 実API: crawl
         const r = await fetch("/api/form-outreach/companies/crawl", {
@@ -278,36 +276,74 @@ export default function ManualFetch() {
         });
         const j = await safeJson(r);
 
-        // A-5 → A-6（保存反映）
+        // 返却ステップを UI に反映（A-2〜A-5）
+        const a2 = Number(j?.step?.a2_crawled || 0);
+        const a3 = Number(j?.step?.a3_picked || 0);
+        const a4 = Number(j?.step?.a4_filled || 0);
+        const a5 = Number(j?.step?.a5_inserted || 0);
+
+        // A-2: クロール
+        setActiveIdx(1);
+        setS((a) =>
+          a.map((v, idx) => (idx === 1 ? (a2 > 0 ? "done" : "error") : v))
+        );
+
+        // A-3: ピック
+        setActiveIdx(2);
+        setS((a) =>
+          a.map((v, idx) => (idx === 2 ? (a3 > 0 ? "done" : "error") : v))
+        );
+
+        // A-4: 詳細補完（0件でもエラーにはしない）
+        setActiveIdx(3);
+        setS((a) =>
+          a.map((v, idx) => (idx === 3 ? (a4 >= 0 ? "done" : "error") : v))
+        );
+
+        // A-5: キャッシュ保存（0件でも done とし、メッセージで把握）
+        setActiveIdx(4);
+        setS((a) =>
+          a.map((v, idx) => (idx === 4 ? (a5 >= 0 ? "done" : "error") : v))
+        );
+
+        // A-6（保存反映/反復）
         setActiveIdx(5);
         setS((a) => a.map((v, idx) => (idx === 5 ? "running" : v)));
         await delay(120);
 
-        if (!r.ok) {
-          setS((a) => a.map((v, idx) => (idx === 5 ? "error" : v)));
-          throw new Error(j?.error || `crawl failed (${r.status})`);
-        }
-
+        // 保存数の加算（API の new_cache を使用）
         const newCache = Math.max(0, Number(j?.new_cache || 0));
         savedCache += newCache;
 
         setS((a) => a.map((v, idx) => (idx === 5 ? "done" : v)));
         setActiveIdx(-1);
-        setMsg(`キャッシュ保存進行：${savedCache}/${total} 件`);
 
-        if (newCache === 0) await delay(240);
+        setMsg(
+          `キャッシュ保存進行：${savedCache}/${total} 件  (raw:${a2}, pick:${a3}, fill:${a4}, ins:${newCache}, to_insert:${Number(
+            j?.to_insert_count || 0
+          )})`
+        );
+
+        if (!r.ok) {
+          throw new Error(j?.error || `crawl failed (${r.status})`);
+        }
+
+        if (newCache === 0) {
+          // 0件が続くときの緩衝
+          await delay(240);
+        }
       }
 
       /** ---- Phase B: エンリッチ（7〜9） ---- */
       const since = new Date(Date.now() - 15 * 60 * 1000).toISOString(); // 直近15分の新規キャッシュを対象
 
-      // B-7: HP推定
+      // B-7: HP推定（ここではAPIにまとめて任せる前段の表示）
       setActiveIdx(6);
       setS((a) => a.map((v, idx) => (idx === 6 ? "running" : v)));
       await delay(160);
       setS((a) => a.map((v, idx) => (idx === 6 ? "done" : v)));
 
-      // B-8: 到達/抽出（実APIに合わせてB-8〜9まとめて実行）
+      // B-8: 到達/抽出（実APIで B-8〜9 を実行）
       setActiveIdx(7);
       setS((a) => a.map((v, idx) => (idx === 7 ? "running" : v)));
 
@@ -326,7 +362,7 @@ export default function ManualFetch() {
       setS((a) => a.map((v, idx) => (idx === 7 ? "done" : v)));
 
       // B-9: 保存反映
-      const lastIdx = FLOW_A_TITLES.length + 2; // 0-based index: B-9
+      const lastIdx = FLOW_A_TITLES.length + 2; // 0-based index: B-9 の位置
       setActiveIdx(lastIdx);
       setS((a) => a.map((v, idx) => (idx === lastIdx ? "running" : v)));
       await delay(120);
@@ -487,7 +523,7 @@ export default function ManualFetch() {
               企業リスト手動取得
             </h1>
             <p className="text-sm text-neutral-500">
-              二段フローで保存を逐次反映。アイコンの動きは従来通りです。
+              二段フローで保存を逐次反映。アイコンの動きは実処理に同期します。
             </p>
             <p className="text-xs text-neutral-500 mt-1 break-words">
               テナント: <span className="font-mono">{tenantId ?? "-"}</span>
