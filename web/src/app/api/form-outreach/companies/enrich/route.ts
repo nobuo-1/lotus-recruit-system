@@ -42,7 +42,7 @@ type ProspectRow = {
   hq_address: string | null;
   capital: number | null;
   established_on: string | null;
-  phone?: string | null; // ← 追加（選択の取得にも使う）
+  phone?: string | null;
 };
 
 function getAdmin(): { sb: any; usingServiceRole: boolean } {
@@ -482,7 +482,7 @@ export async function POST(req: Request) {
     const rowsForInsert: any[] = [];
     const rejected: any[] = [];
 
-    // 処理プールを十分に確保（従来の 2倍→4倍）
+    // 処理プールを十分に確保（want*4）
     const picked = candidates
       .filter(
         (c: any) =>
@@ -508,14 +508,13 @@ export async function POST(req: Request) {
       } catch {}
 
       if (!website) {
-        // ← 「公式サイトが見つからない」は不適合として必ず保存対象にカウント
         rejected.push({
           tenant_id: tenantId,
           corporate_number: corpNo || null,
           company_name: name,
           website: null,
           contact_email: null,
-          phone: null, // ← rejectedは phone
+          phone: null,
           contact_form_url: null,
           industry_large: null,
           industry_small: null,
@@ -530,7 +529,6 @@ export async function POST(req: Request) {
           created_at: nowIso,
           updated_at: nowIso,
         });
-        // ★ want達成判定は「採用+不採用」の合計で行う
         if (rowsForInsert.length + rejected.length >= want) break;
         continue;
       }
@@ -623,7 +621,7 @@ export async function POST(req: Request) {
           company_name: name,
           website,
           contact_email: email,
-          phone: phoneNum, // ← rejectedは phone
+          phone: phoneNum,
           contact_form_url: contactFormUrl,
           industry_large: null,
           industry_small: null,
@@ -649,8 +647,8 @@ export async function POST(req: Request) {
         website: website || null,
         contact_form_url: contactFormUrl || null,
         contact_email: email || null,
-        phone_number: phoneNum || null, // ← prospectsは phone_number
-        phone: phoneNum || null, // ← 併せて phone も保存
+        phone_number: phoneNum || null,
+        phone: phoneNum || null,
         industry: ind || null,
         company_size: null,
         job_site_source: "nta-crawl",
@@ -664,7 +662,6 @@ export async function POST(req: Request) {
         established_on: est,
       });
 
-      // ★ 採用+不採用の合計で want 達成判定
       if (rowsForInsert.length + rejected.length >= want) break;
     }
 
@@ -709,21 +706,35 @@ export async function POST(req: Request) {
       }
     }
 
-    // 5) DB保存（rejected）— 失敗は返却
+    // 5) DB保存（rejected）— ★一意制約が無い場合のフォールバックを追加
     let rejected_saved = 0;
     if (rejected.length) {
-      const insr = await (sb as any)
-        .from("form_prospects_rejected")
-        .upsert(rejected, {
-          onConflict: "tenant_id,corporate_number",
-          ignoreDuplicates: true,
-        })
-        .select("corporate_number");
-      if (insr.error) {
+      const tryUpsertRejected = async () => {
+        const { data, error } = await (sb as any)
+          .from("form_prospects_rejected")
+          .upsert(rejected, {
+            onConflict: "tenant_id,corporate_number",
+            ignoreDuplicates: true,
+          })
+          .select("corporate_number");
+        return { data, error };
+      };
+
+      let { data: rdata, error: rerr } = await tryUpsertRejected();
+
+      if (rerr && /no unique|ON CONFLICT/i.test(rerr.message || "")) {
+        const insr = await (sb as any)
+          .from("form_prospects_rejected")
+          .insert(rejected)
+          .select("corporate_number");
+        rdata = insr.data;
+        rerr = insr.error;
+      }
+
+      if (rerr) {
         return NextResponse.json(
           {
-            error: insr.error.message,
-            // ここまで保存できたprospectsは返す
+            error: rerr.message,
             rows,
             inserted,
             rejected_attempted: rejected.length,
@@ -731,14 +742,15 @@ export async function POST(req: Request) {
           { status: 500 }
         );
       }
-      rejected_saved = Array.isArray(insr.data) ? insr.data.length : 0;
+
+      rejected_saved = Array.isArray(rdata) ? rdata.length : 0;
     }
 
     return NextResponse.json(
       {
         rows,
         inserted,
-        rejected, // 保存内容のプレビュー（必要に応じてUIで件数のみ表示）
+        rejected,
         rejected_saved,
         processed_total: rowsForInsert.length + rejected.length,
         want,
