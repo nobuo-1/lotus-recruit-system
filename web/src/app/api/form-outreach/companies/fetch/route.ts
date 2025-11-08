@@ -42,6 +42,10 @@ const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 
+// Playwright の ON/OFF & 実行回数上限（町レベルでのみ使用）
+const USE_PW = String(process.env.FO_USE_PLAYWRIGHT ?? "1") === "1";
+const PW_MAX_PER_CALL = Number(process.env.FO_PW_MAX_PER_CALL ?? 1);
+
 /** ---------- Utils ---------- */
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)";
@@ -709,8 +713,46 @@ export async function POST(req: Request) {
       address: string | null;
       detail_url: string | null;
     }> = [];
+
+    let pwUsed = 0;
     const MAX_PAGES_PER_KEY = 2;
+
     for (const k of addrPool) {
+      // 町レベル + Playwright有効時は UI ベース検索を一度だけ試す
+      if (USE_PW && k.level === "town" && pwUsed < PW_MAX_PER_CALL) {
+        try {
+          const { searchNtaByAddressPW } = await import(
+            "@/server/scrapers/ntaPlaywright"
+          );
+          const rows = await searchNtaByAddressPW({
+            keyword: [k.pref, k.city, k.town].filter(Boolean).join(" "),
+            timeoutMs: 12000,
+          });
+          pwUsed++;
+          for (const r of rows) {
+            const num = String(r.corporate_number || "").trim();
+            if (!/^\d{13}$/.test(num)) continue;
+            if (existingCorpNum.has(num)) continue;
+            rawRows.push({
+              corporate_number: num,
+              name: r.name || null,
+              address: r.address || null,
+              detail_url: r.detail_url || null,
+            });
+          }
+          trace.push(
+            `pw_ok:${k.city}${k.town ? "_" + k.town : ""}=${rows.length}`
+          );
+          if (rawRows.length >= Math.max(want * 40, 1000)) break;
+          // 成功時は同キーのHTTPクロールはスキップし次のキーへ
+          continue;
+        } catch (e: any) {
+          trace.push(`pw_err:${e?.message || e}`);
+          // フォールバックしてHTTPクロールへ
+        }
+      }
+
+      // 通常の HTTP クロール
       for (let page = 1; page <= MAX_PAGES_PER_KEY; page++) {
         const rows = await crawlByAddressKeyword(k.keyword, page);
         for (const r of rows) {
@@ -729,7 +771,7 @@ export async function POST(req: Request) {
       }
       if (rawRows.length >= Math.max(want * 40, 1000)) break;
     }
-    trace.push(`crawl=${rawRows.length}`);
+    trace.push(`crawl=${rawRows.length}, pwUsed=${pwUsed}`);
 
     // 詳細ページ補完（/number/13桁）
     const filled: typeof rawRows = [];
@@ -828,7 +870,7 @@ export async function POST(req: Request) {
     for (let i = 0; i < resolvable.length; i += CONCURRENCY) {
       const chunk = resolvable.slice(i, i + CONCURRENCY);
       const verified: Array<Candidate | null> = await Promise.all(
-        chunk.map((c) => verifyAndEnrichWebsite(c))
+        chunk.map((c: Candidate) => verifyAndEnrichWebsite(c))
       );
       for (const cc of verified) {
         if (!cc) continue;

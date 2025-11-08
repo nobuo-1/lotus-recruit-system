@@ -13,7 +13,8 @@
     "worker:prod": "node --import=tsx/loader src/worker/email.worker.ts",
     "generate:nta-towns:postal": "tsx scripts/generate-nta-town-seeds-from-postal.ts",
     "scrape:nta": "tsx scripts/scrape-nta-corporates.ts",
-    "scrape:nta:tenant": "tsx scripts/scrape-nta-corporates.ts --save-cache --tenant"
+    "scrape:nta:tenant": "tsx scripts/scrape-nta-corporates.ts --save-cache --tenant",
+    "postinstall": "playwright install chromium"
   },
   "engines": {
     "node": "20.x"

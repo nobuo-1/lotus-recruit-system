@@ -1,0 +1,413 @@
+.
+├── README.md
+├── data
+│   ├── cache
+│   │   ├── nta_東京都_渋谷区_1762517046246.jsonl
+│   │   ├── nta_東京都_渋谷区_1762517742014.jsonl
+│   │   ├── nta_東京都_渋谷区_1762518073598.jsonl
+│   │   └── nta_東京都_渋谷区_1762518545589.jsonl
+│   ├── debug
+│   ├── nta-csv
+│   │   ├── ken_all.zip
+│   │   └── utf_ken_all.zip
+│   └── nta-scrape
+│       └── out
+├── dkim_p_value.txt
+├── dkim_private.pem
+├── dkim_public.pem
+├── eslint.config.mjs
+├── file_structure.txt
+├── next-env.d.ts
+├── next.config.mjs
+├── next.config.ts
+├── node_modules
+│   ├── @eslint
+│   │   └── eslintrc -> ../.pnpm/@eslint+eslintrc@3.3.1/node_modules/@eslint/eslintrc
+│   ├── @supabase
+│   │   ├── ssr -> ../.pnpm/@supabase+ssr@0.7.0_@supabase+supabase-js@2.57.4/node_modules/@supabase/ssr
+│   │   └── supabase-js -> ../.pnpm/@supabase+supabase-js@2.57.4/node_modules/@supabase/supabase-js
+│   ├── @tailwindcss
+│   │   └── postcss -> ../.pnpm/@tailwindcss+postcss@4.1.13/node_modules/@tailwindcss/postcss
+│   ├── @types
+│   │   ├── adm-zip -> ../.pnpm/@types+adm-zip@0.5.7/node_modules/@types/adm-zip
+│   │   ├── node -> ../.pnpm/@types+node@20.19.14/node_modules/@types/node
+│   │   ├── nodemailer -> ../.pnpm/@types+nodemailer@7.0.1/node_modules/@types/nodemailer
+│   │   ├── react -> ../.pnpm/@types+react@19.1.13/node_modules/@types/react
+│   │   └── react-dom -> ../.pnpm/@types+react-dom@19.1.9_@types+react@19.1.13/node_modules/@types/react-dom
+│   ├── adm-zip -> .pnpm/adm-zip@0.5.16/node_modules/adm-zip
+│   ├── bullmq -> .pnpm/bullmq@5.58.5/node_modules/bullmq
+│   ├── clsx -> .pnpm/clsx@2.1.1/node_modules/clsx
+│   ├── csv-parse -> .pnpm/csv-parse@6.1.0/node_modules/csv-parse
+│   ├── dotenv -> .pnpm/dotenv@17.2.2/node_modules/dotenv
+│   ├── eslint -> .pnpm/eslint@9.35.0_jiti@2.5.1/node_modules/eslint
+│   ├── eslint-config-next -> .pnpm/eslint-config-next@15.5.3_eslint@9.35.0_jiti@2.5.1__typescript@5.9.2/node_modules/eslint-config-next
+│   ├── iconv-lite -> .pnpm/iconv-lite@0.7.0/node_modules/iconv-lite
+│   ├── ioredis -> .pnpm/ioredis@5.7.0/node_modules/ioredis
+│   ├── lucide-react -> .pnpm/lucide-react@0.544.0_react@19.1.0/node_modules/lucide-react
+│   ├── next -> .pnpm/next@15.5.3_react-dom@19.1.0_react@19.1.0__react@19.1.0/node_modules/next
+│   ├── nodemailer -> .pnpm/nodemailer@7.0.6/node_modules/nodemailer
+│   ├── playwright -> .pnpm/playwright@1.56.1/node_modules/playwright
+│   ├── react -> .pnpm/react@19.1.0/node_modules/react
+│   ├── react-dom -> .pnpm/react-dom@19.1.0_react@19.1.0/node_modules/react-dom
+│   ├── recharts -> .pnpm/recharts@3.2.1_@types+react@19.1.13_react-dom@19.1.0_react@19.1.0__react-is@16.13.1_react@19.1.0_redux@5.0.1/node_modules/recharts
+│   ├── tailwindcss -> .pnpm/tailwindcss@4.1.13/node_modules/tailwindcss
+│   ├── ts-node -> .pnpm/ts-node@10.9.2_@types+node@20.19.14_typescript@5.9.2/node_modules/ts-node
+│   ├── tsx -> .pnpm/tsx@4.20.5/node_modules/tsx
+│   └── typescript -> .pnpm/typescript@5.9.2/node_modules/typescript
+├── package.json
+├── pnpm-lock.yaml
+├── pnpm-workspace.yaml
+├── postcss.config.mjs
+├── public
+│   ├── file.svg
+│   ├── globe.svg
+│   ├── next.svg
+│   ├── vercel.svg
+│   └── window.svg
+├── scripts
+│   ├── generate-nta-town-seeds-from-postal.ts
+│   └── scrape-nta-corporates.ts
+├── src
+│   ├── app
+│   │   ├── api
+│   │   │   ├── attachments
+│   │   │   │   ├── route.ts
+│   │   │   │   └── upload
+│   │   │   │       └── route.ts
+│   │   │   ├── auth
+│   │   │   │   ├── login
+│   │   │   │   │   └── route.ts
+│   │   │   │   └── set
+│   │   │   │       └── route.ts
+│   │   │   ├── campaigns
+│   │   │   │   ├── [id]
+│   │   │   │   │   ├── deliveries
+│   │   │   │   │   │   └── route.ts
+│   │   │   │   │   ├── enqueue
+│   │   │   │   │   │   └── route.ts
+│   │   │   │   │   ├── schedule
+│   │   │   │   │   │   └── route.ts
+│   │   │   │   │   ├── send
+│   │   │   │   │   │   └── route.ts
+│   │   │   │   │   └── sent
+│   │   │   │   │       └── route.ts
+│   │   │   │   ├── route.ts
+│   │   │   │   ├── schedules
+│   │   │   │   │   ├── [id]
+│   │   │   │   │   │   └── cancel
+│   │   │   │   │   │       └── route.ts
+│   │   │   │   │   └── cancel
+│   │   │   │   │       └── route.ts
+│   │   │   │   └── send
+│   │   │   │       └── route.ts
+│   │   │   ├── dev
+│   │   │   │   ├── enqueue-demo
+│   │   │   │   │   └── route.ts
+│   │   │   │   └── queue-health
+│   │   │   │       └── route.ts
+│   │   │   ├── email
+│   │   │   │   ├── open
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── recipient-list-settings
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── schedules
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── settings
+│   │   │   │   │   └── route.ts
+│   │   │   │   └── summary
+│   │   │   │       └── route.ts
+│   │   │   ├── form-outreach
+│   │   │   │   ├── automation
+│   │   │   │   │   ├── route.ts
+│   │   │   │   │   └── settings
+│   │   │   │   │       └── route.ts
+│   │   │   │   ├── companies
+│   │   │   │   │   ├── cancel-additions
+│   │   │   │   │   │   └── route.ts
+│   │   │   │   │   ├── fetch
+│   │   │   │   │   │   ├── route.ts
+│   │   │   │   │   │   ├── start
+│   │   │   │   │   │   │   └── route.ts
+│   │   │   │   │   │   └── worker
+│   │   │   │   │   │       └── route.ts
+│   │   │   │   │   ├── fetch-now
+│   │   │   │   │   │   └── route.ts
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── limits
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── messages
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── prospects
+│   │   │   │   │   ├── route.ts
+│   │   │   │   │   └── status
+│   │   │   │   │       └── route.ts
+│   │   │   │   ├── runs
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── send
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── senders
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── sent-map
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── series
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── settings
+│   │   │   │   │   └── filters
+│   │   │   │   │       └── route.ts
+│   │   │   │   ├── summary
+│   │   │   │   │   └── route.ts
+│   │   │   │   └── templates
+│   │   │   │       ├── [id]
+│   │   │   │       │   └── route.ts
+│   │   │   │       ├── preview
+│   │   │   │       │   └── route.ts
+│   │   │   │       └── route.ts
+│   │   │   ├── job-boards
+│   │   │   │   ├── alerts
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── destinations
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── errors
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── logins
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── manual
+│   │   │   │   │   ├── history
+│   │   │   │   │   │   └── route.ts
+│   │   │   │   │   ├── route.ts
+│   │   │   │   │   └── run-batch
+│   │   │   │   │       └── route.ts
+│   │   │   │   ├── metrics
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── metrics-weekly
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── multi-series
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── notify-emails
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── notify-rules
+│   │   │   │   │   ├── [id]
+│   │   │   │   │   │   └── route.ts
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── options
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── recipients
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── run
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── runs
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── series
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── site-selection
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── sites
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── summary
+│   │   │   │   │   ├── route.ts
+│   │   │   │   │   └── runs
+│   │   │   │   │       └── route.ts
+│   │   │   │   └── table
+│   │   │   │       └── route.ts
+│   │   │   ├── mails
+│   │   │   │   ├── [id]
+│   │   │   │   │   ├── route.ts
+│   │   │   │   │   └── sent
+│   │   │   │   │       └── route.ts
+│   │   │   │   ├── route.ts
+│   │   │   │   ├── schedules
+│   │   │   │   │   ├── [id]
+│   │   │   │   │   │   └── cancel
+│   │   │   │   │   │       └── route.ts
+│   │   │   │   │   ├── cancel
+│   │   │   │   │   │   └── route.ts
+│   │   │   │   │   └── list
+│   │   │   │   │       └── route.ts
+│   │   │   │   └── send
+│   │   │   │       └── route.ts
+│   │   │   ├── me
+│   │   │   │   ├── route.ts
+│   │   │   │   └── tenant
+│   │   │   │       └── route.ts
+│   │   │   ├── ping
+│   │   │   │   └── route.ts
+│   │   │   ├── recipients
+│   │   │   │   ├── delete
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── get
+│   │   │   │   │   └── [id]
+│   │   │   │   │       └── route.ts
+│   │   │   │   ├── import
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── search
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── toggle
+│   │   │   │   │   └── route.ts
+│   │   │   │   └── upsert
+│   │   │   │       └── route.ts
+│   │   │   ├── settings
+│   │   │   │   ├── brand
+│   │   │   │   │   └── route.ts
+│   │   │   │   ├── company
+│   │   │   │   │   └── route.ts
+│   │   │   │   └── route.ts
+│   │   │   └── unsubscribe
+│   │   │       └── route.ts
+│   │   ├── auth
+│   │   │   └── login
+│   │   │       ├── LoginClient.tsx
+│   │   │       └── page.tsx
+│   │   ├── campaigns
+│   │   │   ├── [id]
+│   │   │   │   ├── page.tsx
+│   │   │   │   └── send
+│   │   │   │       └── page.tsx
+│   │   │   ├── layout.tsx
+│   │   │   ├── new
+│   │   │   │   └── page.tsx
+│   │   │   └── page.tsx
+│   │   ├── dashboard
+│   │   │   └── page.tsx
+│   │   ├── email
+│   │   │   ├── page.tsx
+│   │   │   ├── schedules
+│   │   │   │   └── page.tsx
+│   │   │   └── settings
+│   │   │       ├── RecipientListSettingsForm.tsx
+│   │   │       └── page.tsx
+│   │   ├── favicon.ico
+│   │   ├── form-outreach
+│   │   │   ├── automation
+│   │   │   │   └── page.tsx
+│   │   │   ├── companies
+│   │   │   │   ├── fetch
+│   │   │   │   │   └── page.tsx
+│   │   │   │   └── page.tsx
+│   │   │   ├── messages
+│   │   │   │   └── page.tsx
+│   │   │   ├── page.tsx
+│   │   │   ├── runs
+│   │   │   │   ├── all
+│   │   │   │   │   └── page.tsx
+│   │   │   │   ├── manual
+│   │   │   │   │   └── page.tsx
+│   │   │   │   └── page.tsx
+│   │   │   ├── schedules
+│   │   │   │   └── page.tsx
+│   │   │   ├── senders
+│   │   │   │   └── page.tsx
+│   │   │   ├── settings
+│   │   │   │   ├── client.tsx
+│   │   │   │   ├── filters
+│   │   │   │   │   └── page.tsx
+│   │   │   │   └── page.tsx
+│   │   │   └── templates
+│   │   │       └── page.tsx
+│   │   ├── globals.css
+│   │   ├── job-boards
+│   │   │   ├── destinations
+│   │   │   │   ├── new
+│   │   │   │   │   └── page.tsx
+│   │   │   │   └── page.tsx
+│   │   │   ├── logins
+│   │   │   │   └── page.tsx
+│   │   │   ├── manual
+│   │   │   │   ├── history
+│   │   │   │   │   └── page.tsx
+│   │   │   │   └── page.tsx
+│   │   │   ├── page.tsx
+│   │   │   ├── runs
+│   │   │   │   ├── Client.tsx
+│   │   │   │   ├── all
+│   │   │   │   │   └── page.tsx
+│   │   │   │   └── page.tsx
+│   │   │   └── settings
+│   │   │       ├── new
+│   │   │       │   └── page.tsx
+│   │   │       └── page.tsx
+│   │   ├── layout.tsx
+│   │   ├── mails
+│   │   │   ├── [id]
+│   │   │   │   ├── page.tsx
+│   │   │   │   ├── send
+│   │   │   │   │   └── page.tsx
+│   │   │   │   └── sent
+│   │   │   │       └── route.ts
+│   │   │   ├── layout.tsx
+│   │   │   ├── new
+│   │   │   │   └── page.tsx
+│   │   │   ├── page.tsx
+│   │   │   └── schedules
+│   │   │       └── page.tsx
+│   │   ├── page.tsx
+│   │   ├── recipients
+│   │   │   ├── [id]
+│   │   │   │   └── edit
+│   │   │   │       └── page.tsx
+│   │   │   ├── layout.tsx
+│   │   │   ├── new
+│   │   │   │   └── page.tsx
+│   │   │   ├── page.tsx
+│   │   │   └── upload
+│   │   │       └── page.tsx
+│   │   ├── scout
+│   │   │   └── page.tsx
+│   │   └── settings
+│   │       ├── company
+│   │       │   └── page.tsx
+│   │       ├── org
+│   │       │   └── page.tsx
+│   │       └── page.tsx
+│   ├── components
+│   │   ├── AppHeader.tsx
+│   │   ├── AppToast.tsx
+│   │   ├── BackButton.tsx
+│   │   ├── CardAction.tsx
+│   │   ├── ConfirmCancelButton.tsx
+│   │   ├── EmailFeatureMenu.tsx
+│   │   ├── Header.tsx
+│   │   ├── JobCategoriesCell.tsx
+│   │   ├── KpiCard.tsx
+│   │   ├── Logo.tsx
+│   │   ├── LogoutButton.tsx
+│   │   ├── ScheduleCancelButton.tsx
+│   │   ├── Toggle.tsx
+│   │   ├── WheelDatePicker.tsx
+│   │   ├── WheelTimePicker.tsx
+│   │   └── job-boards
+│   │       └── JobCategoryModal.tsx
+│   ├── constants
+│   │   ├── jobCategories.ts
+│   │   ├── ntaTownSeeds.generated.ts
+│   │   └── prefectures.ts
+│   ├── env.ts
+│   ├── lib
+│   │   ├── formatDate.ts
+│   │   ├── hooks
+│   │   │   └── useRecipientListSettings.ts
+│   │   ├── job-boards
+│   │   │   └── normalize.ts
+│   │   ├── replaceVars.ts
+│   │   ├── supabase
+│   │   │   └── browser.ts
+│   │   ├── supabaseAdmin.ts
+│   │   ├── supabaseClient.ts
+│   │   ├── supabaseRoute.ts
+│   │   ├── supabaseServer.ts
+│   │   ├── toast.ts
+│   │   └── withToast.ts
+│   ├── middleware.ts
+│   ├── server
+│   │   ├── mailer.ts
+│   │   ├── queue.ts
+│   │   ├── scrapers
+│   │   │   └── jobBoards.ts
+│   │   └── senderConfig.ts
+│   ├── utils
+│   │   └── date.ts
+│   └── worker
+│       └── email.worker.ts
+├── support-context.txt
+└── tsconfig.json
+
+203 directories, 208 files
