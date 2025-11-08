@@ -24,7 +24,7 @@ const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
 
 /** ========= HTTP helpers ========= */
 const UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)";
+  "Mozilla/5.0 (Windows NT 10.0; Win32; x32) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36";
 const LANG = "ja-JP,ja;q=0.9";
 
 function okUuid(s: string) {
@@ -66,13 +66,12 @@ function strip(fragment: string) {
 function shuffle<T>(arr: T[], seed: number) {
   const a = arr.slice();
   for (let i = a.length - 1; i > 0; i--) {
-    const j = (seed + i * 9301 + 49297) % (i + 1);
+    seed = (seed * 9301 + 49297) % 233280;
+    const r = seed / 233280;
+    const j = Math.floor(r * (i + 1));
     [a[i], a[j]] = [a[j], a[i]];
   }
   return a;
-}
-function range(n: number) {
-  return Array.from({ length: n }, (_, i) => i + 1);
 }
 
 /** ========= 1) Cookie/Token/Pref ========= */
@@ -164,9 +163,8 @@ async function searchOnce(
   tokenValue: string,
   prefCode: string,
   cityCode: string,
-  page: number,
-  viewNum: number,
-  order: number
+  page = 1,
+  viewNum = 10
 ): Promise<{
   rows: RawRow[];
   htmlSig: Record<string, boolean>;
@@ -174,14 +172,14 @@ async function searchOnce(
 }> {
   const form = new URLSearchParams();
   form.set(tokenName, tokenValue);
-  form.set("houzinNmShTypeRbtn", "2"); // 名称: 部分一致
+  form.set("houzinNmShTypeRbtn", "2");
   form.set("houzinNmTxtf", "");
-  form.set("houzinAddrShTypeRbtn", "1"); // 所在地: 都道府県
+  form.set("houzinAddrShTypeRbtn", "1");
   form.set("prefectureLst", prefCode);
   form.set("cityLst", cityCode);
   form.set("tyoumeTxtf", "");
   form.set("kokugaiTxtf", "");
-  form.set("orderRbtn", String(order)); // ★ ランダム順序
+  form.set("orderRbtn", "1");
   form.set("closeCkbx", "1");
   form.set("historyCkbx", "");
   form.set("viewNumAnc", String(viewNum));
@@ -219,7 +217,7 @@ async function searchOnce(
   return { rows: parseResultTable(html), htmlSig, resultCount };
 }
 
-/** ========= parse (フリガナ除去対応) ========= */
+/** ========= parse ========= */
 function parseResultTable(html: string): RawRow[] {
   const out: RawRow[] = [];
   const tableMatch =
@@ -238,12 +236,12 @@ function parseResultTable(html: string): RawRow[] {
     const numTxt = strip(ths[0] ?? "");
     const num = ((numTxt.match(/\b\d{13}\b/) || [])[0] || "").trim();
 
-    // ★ フリガナ(div.furigana...) を nameセルから除去してからstrip
-    const nameCellHtml = (tds[0] ?? "").replace(
-      /<div[^>]*class=["'][^"']*\bfurigana\b[^"']*["'][^>]*>[\s\S]*?<\/div>/gi,
+    // --- フリガナ除去: <div class="furigana">…</div> を事前に削除してからstrip ---
+    const nameCell = (tds[0] || "").replace(
+      /<div[^>]*class=["']?furigana["']?[^>]*>[\s\S]*?<\/div>/gi,
       ""
     );
-    const nameTxt = strip(nameCellHtml).slice(0, 200);
+    const nameTxt = strip(nameCell).slice(0, 200);
 
     const addrTxt = strip(tds[1] ?? "").slice(0, 300);
 
@@ -261,12 +259,23 @@ function parseResultTable(html: string): RawRow[] {
 }
 
 /** ========= Supabase ========= */
-function getAdmin(): { sb: any; usingServiceRole: boolean } {
+function getAdmin(): {
+  sb: any;
+  usingServiceRole: boolean;
+  project_ref: string | null;
+  db_url_host: string | null;
+} {
   if (!SUPABASE_URL) throw new Error("NEXT_PUBLIC_SUPABASE_URL is missing");
+  const url = new URL(SUPABASE_URL);
+  const host = url.host || null;
+  const projectRef = host?.split(".")[0] || null;
+
   if (SERVICE_ROLE)
     return {
       sb: createClient(SUPABASE_URL, SERVICE_ROLE) as any,
       usingServiceRole: true,
+      project_ref: projectRef,
+      db_url_host: host,
     };
   if (!ANON_KEY)
     throw new Error(
@@ -275,6 +284,8 @@ function getAdmin(): { sb: any; usingServiceRole: boolean } {
   return {
     sb: createClient(SUPABASE_URL, ANON_KEY) as any,
     usingServiceRole: false,
+    project_ref: projectRef,
+    db_url_host: host,
   };
 }
 
@@ -295,25 +306,27 @@ export async function POST(req: Request) {
     const want: number = clamp(body?.want ?? 20, 1, 200);
     const hops: number = clamp(body?.hops ?? 1, 0, 3);
     const seedStr: string = String(body?.seed || Math.random()).slice(2);
-    const seedNum = Number((seedStr || "").replace(/\D/g, "")) || Date.now();
+    let seedNum = Number((seedStr || "").replace(/\D/g, "")) || Date.now();
     trace.push(`want=${want} hops=${hops} seed=${seedStr}`);
 
     const { cookie, tokenName, tokenValue, prefectures } =
       await getSessionAndToken();
     trace.push(`pref_count=${prefectures.length}`);
 
-    // ★ 都道府県ランダム選定（フィルタがあればその中からランダム、無ければ全体から）
-    const prefCandidates =
-      filters.prefectures && filters.prefectures.length
-        ? prefectures.filter((p) => filters.prefectures!.includes(p.name))
-        : prefectures;
-    const prefPool = shuffle(prefCandidates, seedNum).slice(
-      0,
-      Math.min(6, prefCandidates.length || 3)
-    );
+    // --- 対象都道府県の決定 ---
+    const specifiedPrefNames = Array.isArray(filters.prefectures)
+      ? filters.prefectures.filter(Boolean)
+      : [];
+    const poolAll = prefectures.slice();
+    let prefPool =
+      specifiedPrefNames.length > 0
+        ? poolAll.filter((p) => specifiedPrefNames.includes(p.name))
+        : shuffle(poolAll, seedNum).slice(0, 8); // ← デフォは8都道府県をランダム
 
+    // --- 各都道府県からランダムに市区町村を抽出（均等にばらす） ---
     const pickedCities: Array<{ pref: PrefOpt; city: CityOpt }> = [];
-    for (const [idx, pref] of prefPool.entries()) {
+    const CITIES_PER_PREF = 3;
+    for (const pref of prefPool) {
       const cities = await fetchCities(
         cookie,
         tokenName,
@@ -321,14 +334,20 @@ export async function POST(req: Request) {
         pref.code
       );
       if (!cities.length) continue;
-      // 都市もランダムに1〜3件
-      for (const c of shuffle(cities, seedNum + idx * 101).slice(0, 3)) {
-        pickedCities.push({ pref, city: c });
-      }
+      const chosen = shuffle(cities, (seedNum += 17)).slice(0, CITIES_PER_PREF);
+      for (const c of chosen) pickedCities.push({ pref, city: c });
     }
     trace.push(`picked_pairs=${pickedCities.length}`);
 
     if (!pickedCities.length) {
+      const { sb, usingServiceRole, project_ref, db_url_host } = getAdmin();
+      // DBプローブ（任意）
+      const probe = await (sb as any)
+        .from("nta_corporates_cache")
+        .select("corporate_number", { count: "exact", head: true })
+        .limit(1);
+      const db_probe_found = Number(probe?.count ?? 0);
+
       return NextResponse.json(
         {
           new_cache: 0,
@@ -339,6 +358,9 @@ export async function POST(req: Request) {
           html_sig: {},
           trace,
           using_service_role: !!SERVICE_ROLE,
+          project_ref,
+          db_url_host,
+          db_probe_found,
         },
         { status: 200 }
       );
@@ -349,63 +371,56 @@ export async function POST(req: Request) {
     let lastCount: number | undefined;
 
     const VIEW_NUM = 10;
+    const PAGES_PER_CITY = Math.min(5, 1 + hops * 2); // ← 1市区町村あたり最大5ページ
+    const CITY_LIMIT = Math.max(5, Math.floor(want / 4)); // ← 取りすぎ防止
 
-    // ★ ランダム順序（1:昇順, 2:降順, 3:所在地順, 4:法人番号順）
-    const ORDERS = [1, 2, 3, 4];
-
-    for (const [i, pair] of pickedCities.entries()) {
-      const order = ORDERS[(seedNum + i) % ORDERS.length];
-
-      // まず1回叩いて件数を把握
-      const pre = await searchOnce(
+    for (const pair of shuffle(pickedCities, (seedNum += 97)).slice(
+      0,
+      CITY_LIMIT
+    )) {
+      // まず1ページ目で総件数を把握
+      const first = await searchOnce(
         cookie,
         tokenName,
         tokenValue,
         pair.pref.code,
         pair.city.code,
         1,
-        VIEW_NUM,
-        order
+        VIEW_NUM
       );
-      lastSig = pre.htmlSig;
-      if (typeof pre.resultCount === "number") lastCount = pre.resultCount;
-      for (const r of pre.rows) {
-        if (/^\d{13}$/.test(r.corporate_number) && r.name) bag.push(r);
-      }
+      lastSig = first.htmlSig;
+      if (typeof first.resultCount === "number") lastCount = first.resultCount;
+      for (const r of first.rows)
+        if (/^\d{13}$/.test(r.corporate_number)) bag.push(r);
 
-      // 総ページ数→ランダムページ選定
-      const totalPages =
-        typeof pre.resultCount === "number" && pre.resultCount > 0
-          ? Math.ceil(pre.resultCount / VIEW_NUM)
-          : 1;
+      // 総ページ（安全上100ページ上限）
+      const totalPages = Math.max(
+        1,
+        Math.min(100, Math.ceil((lastCount || 0) / VIEW_NUM))
+      );
 
-      const pages = shuffle(range(totalPages), seedNum + i * 13)
-        .slice(0, Math.max(1, 1 + hops))
-        .sort((a, b) => a - b); // （順不同でも良い）
+      // ランダムな他ページからも取得
+      const visited = new Set<number>([1]);
+      for (let k = 0; k < PAGES_PER_CITY - 1; k++) {
+        if (bag.length >= Math.max(80, want * 3)) break;
+        const rnd = 2 + ((seedNum += 131) % Math.max(1, totalPages - 1));
+        if (visited.has(rnd)) continue;
+        visited.add(rnd);
 
-      // 既に1ページ目は取得済みなので省く
-      const uniquePages = Array.from(new Set(pages.filter((p) => p !== 1)));
-
-      for (const p of uniquePages) {
-        const { rows, htmlSig, resultCount } = await searchOnce(
+        const { rows, htmlSig } = await searchOnce(
           cookie,
           tokenName,
           tokenValue,
           pair.pref.code,
           pair.city.code,
-          p,
-          VIEW_NUM,
-          order
+          rnd,
+          VIEW_NUM
         );
         lastSig = htmlSig;
-        if (typeof resultCount === "number") lastCount = resultCount;
-        for (const r of rows) {
-          if (!/^\d{13}$/.test(r.corporate_number)) continue;
-          if (!r.name) continue;
-          bag.push(r);
-        }
-        if (bag.length >= Math.max(80, want * 3)) break;
+        for (const r of rows)
+          if (/^\d{13}$/.test(r.corporate_number)) bag.push(r);
       }
+
       if (bag.length >= Math.max(80, want * 3)) break;
     }
 
@@ -424,7 +439,15 @@ export async function POST(req: Request) {
       detail_url: r.detail_url,
     }));
 
-    const { sb, usingServiceRole } = getAdmin();
+    const { sb, usingServiceRole, project_ref, db_url_host } = getAdmin();
+
+    // DBプローブ（任意の可視化）
+    const probe = await (sb as any)
+      .from("nta_corporates_cache")
+      .select("corporate_number", { count: "exact", head: true })
+      .limit(1);
+    const db_probe_found = Number(probe?.count ?? 0);
+
     let inserted_new = 0;
     let rlsWarning: string | undefined;
     let toInsert: any[] = [];
@@ -447,6 +470,9 @@ export async function POST(req: Request) {
             html_sig: { ...lastSig, resultCount: lastCount },
             trace,
             using_service_role: usingServiceRole,
+            project_ref,
+            db_url_host,
+            db_probe_found,
           },
           { status: 500 }
         );
@@ -462,7 +488,7 @@ export async function POST(req: Request) {
         .map((r) => ({
           tenant_id: tenantId,
           corporate_number: r.corporate_number,
-          company_name: r.name, // ★ フリガナ無しの正式名称のみ
+          company_name: r.name,
           address: r.address ?? null,
           detail_url: r.detail_url ?? null,
           source: "nta-crawl",
@@ -478,6 +504,7 @@ export async function POST(req: Request) {
               ignoreDuplicates: true,
             })
             .select("corporate_number");
+
           return { data, error };
         };
 
@@ -501,12 +528,15 @@ export async function POST(req: Request) {
               error: error.message,
               rls_blocked: rlsBlocked || undefined,
               hint: rlsBlocked
-                ? "RLSによりINSERTが拒否。SERVICE_ROLE か RLS緩和を設定してください。"
+                ? "RLSによりINSERTが拒否。SUPABASE_SERVICE_ROLE_KEY を設定するか、RLSポリシーでINSERTを許可してください。"
                 : "テーブルのユニーク制約/権限/制約を確認してください。",
               step: { a2_crawled, a3_picked, a4_filled, a5_inserted: 0 },
               html_sig: { ...lastSig, resultCount: lastCount },
               trace,
               using_service_role: usingServiceRole,
+              project_ref,
+              db_url_host,
+              db_probe_found,
             },
             { status: 500 }
           );
@@ -516,7 +546,7 @@ export async function POST(req: Request) {
 
         if (!usingServiceRole && toInsert.length > 0 && inserted_new === 0) {
           rlsWarning =
-            "新規候補は検出されましたが保存できませんでした。RLSにより匿名INSERT拒否の可能性。SERVICE_ROLEの設定を推奨。";
+            "新規候補は検出されましたが保存できませんでした。RLS により匿名INSERTが拒否の可能性。SUPABASE_SERVICE_ROLE_KEY を設定してください。";
         }
       }
     }
@@ -530,6 +560,10 @@ export async function POST(req: Request) {
         using_service_role: usingServiceRole,
         html_sig: { ...lastSig, resultCount: lastCount },
         trace,
+        warning: rlsWarning,
+        project_ref,
+        db_url_host,
+        db_probe_found,
       },
       { status: 200 }
     );

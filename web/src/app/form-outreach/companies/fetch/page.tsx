@@ -21,11 +21,11 @@ type AddedRow = {
   website: string | null;
   contact_email: string | null;
   contact_form_url?: string | null;
+  phone_number?: string | null; // ← 追加
   industry?: string | null;
   company_size?: string | null;
   prefectures?: string[] | null;
   job_site_source?: string | null;
-  source_site?: string | null;
   corporate_number?: string | null;
   hq_address?: string | null;
   capital?: number | null;
@@ -38,6 +38,7 @@ type RejectedRow = {
   website?: string | null;
   contact_email?: string | null;
   contact_form_url?: string | null;
+  phone_number?: string | null; // ← 追加
   industry_large?: string | null;
   industry_small?: string | null;
   company_size?: string | null;
@@ -84,8 +85,7 @@ type CrawlDebug = {
   rows_preview?: CrawlPreviewRow[];
   trace?: string[];
   warning?: string;
-  /** ← 追加：接続先可視化 */
-  project_ref?: string | null;
+  project_ref?: string | null; // 接続先
   db_url_host?: string | null;
   db_probe_found?: number;
 };
@@ -102,7 +102,7 @@ const FLOW_A_TITLES = [
 const FLOW_B_TITLES = [
   "7. 新規キャッシュ分のHP推定",
   "8. 到達性チェック/会社概要抽出",
-  "9. form_prospects保存/反映",
+  "9. form_prospects保存/反映（フィルタ不適合を除外）",
 ];
 
 export default function ManualFetch() {
@@ -302,13 +302,6 @@ export default function ManualFetch() {
         const toInsert = Number(j?.to_insert_count || 0);
         const usingSrv = !!j?.using_service_role;
 
-        // 追加：接続先 & プローブ
-        const projectRef: string | null =
-          j?.project_ref != null ? String(j.project_ref) : null;
-        const dbUrlHost: string | null =
-          j?.db_url_host != null ? String(j.db_url_host) : null;
-        const probeFound: number = Number(j?.db_probe_found ?? 0);
-
         // debug state
         setCrawlDebug({
           step: j?.step,
@@ -319,37 +312,28 @@ export default function ManualFetch() {
           rows_preview: Array.isArray(j?.rows_preview) ? j.rows_preview : [],
           trace: Array.isArray(j?.trace) ? j.trace : [],
           warning: j?.warning,
-          project_ref: projectRef,
-          db_url_host: dbUrlHost,
-          db_probe_found: probeFound,
+          project_ref: j?.project_ref ?? null,
+          db_url_host: j?.db_url_host ?? null,
+          db_probe_found: Number(j?.db_probe_found ?? 0),
         });
 
-        // A-2 result
+        // A-2 result〜A-6
         setS((a) =>
           a.map((v, idx) => (idx === 1 ? (a2 > 0 ? "done" : "error") : v))
         );
-
-        // A-3
         setActiveIdx(2);
         setS((a) =>
           a.map((v, idx) => (idx === 2 ? (a3 > 0 ? "done" : "error") : v))
         );
-
-        // A-4
         setActiveIdx(3);
         setS((a) => a.map((v, idx) => (idx === 3 ? "done" : v)));
-
-        // A-5
         setActiveIdx(4);
         setS((a) => a.map((v, idx) => (idx === 4 ? "done" : v)));
-
-        // A-6
         setActiveIdx(5);
         setS((a) => a.map((v, idx) => (idx === 5 ? "running" : v)));
         await delay(120);
 
         savedCache += newCache;
-
         setS((a) => a.map((v, idx) => (idx === 5 ? "done" : v)));
         setActiveIdx(-1);
 
@@ -359,14 +343,10 @@ export default function ManualFetch() {
             `権限: ${usingSrv ? "service-role" : "anon"}${
               j?.warning ? " / 警告あり" : ""
             }`,
-            `Probe: project_ref=${projectRef ?? "-"}, db_url_host=${
-              dbUrlHost ?? "-"
-            }, db_probe_found=${probeFound}`,
           ].join("\n")
         );
 
         if (!r.ok) throw new Error(j?.error || `crawl failed (${r.status})`);
-
         if (newCache === 0) await delay(240);
       }
 
@@ -387,7 +367,7 @@ export default function ManualFetch() {
           "x-tenant-id": tenantId,
           "content-type": "application/json",
         },
-        body: JSON.stringify({ since, want: total, try_llm: true }),
+        body: JSON.stringify({ since, want: total, try_llm: true, filters }), // ← filters を渡す
         signal: abortRef.current.signal,
       });
       const ej = await safeJson(enrichRes);
@@ -405,6 +385,10 @@ export default function ManualFetch() {
       }
 
       const rows: AddedRow[] = Array.isArray(ej?.rows) ? ej.rows : [];
+      const rejRows: RejectedRow[] = Array.isArray(ej?.rejected)
+        ? ej.rejected
+        : [];
+
       if (rows.length) {
         setAdded((prev) => {
           const next = [...rows, ...prev];
@@ -415,14 +399,24 @@ export default function ManualFetch() {
           return next;
         });
       }
+      if (rejRows.length) {
+        setRejected((prev) => {
+          const next = dedupeRejected([...rejRows, ...prev]);
+          localStorage.setItem(
+            LS_REJECT_KEY,
+            JSON.stringify({ ts: new Date().toISOString(), rows: next })
+          );
+          return next;
+        });
+      }
 
       setS((a) => a.map((v, idx) => (idx === lastIdx ? "done" : v)));
       setActiveIdx(-1);
 
       setMsg(
-        `完了：キャッシュ新規 ${savedCache} 件 → prospects追加 ${
+        `完了：prospects追加 ${
           Number.isFinite(ej?.inserted) ? ej.inserted : rows.length
-        } 件`
+        } 件 / 不適合 ${rejRows.length} 件`
       );
     } catch (e: any) {
       setActiveIdx(-1);
@@ -790,12 +784,14 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
           </div>
 
           <div className="overflow-x-auto">
-            <table className="min-w-[1200px] w-full text-sm">
+            <table className="min-w-[1350px] w-full text-sm">
               <thead className="bg-neutral-50 text-neutral-600">
                 <tr>
                   <th className="px-3 py-3 text-left">企業名</th>
                   <th className="px-3 py-3 text-left">サイトURL</th>
                   <th className="px-3 py-3 text-left">メール</th>
+                  <th className="px-3 py-3 text-left">電話</th>
+                  {/* ← 追加 */}
                   <th className="px-3 py-3 text-left">フォーム</th>
                   <th className="px-3 py-3 text-left">規模</th>
                   <th className="px-3 py-3 text-left">都道府県</th>
@@ -826,6 +822,8 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                       )}
                     </td>
                     <td className="px-3 py-2">{c.contact_email || "-"}</td>
+                    <td className="px-3 py-2">{c.phone_number || "-"}</td>
+                    {/* ← 追加 */}
                     <td className="px-3 py-2">
                       {c.contact_form_url ? (
                         <a
@@ -854,9 +852,7 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                     <td className="px-3 py-2 break-all">
                       {c.hq_address || "-"}
                     </td>
-                    <td className="px-3 py-2">
-                      {c.job_site_source || c.source_site || "-"}
-                    </td>
+                    <td className="px-3 py-2">{c.job_site_source || "-"}</td>
                     <td className="px-3 py-2">
                       {c.created_at
                         ? c.created_at.replace("T", " ").replace("Z", "")
@@ -867,7 +863,7 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                 {added.length === 0 && (
                   <tr>
                     <td
-                      colSpan={13}
+                      colSpan={14}
                       className="px-4 py-10 text-center text-neutral-400"
                     >
                       新規追加はありません
@@ -891,7 +887,7 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
           </div>
 
           <div className="overflow-x-auto">
-            <table className="min-w-[1400px] w-full text-sm">
+            <table className="min-w-[1550px] w-full text-sm">
               <thead className="bg-neutral-50 text-neutral-600">
                 <tr>
                   <th className="px-3 py-3 text-left">企業名</th>
@@ -902,6 +898,8 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                   <th className="px-3 py-3 text-left">法人番号</th>
                   <th className="px-3 py-3 text-left">本社所在地</th>
                   <th className="px-3 py-3 text-left">メール</th>
+                  <th className="px-3 py-3 text-left">電話</th>
+                  {/* ← 追加 */}
                   <th className="px-3 py-3 text-left">フォーム</th>
                   <th className="px-3 py-3 text-left">推定規模</th>
                   <th className="px-3 py-3 text-left">業種</th>
@@ -940,6 +938,8 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                       {r.hq_address || "-"}
                     </td>
                     <td className="px-3 py-2">{r.contact_email || "-"}</td>
+                    <td className="px-3 py-2">{r.phone_number || "-"}</td>
+                    {/* ← 追加 */}
                     <td className="px-3 py-2">
                       {r.contact_form_url ? (
                         <a
@@ -994,7 +994,7 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                 {rejected.length === 0 && (
                   <tr>
                     <td
-                      colSpan={13}
+                      colSpan={14}
                       className="px-4 py-10 text-center text-neutral-400"
                     >
                       不適合データはありません
