@@ -6,7 +6,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { NTA_TOWN_SEEDS } from "@/constants/ntaTownSeeds.generated";
 
-/** ===== Types ===== */
+/** ========= Types ========= */
 type Filters = { prefectures?: string[] };
 type RawRow = {
   corporate_number: string;
@@ -15,12 +15,19 @@ type RawRow = {
   detail_url: string | null;
 };
 
-/** ===== ENV ===== */
+type StepStat = {
+  a2_crawled: number;
+  a3_picked: number;
+  a4_filled: number;
+  a5_inserted: number;
+};
+
+/** ========= ENV ========= */
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 const SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
 
-/** ===== HTTP helpers ===== */
+/** ========= HTTP helpers ========= */
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)";
 const LANG = "ja-JP,ja;q=0.9";
@@ -44,12 +51,13 @@ async function fetchWithTimeout(url: string, init: any = {}, ms = 15000) {
   }
 }
 
-/** ===== Utils ===== */
+/** ========= Utils ========= */
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const okUuid = (s: string) => UUID_RE.test(String(s || "").trim());
 const clamp = (n: any, min: number, max: number) =>
   Math.max(min, Math.min(max, Math.floor(Number(n) || 0)));
+
 function pick<T>(arr: T[], n: number, seed: number): T[] {
   const a = arr.slice();
   for (let i = a.length - 1; i > 0; i--) {
@@ -59,22 +67,30 @@ function pick<T>(arr: T[], n: number, seed: number): T[] {
   return a.slice(0, n);
 }
 
-/** 町丁まで掘る特例 */
-const SPECIAL_TOWN_LEVEL: Record<string, string[]> = {
-  東京都: ["渋谷区", "千代田区", "中央区", "港区", "新宿区", "世田谷区"],
-  大阪府: ["大阪市中央区"],
-};
+/** 町丁名から「○丁目」「番地」「号」以降やビル名っぽいノイズを除去 */
+function normalizeTown(town?: string) {
+  if (!town) return "";
+  let s = String(town)
+    .replace(/\s+/g, "")
+    .replace(/‐|－|ー|―/g, "-");
+  // ○丁目/番地/番/号 より後は落とす
+  s = s.replace(/(.*?)(\d+丁目.*)$/u, "$1");
+  s = s.replace(/(.*?)(\d+番地.*)$/u, "$1");
+  s = s.replace(/(.*?)(\d+番.*)$/u, "$1");
+  s = s.replace(/(.*?)(\d+号.*)$/u, "$1");
+  // 「第◯」「ビル」「マンション」など代表的な語より後は落とす（雑だが有効）
+  s = s.replace(/(.*?)(第[0-9０-９一二三四五六七八九十]+.*)$/u, "$1");
+  s = s.replace(/(.*?)(ビル.*)$/u, "$1");
+  s = s.replace(/(.*?)(マンション.*)$/u, "$1");
+  s = s.replace(/(.*?)(コーポ.*)$/u, "$1");
+  return s.trim();
+}
 
-function buildAddressKeywords(
+/** 都市・町丁シードの生成（pref 指定が無ければ 東京都/大阪府 を優先） */
+function buildAddressSeeds(
   filters: Filters,
   seedNum: number
 ): Array<{ keyword: string; pref: string; city: string; town?: string }> {
-  const out: Array<{
-    keyword: string;
-    pref: string;
-    city: string;
-    town?: string;
-  }> = [];
   const prefPool: string[] = (
     filters.prefectures && filters.prefectures.length
       ? filters.prefectures
@@ -83,93 +99,33 @@ function buildAddressKeywords(
         )
   ).filter((p) => !!(NTA_TOWN_SEEDS as any)[p]);
 
+  const out: Array<{
+    keyword: string;
+    pref: string;
+    city: string;
+    town?: string;
+  }> = [];
   for (const pref of prefPool) {
     const cityMap: any = (NTA_TOWN_SEEDS as any)[pref] || {};
-    const cityList = Object.keys(cityMap);
-    for (const city of cityList) {
-      const isSpecial = (SPECIAL_TOWN_LEVEL[pref] || []).includes(city);
-      if (isSpecial) {
-        const towns: string[] = (cityMap[city] || []).filter(Boolean);
-        for (const town of towns)
-          out.push({ keyword: `${pref}${city}${town}`, pref, city, town });
+    for (const city of Object.keys(cityMap)) {
+      const towns: string[] = (cityMap[city] || []).filter(Boolean);
+      if (towns.length) {
+        for (const t of towns) {
+          const nt = normalizeTown(t);
+          if (!nt) continue;
+          out.push({ keyword: `${pref}${city}${nt}`, pref, city, town: nt });
+        }
       } else {
         out.push({ keyword: `${pref}${city}`, pref, city });
       }
     }
   }
+  // ランダム化
   return pick(out, out.length, seedNum);
 }
 
-/** 検索結果HTML → 抽出 */
-function parseSearchHtml(html: string): RawRow[] {
-  const out: RawRow[] = [];
-  const linkRe = /href=["'](\/number\/(\d{13}))[#"']/g;
-  let m: RegExpExecArray | null;
-  const seen = new Set<string>();
-
-  while ((m = linkRe.exec(html))) {
-    const rel = m[1];
-    const num = m[2];
-    if (!rel || !num || seen.has(num)) continue;
-    seen.add(num);
-
-    const ctxStart = Math.max(0, m.index - 1200);
-    const ctxEnd = Math.min(html.length, m.index + 1200);
-    const ctx = html.slice(ctxStart, ctxEnd).replace(/\s+/g, " ");
-
-    const names: string[] = [];
-    const n1 =
-      />(?:名称|商号|法人名)[^<]{0,10}<\/[^>]*>\s*<[^>]*>([^<]{2,120})<\//i
-        .exec(ctx)?.[1]
-        ?.trim();
-    if (n1) names.push(n1);
-    const n2 = />\s*([^<]{2,120})\s*<\/a>/.exec(ctx)?.[1]?.trim();
-    if (n2) names.push(n2);
-    const n3 = /<strong[^>]*>([^<]{2,180})<\/strong>/.exec(ctx)?.[1]?.trim();
-    if (n3) names.push(n3);
-    const name = (names.find(Boolean) || null) as string | null;
-
-    const addr =
-      /(所在地|本店|本社)[^<]{0,20}<\/[^>]*>\s*<[^>]*>([^<]{6,200})<\//i
-        .exec(ctx)?.[2]
-        ?.trim() ||
-      /(所在地|本店|本社)[^\u4e00-\u9fafA-Za-z0-9]{0,5}([^<>{}]{6,200})/i
-        .exec(ctx)?.[2]
-        ?.trim() ||
-      null;
-
-    const detailUrl = new URL(
-      rel,
-      "https://www.houjin-bangou.nta.go.jp"
-    ).toString();
-    out.push({
-      corporate_number: num,
-      name,
-      address: addr,
-      detail_url: detailUrl,
-    });
-  }
-
-  // 保険：裸の法人番号
-  const loose = Array.from(new Set(html.match(/\b\d{13}\b/g) || []));
-  for (const num of loose) {
-    if (seen.has(num)) continue;
-    seen.add(num);
-    out.push({
-      corporate_number: num,
-      name: null,
-      address: null,
-      detail_url: `https://www.houjin-bangou.nta.go.jp/number/${num}`,
-    });
-  }
-  return out;
-}
-
-/** 住所キーワード検索（フォールバック多段） */
-async function crawlByAddressKeyword(
-  keyword: string,
-  page = 1
-): Promise<RawRow[]> {
+/** 検索結果ページを叩く（GET クエリ 3パターンを順に試す） */
+async function getResultsHtml(keyword: string, page = 1) {
   const tries = [
     `https://www.houjin-bangou.nta.go.jp/kensaku-kekka.html?searchString=${encodeURIComponent(
       keyword
@@ -186,14 +142,118 @@ async function crawlByAddressKeyword(
       const r = await fetchWithTimeout(url, {}, 15000);
       if (!r.ok) continue;
       const html = await r.text();
-      const rows = parseSearchHtml(html);
-      if (rows.length) return rows;
+      // 結果テーブルが無ければスキップ
+      if (!/class=["'][^"']*\bfixed\b[^"']*\bnormal\b/i.test(html)) continue;
+      return { html, urlUsed: url };
     } catch {}
   }
-  return [];
+  return { html: "", urlUsed: "" };
 }
 
-/** 詳細ページで会社名/住所を補完（抽出強化） */
+/** paginate セクションから「次の10件」リンクとページリンク群を抽出 */
+function parsePaginate(html: string) {
+  const m =
+    /<div[^>]*class=["'][^"']*\bpaginate\b[^"']*["'][^>]*>([\s\S]*?)<\/div>/i.exec(
+      html
+    );
+  if (!m) return { next10: "", pages: [] as string[] };
+  const body = m[1];
+
+  const anchors = Array.from(
+    body.matchAll(/<a[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi)
+  ).map((mm) => ({
+    href: mm[1],
+    text: mm[2].replace(/<[^>]+>/g, "").trim(),
+  }));
+
+  const next10 =
+    anchors.find((a) => /次の\s*10\s*件/.test(a.text || ""))?.href || "";
+
+  const pageLinks = anchors
+    .filter((a) => /\d+/.test(a.text))
+    .map((a) =>
+      a.href.startsWith("http")
+        ? a.href
+        : new URL(a.href, "https://www.houjin-bangou.nta.go.jp").toString()
+    );
+
+  return {
+    next10:
+      next10 &&
+      (next10.startsWith("http")
+        ? next10
+        : new URL(next10, "https://www.houjin-bangou.nta.go.jp").toString()),
+    pages: pageLinks,
+  };
+}
+
+/** テーブル本体を解析して 法人番号/名称/所在地/詳細URL を抽出 */
+function parseResultsTable(html: string): RawRow[] {
+  const t =
+    /<table[^>]*class=["'][^"']*\bfixed\b[^"']*\bnormal\b[^"']*["'][^>]*>([\s\S]*?)<\/table>/i.exec(
+      html
+    );
+  if (!t) return [];
+
+  const tbody =
+    /<tbody[^>]*>([\s\S]*?)<\/tbody>/i.exec(t[1])?.[1] || t[1] || "";
+  const rows = Array.from(tbody.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)).map(
+    (m) => m[1]
+  );
+
+  const out: RawRow[] = [];
+  for (const row of rows) {
+    const cells = Array.from(row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)).map(
+      (m) => m[1]
+    );
+    if (!cells.length) continue;
+
+    // 法人番号は行全体から最初の13桁を優先抽出（セルの順序に依存しない）
+    const num =
+      /href=["'](\/number\/(\d{13}))/.exec(row)?.[2] ||
+      (row.match(/\b(\d{13})\b/) || [])[1];
+
+    // 名称は「二番目っぽいセル」を優先、無ければ <a> 直近のテキスト
+    let name = cells[1]
+      ? cells[1]
+          .replace(/<[^>]+>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+      : null;
+    if (!name) {
+      name =
+        />\s*([^<]{2,120})\s*<\/a>/.exec(row)?.[1]?.trim() ||
+        /<strong[^>]*>([^<]{2,180})<\/strong>/.exec(row)?.[1]?.trim() ||
+        null;
+    }
+
+    // 所在地は三番目っぽいセルから
+    const address = cells[2]
+      ? cells[2]
+          .replace(/<[^>]+>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+      : null;
+
+    // 詳細URL
+    const rel = /href=["'](\/number\/\d{13})/.exec(row)?.[1] || "";
+    const detail_url = rel
+      ? new URL(rel, "https://www.houjin-bangou.nta.go.jp").toString()
+      : null;
+
+    if (num && name) {
+      out.push({
+        corporate_number: num,
+        name,
+        address: address || null,
+        detail_url,
+      });
+    }
+  }
+  return out;
+}
+
+/** 名称欠落の補完（詳細ページを叩いて <td> を読む） */
 async function fetchDetailAndFill(row: RawRow): Promise<RawRow> {
   if (!row.detail_url || row.name) return row;
   try {
@@ -201,49 +261,22 @@ async function fetchDetailAndFill(row: RawRow): Promise<RawRow> {
     if (!r.ok) return row;
     const html = await r.text();
 
-    const nameCandidates: Array<string | null | undefined> = [
+    const name =
       /商号又は名称[^<]*<\/th>\s*<td[^>]*>([\s\S]{1,200}?)<\/td>/i
         .exec(html)?.[1]
         ?.replace(/<[^>]*>/g, " ")
-        .trim(),
+        .trim() ||
       /<h1[^>]*>([\s\S]{1,200}?)<\/h1>/i
         .exec(html)?.[1]
         ?.replace(/<[^>]*>/g, " ")
-        .trim(),
-      /<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i
-        .exec(html)?.[1]
-        ?.trim(),
-      /<title[^>]*>([\s\S]{1,200}?)<\/title>/i.exec(html)?.[1]?.trim(),
-    ];
-    const name =
-      nameCandidates
-        .find(
-          (x) =>
-            typeof x === "string" &&
-            x.trim().length >= 2 &&
-            x.trim().length <= 200
-        )
-        ?.trim() || row.name;
+        .trim() ||
+      row.name;
 
-    const addrCandidates: Array<string | null | undefined> = [
+    const addr =
       /(所在地|本店又は主たる事務所の所在地)[^<]*<\/th>\s*<td[^>]*>([\s\S]{1,300}?)<\/td>/i
         .exec(html)?.[2]
         ?.replace(/<[^>]*>/g, " ")
-        .trim(),
-      /(所在地|本店|本社)[^<]*<\/th>\s*<td[^>]*>([\s\S]{1,300}?)<\/td>/i
-        .exec(html)?.[2]
-        ?.replace(/<[^>]*>/g, " ")
-        .trim(),
-    ];
-    const addr =
-      addrCandidates
-        .find(
-          (x) =>
-            typeof x === "string" &&
-            x.trim().length >= 6 &&
-            x.trim().length <= 300
-        )
-        ?.trim() || row.address;
+        .trim() || row.address;
 
     const nm = (name || "").trim() || null;
     return { ...row, name: nm, address: addr || row.address };
@@ -270,9 +303,16 @@ function getAdmin(): { sb: any; usingServiceRole: boolean } {
   };
 }
 
-/** ===== POST: Phase A（クロール → nta_corporates_cache へ保存） ===== */
+/** ========= POST: Phase A（クロール→nta_corporates_cache 保存） ========= */
 export async function POST(req: Request) {
   const trace: string[] = [];
+  const step: StepStat = {
+    a2_crawled: 0,
+    a3_picked: 0,
+    a4_filled: 0,
+    a5_inserted: 0,
+  };
+
   try {
     const tenantId = req.headers.get("x-tenant-id") || "";
     if (!tenantId || !okUuid(tenantId)) {
@@ -290,118 +330,141 @@ export async function POST(req: Request) {
     const seedNum = Number(seed.replace(/\D/g, "")) || Date.now();
     trace.push(`want=${want} seed=${seed} dryRun=${dryRun}`);
 
-    // 住所キーワード生成
-    const addrPool = buildAddressKeywords(filters, seedNum);
-    if (!addrPool.length) {
+    // 住所シード
+    const seeds = buildAddressSeeds(filters, seedNum);
+    if (!seeds.length) {
       return NextResponse.json(
         {
-          new_cache: 0,
+          inserted_new: 0,
           tried: 0,
           keywords_used: [],
           rows_preview: [],
-          step: { a2_crawled: 0, a3_picked: 0, a4_filled: 0, a5_inserted: 0 },
-          note: "seedなし",
+          step,
           trace,
         },
         { status: 200 }
       );
     }
-    trace.push(`addrPool=${addrPool.length}`);
 
-    // クロール
-    const MAX_PAGES_PER_KEY = 3;
-    const DETAIL_CONCURRENCY = 6;
-    const DETAIL_FILL_CAP = 1200;
-    const bag: RawRow[] = [];
     const keywordsUsed: string[] = [];
-    let tried = 0;
+    const bag: RawRow[] = [];
 
-    for (const k of addrPool) {
-      if (bag.length >= Math.max(want * 8, 400)) break;
-      tried++;
-      keywordsUsed.push(k.keyword);
+    // ---- クロール（テーブルを厳密に解析 & paginate に対応） ----
+    // ランダムジャンプ回数（次の10件を辿る回数）
+    const JUMPS_MIN = 1;
+    const JUMPS_MAX = 3;
+    const MAX_PAGES_PER_KEY = 3; // ページ番号リンクから拾う上限
 
-      for (let page = 1; page <= MAX_PAGES_PER_KEY; page++) {
-        const rows = await crawlByAddressKeyword(k.keyword, page);
-        for (const r of rows) {
-          const num = String(r.corporate_number || "").trim();
-          if (!/^\d{13}$/.test(num)) continue;
-          bag.push({
-            corporate_number: num,
-            name: (r.name || "")?.trim() || null,
-            address: r.address || null,
-            detail_url: r.detail_url || null,
-          });
-        }
-        if (bag.length >= Math.max(want * 8, 400)) break;
-      }
-    }
-    const a2_crawled = bag.length;
-    trace.push(`raw=${bag.length} tried=${tried}`);
+    for (const s of seeds) {
+      if (bag.length >= Math.max(want * 6, 300)) break;
+      const keyword = s.keyword;
+      keywordsUsed.push(keyword);
 
-    if (!bag.length) {
-      return NextResponse.json(
-        {
-          new_cache: 0,
-          tried,
-          keywords_used: keywordsUsed.slice(0, 40),
-          rows_preview: [],
-          step: { a2_crawled, a3_picked: 0, a4_filled: 0, a5_inserted: 0 },
-          trace,
-        },
-        { status: 200 }
+      // 1) 最初のページ
+      const first = await getResultsHtml(keyword, 1);
+      if (!first.html) continue;
+
+      // 直近ページ群の解析
+      const collected1 = parseResultsTable(first.html);
+      step.a2_crawled += collected1.length;
+      bag.push(...collected1);
+
+      // 2) ページ番号リンクからランダムに数ページ拾う
+      const { pages, next10 } = parsePaginate(first.html);
+      const rndPages = pick(
+        pages,
+        Math.min(MAX_PAGES_PER_KEY, pages.length),
+        seedNum
       );
-    }
-
-    // 重複除去（法人番号）
-    const map = new Map<string, RawRow>();
-    for (const r of bag)
-      if (!map.has(r.corporate_number)) map.set(r.corporate_number, r);
-    let deduped = Array.from(map.values());
-    const a3_picked = deduped.length;
-
-    // 名称欠落は詳細補完
-    const need = deduped.filter((r) => !r.name).slice(0, DETAIL_FILL_CAP);
-    let filledNow = 0;
-    for (let i = 0; i < need.length; i += DETAIL_CONCURRENCY) {
-      const chunk = need.slice(i, i + DETAIL_CONCURRENCY);
-      const got = await Promise.all(chunk.map((r) => fetchDetailAndFill(r)));
-      for (let idx = 0; idx < chunk.length; idx++) {
-        const before = chunk[idx];
-        const after = got[idx];
-        if (!before.name && after.name) filledNow++;
-        map.set(after.corporate_number, after);
+      for (const p of rndPages) {
+        try {
+          const r = await fetchWithTimeout(p, {}, 15000);
+          if (!r.ok) continue;
+          const html = await r.text();
+          const got = parseResultsTable(html);
+          step.a2_crawled += got.length;
+          bag.push(...got);
+        } catch {}
       }
-    }
-    deduped = Array.from(map.values());
-    const a4_filled = filledNow;
 
-    // company_name NOT NULL 対策
-    const withName = deduped.filter(
+      // 3) 「次の10件」を x 回辿って、その中からも数ページ拾う
+      let nextUrl = next10;
+      const jumps = JUMPS_MIN + (seedNum % (JUMPS_MAX - JUMPS_MIN + 1));
+      for (let j = 0; j < jumps && nextUrl; j++) {
+        try {
+          const r = await fetchWithTimeout(nextUrl, {}, 15000);
+          if (!r.ok) break;
+          const html = await r.text();
+
+          const got = parseResultsTable(html);
+          step.a2_crawled += got.length;
+          bag.push(...got);
+
+          const { pages: p2, next10: n2 } = parsePaginate(html);
+          const rnd2 = pick(p2, Math.min(2, p2.length), seedNum + j + 13);
+          for (const u of rnd2) {
+            try {
+              const rr = await fetchWithTimeout(u, {}, 15000);
+              if (!rr.ok) continue;
+              const h2 = await rr.text();
+              const g2 = parseResultsTable(h2);
+              step.a2_crawled += g2.length;
+              bag.push(...g2);
+            } catch {}
+          }
+          nextUrl = n2;
+        } catch {
+          break;
+        }
+      }
+
+      if (bag.length >= Math.max(want * 6, 300)) break;
+    }
+
+    // ----- 重複除去（法人番号） & ピック -----
+    const map = new Map<string, RawRow>();
+    for (const r of bag) {
+      const num = String(r.corporate_number || "").trim();
+      if (!/^\d{13}$/.test(num)) continue;
+      if (!map.has(num)) map.set(num, r);
+    }
+    const deduped = Array.from(map.values());
+    step.a3_picked = deduped.length;
+
+    // 名称欠落の補完（必要時のみ）
+    const needFill = deduped.filter((r) => !r.name).slice(0, 200);
+    for (const r of needFill) {
+      const g = await fetchDetailAndFill(r);
+      map.set(g.corporate_number, g);
+    }
+    step.a4_filled = needFill.length;
+
+    // company_name が必須のため、欠落は除外
+    const withName = Array.from(map.values()).filter(
       (r) => !!(r.name && r.name.trim().length > 0)
     );
+
     const rows_preview = withName.slice(0, 20);
 
     if (dryRun) {
       return NextResponse.json(
         {
-          new_cache: 0,
-          tried,
-          keywords_used: keywordsUsed.slice(0, 40),
+          inserted_new: 0,
+          tried: keywordsUsed.length,
+          keywords_used: keywordsUsed.slice(0, 60),
           rows_preview,
-          step: { a2_crawled, a3_picked, a4_filled, a5_inserted: 0 },
+          step,
           trace,
         },
         { status: 200 }
       );
     }
 
-    // === DB保存（INSERTのみ・既存チェックで重複回避） ===
+    // ----- DB保存：RLS を考慮して SELECT → INSERT（upsert は使わない） -----
     const { sb, usingServiceRole } = getAdmin();
 
-    const target = withName.slice(0, Math.max(want * 3, want));
-    const nums = target.map((r) => r.corporate_number);
-
+    // 既存チェック
+    const nums = withName.map((r) => r.corporate_number);
     const { data: existedRows, error: exErr } = (sb as any)
       .from("nta_corporates_cache")
       .select("corporate_number")
@@ -412,32 +475,32 @@ export async function POST(req: Request) {
       return NextResponse.json(
         {
           error: exErr.message,
-          hint: "重複チェック失敗",
+          hint: "重複チェックに失敗",
           rows_preview,
-          step: { a2_crawled, a3_picked, a4_filled, a5_inserted: 0 },
+          step,
           trace,
         },
         { status: 500 }
       );
     }
-    const existed = new Set<string>(
+    const existed = new Set(
       (existedRows || []).map((r: any) => String(r.corporate_number))
     );
 
     const now = new Date().toISOString();
-    const toInsert = target
+    const toInsert = withName
       .filter((r) => !existed.has(r.corporate_number))
       .map((r) => ({
         tenant_id: tenantId,
         corporate_number: r.corporate_number,
-        company_name: r.name!, // 非null保証済
+        company_name: r.name!, // 非null検査済み
         address: r.address ?? null,
         detail_url: r.detail_url ?? null,
         source: "nta-crawl",
         scraped_at: now,
       }));
 
-    let new_cache = 0;
+    let inserted_new = 0;
     if (toInsert.length) {
       const { data, error } = (sb as any)
         .from("nta_corporates_cache")
@@ -453,29 +516,29 @@ export async function POST(req: Request) {
             error: error.message,
             rls_blocked: rlsBlocked || undefined,
             hint: rlsBlocked
-              ? "デプロイ環境に SUPABASE_SERVICE_ROLE_KEY を設定するか、RLSで匿名INSERTを許可してください。"
-              : "テーブル/カラム名・制約・権限を確認してください。",
+              ? "サーバに SUPABASE_SERVICE_ROLE_KEY を設定するか、RLSで匿名INSERTを許可してください。"
+              : "テーブル/カラム名・権限を確認してください。",
             to_insert_count: toInsert.length,
             rows_preview,
-            step: { a2_crawled, a3_picked, a4_filled, a5_inserted: 0 },
-            using_service_role: usingServiceRole,
+            step,
             trace,
           },
           { status: 500 }
         );
       }
-      new_cache = (data || []).length;
+      inserted_new = (data || []).length;
+      step.a5_inserted += inserted_new;
     }
 
     return NextResponse.json(
       {
-        new_cache, // ← UIが読むキーに統一
-        tried,
+        new_cache: inserted_new,
         to_insert_count: toInsert.length,
-        using_service_role: usingServiceRole,
-        keywords_used: keywordsUsed.slice(0, 40),
+        tried: keywordsUsed.length,
+        keywords_used: keywordsUsed.slice(0, 60),
         rows_preview,
-        step: { a2_crawled, a3_picked, a4_filled, a5_inserted: new_cache }, // ← フロー可視化用
+        using_service_role: usingServiceRole,
+        step,
         trace,
       },
       { status: 200 }
@@ -488,7 +551,7 @@ export async function POST(req: Request) {
   }
 }
 
-/** ===== GET: 簡易ヘルスチェック（dryRun） ===== */
+/** ========= GET: ヘルスチェック（dryRun） ========= */
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const tenantId = url.searchParams.get("tenant_id") || "";
@@ -505,13 +568,12 @@ export async function GET(req: Request) {
     {
       method: "POST",
       headers: { "x-tenant-id": tenantId, "content-type": "application/json" },
-      body: JSON.stringify({ filters, want: 20, seed, dryRun: true }),
+      body: JSON.stringify({ filters, want: 10, seed, dryRun: true }),
     } as any
   );
   const j = await res.json().catch(() => ({}));
   return NextResponse.json({
     ok: res.ok,
-    preview_count: Array.isArray(j?.rows_preview) ? j.rows_preview.length : 0,
     preview: j?.rows_preview ?? [],
     step: j?.step ?? {},
     trace: j?.trace ?? [],

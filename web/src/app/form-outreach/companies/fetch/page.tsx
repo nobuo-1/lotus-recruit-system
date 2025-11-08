@@ -254,15 +254,10 @@ export default function ManualFetch() {
         const want = Math.min(BATCH, total - savedCache);
         const seed = `${Date.now()}-${attempts}`;
 
-        // A-2〜A-5 を「実行中」にしてから API を叩く（実測で後から確定）
-        [1, 2, 3, 4].forEach((idx) => {
-          setActiveIdx(idx);
-          setS((a) =>
-            a.map((v, i) =>
-              i === idx ? "running" : i < idx && v === "idle" ? "done" : v
-            )
-          );
-        });
+        // A-2: 実処理前に running にしてフレームを進め、描画を確定させる
+        setActiveIdx(1);
+        setS((a) => a.map((v, i) => (i === 1 ? "running" : v)));
+        await nextFrame();
 
         // 実API: crawl
         const r = await fetch("/api/form-outreach/companies/crawl", {
@@ -276,35 +271,29 @@ export default function ManualFetch() {
         });
         const j = await safeJson(r);
 
-        // 返却ステップを UI に反映（A-2〜A-5）
+        // 実測ステップを UI に反映（A-2〜A-4）
         const a2 = Number(j?.step?.a2_crawled || 0);
         const a3 = Number(j?.step?.a3_picked || 0);
         const a4 = Number(j?.step?.a4_filled || 0);
-        const a5 = Number(j?.step?.a5_inserted || 0);
 
-        // A-2: クロール
-        setActiveIdx(1);
+        // A-2: クロール結果
         setS((a) =>
           a.map((v, idx) => (idx === 1 ? (a2 > 0 ? "done" : "error") : v))
         );
 
-        // A-3: ピック
+        // A-3: ピック結果
         setActiveIdx(2);
         setS((a) =>
           a.map((v, idx) => (idx === 2 ? (a3 > 0 ? "done" : "error") : v))
         );
 
-        // A-4: 詳細補完（0件でもエラーにはしない）
+        // A-4: 詳細補完（0件でも処理は成功扱い）
         setActiveIdx(3);
-        setS((a) =>
-          a.map((v, idx) => (idx === 3 ? (a4 >= 0 ? "done" : "error") : v))
-        );
+        setS((a) => a.map((v, idx) => (idx === 3 ? "done" : v)));
 
-        // A-5: キャッシュ保存（0件でも done とし、メッセージで把握）
+        // A-5: 保存（API 側で完了済みなので done、A-6 は反復進行表示）
         setActiveIdx(4);
-        setS((a) =>
-          a.map((v, idx) => (idx === 4 ? (a5 >= 0 ? "done" : "error") : v))
-        );
+        setS((a) => a.map((v, idx) => (idx === 4 ? "done" : v)));
 
         // A-6（保存反映/反復）
         setActiveIdx(5);
@@ -979,6 +968,12 @@ function CountModal({
 
 function delay(ms: number) {
   return new Promise((res) => setTimeout(res, ms));
+}
+
+// 画面更新を2フレーム待ってから重い処理へ（アイコンが固まって見えるのを防ぐ）
+async function nextFrame() {
+  await new Promise((r) => requestAnimationFrame(() => r(null)));
+  await new Promise((r) => requestAnimationFrame(() => r(null)));
 }
 
 async function safeJson(res: Response) {
