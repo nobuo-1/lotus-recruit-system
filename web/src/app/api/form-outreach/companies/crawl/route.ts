@@ -9,9 +9,7 @@ import { NTA_TOWN_SEEDS } from "@/constants/ntaTownSeeds.generated";
 /** ===== Types ===== */
 type Filters = {
   prefectures?: string[];
-  // ここでは Phase A 用に都道府県のみ使用（他は Phase B 側で評価）
 };
-
 type RawRow = {
   corporate_number: string;
   name: string | null;
@@ -20,8 +18,9 @@ type RawRow = {
 };
 
 /** ===== ENV ===== */
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
 
 /** ===== HTTP helpers ===== */
 const UA =
@@ -52,6 +51,9 @@ async function fetchWithTimeout(
 }
 
 /** ===== Utils ===== */
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 function clamp(n: unknown, min: number, max: number) {
   return Math.max(min, Math.min(max, Math.floor(Number(n) || 0)));
 }
@@ -62,6 +64,9 @@ function pick<T>(arr: T[], n: number, seed: number): T[] {
     [a[i], a[j]] = [a[j], a[i]];
   }
   return a.slice(0, n);
+}
+function okUuid(s: string) {
+  return UUID_RE.test(String(s || "").trim());
 }
 
 /** 都内の特定区は町丁レベルまで展開（ヒット数を増やす） */
@@ -157,7 +162,7 @@ function parseSearchHtml(html: string): RawRow[] {
     });
   }
 
-  // 予備：裸の法人番号（名称なしでも Phase A は保存対象）
+  // 予備：裸の法人番号
   const loose = Array.from(new Set(html.match(/\b\d{13}\b/g) || []));
   for (const num of loose) {
     if (seen.has(num)) continue;
@@ -172,9 +177,9 @@ function parseSearchHtml(html: string): RawRow[] {
   return out;
 }
 
-/** 詳細ページ（/number/13桁）で名称/住所を補完（名前が欠けているものだけ軽く） */
+/** 名称欠落のみ軽く詳細補完 */
 async function fetchDetailAndFill(row: RawRow): Promise<RawRow> {
-  if (!row.detail_url || row.name) return row; // 名称が既にあればスキップ
+  if (!row.detail_url || row.name) return row;
   try {
     const r = await fetchWithTimeout(row.detail_url, {}, 12000);
     if (!r.ok) return row;
@@ -229,60 +234,98 @@ async function crawlByAddressKeyword(
   return [];
 }
 
+/** Supabase クライアント（ServiceRole → Anon フォールバック）。型は any に寄せて型深度を回避 */
+function getAdminClient(): { sb: any; usingServiceRole: boolean } {
+  if (!SUPABASE_URL) {
+    throw new Error("NEXT_PUBLIC_SUPABASE_URL is missing");
+  }
+  if (SUPABASE_SERVICE_ROLE_KEY) {
+    return {
+      sb: createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY) as any,
+      usingServiceRole: true,
+    };
+  }
+  if (!SUPABASE_ANON_KEY) {
+    throw new Error(
+      "SUPABASE_SERVICE_ROLE_KEY and NEXT_PUBLIC_SUPABASE_ANON_KEY are both missing"
+    );
+  }
+  return {
+    sb: createClient(SUPABASE_URL, SUPABASE_ANON_KEY) as any,
+    usingServiceRole: false,
+  };
+}
+
 /** ===== Handler: POST =====
- * 入力: { filters, want, seed }
- * 出力: { new_cache, tried, keywords_used, trace }
+ * 入力: { filters, want, seed, dryRun? }
+ * 出力: { new_cache, saved_rows, tried, keywords_used, rows_preview[], rls_blocked?, trace[], error?, hint? }
  */
 export async function POST(req: Request) {
   const trace: string[] = [];
   try {
-    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-      return NextResponse.json(
-        { error: "Supabase service role not configured" },
-        { status: 500 }
-      );
-    }
-
     const tenantId = req.headers.get("x-tenant-id") || "";
-    if (!tenantId) {
+    if (!tenantId || !okUuid(tenantId)) {
       return NextResponse.json(
-        { error: "x-tenant-id required" },
+        {
+          error: "x-tenant-id required (uuid)",
+          hint: "ログインやCookieを確認",
+          trace,
+        } as any,
         { status: 400 }
       );
     }
 
     const body: any = await req.json().catch(() => ({}));
     const filters: Filters = body?.filters ?? {};
-    const want: number = clamp(body?.want ?? 20, 1, 200); // Phase A は小さめのバッチ前提
+    const want: number = clamp(body?.want ?? 20, 1, 200);
+    const dryRun: boolean = !!body?.dryRun;
     const seed: string = String(body?.seed || Math.random()).slice(2);
     const seedNum = Number(seed.replace(/\D/g, "")) || Date.now();
-    trace.push(`want=${want} seed=${seed}`);
+    trace.push(`want=${want} seed=${seed} dryRun=${dryRun}`);
 
-    const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+    // 到達性テスト
+    try {
+      const head = await fetchWithTimeout(
+        "https://www.houjin-bangou.nta.go.jp/",
+        {},
+        8000
+      );
+      trace.push(`nta_home=${head.status}`);
+    } catch {
+      return NextResponse.json(
+        {
+          error: "NTAサイトへ到達できません",
+          hint: "サーバのアウトバウンド/Firewall/Proxyを確認してください",
+          trace,
+        } as any,
+        { status: 502 }
+      );
+    }
 
     // 住所キーワード生成
     const addrPool = buildAddressKeywords(filters, seedNum);
     if (!addrPool.length) {
       return NextResponse.json({
         new_cache: 0,
+        saved_rows: 0,
         tried: 0,
         keywords_used: [],
-        note: "seedなし：scripts/generate-nta-town-seeds-from-postal.ts を先に実行してください。",
+        rows_preview: [],
+        note: "seedなし：scripts/generate-nta-town-seeds-from-postal.ts を実行してください。",
         trace,
-      });
+      } as any);
     }
     trace.push(`addrPool=${addrPool.length}`);
 
-    // クロール本体
+    // クロール
     const MAX_PAGES_PER_KEY = 2;
     const DETAIL_CONCURRENCY = 6;
     const keywordsUsed: string[] = [];
-
     const bag: RawRow[] = [];
     let tried = 0;
 
     for (const k of addrPool) {
-      if (bag.length >= Math.max(want * 5, 200)) break; // 上限保護（504回避）
+      if (bag.length >= Math.max(want * 5, 200)) break;
       tried++;
       keywordsUsed.push(k.keyword);
 
@@ -306,10 +349,12 @@ export async function POST(req: Request) {
     if (!bag.length) {
       return NextResponse.json({
         new_cache: 0,
+        saved_rows: 0,
         tried,
-        keywords_used: keywordsUsed,
+        keywords_used: keywordsUsed.slice(0, 40),
+        rows_preview: [],
         trace,
-      });
+      } as any);
     }
 
     // 法人番号で重複除去
@@ -320,8 +365,8 @@ export async function POST(req: Request) {
     }
     let deduped = Array.from(dedupMap.values());
 
-    // 名称欠落のみ軽く詳細補完（並列控えめ）
-    const needFill = deduped.filter((r) => !r.name).slice(0, 60); // 取りすぎ防止
+    // 名称欠落だけ軽く詳細補完
+    const needFill = deduped.filter((r) => !r.name).slice(0, 60);
     for (let i = 0; i < needFill.length; i += DETAIL_CONCURRENCY) {
       const chunk = needFill.slice(i, i + DETAIL_CONCURRENCY);
       const got = await Promise.all(chunk.map((r) => fetchDetailAndFill(r)));
@@ -329,24 +374,58 @@ export async function POST(req: Request) {
     }
     deduped = Array.from(dedupMap.values());
 
-    // 保存対象を want の数倍まで（保存はすべて行うが、countは新規のみ）
-    const toSave = deduped.slice(0, Math.max(want * 3, want));
+    const rows_preview = deduped.slice(0, 20);
 
-    // 既存を先に取得して新規数を計測
+    // dryRun は保存なしで返す
+    if (dryRun) {
+      return NextResponse.json({
+        new_cache: 0,
+        saved_rows: 0,
+        tried,
+        keywords_used: keywordsUsed.slice(0, 40),
+        rows_preview,
+        trace,
+        note: "dryRun=true のためDB保存していません",
+      } as any);
+    }
+
+    // === 保存 ===
+    if (!SUPABASE_URL) {
+      return NextResponse.json(
+        {
+          error: "NEXT_PUBLIC_SUPABASE_URL is missing",
+          hint: "環境変数を設定してください",
+          trace,
+        } as any,
+        { status: 500 }
+      );
+    }
+    const { sb, usingServiceRole } = getAdminClient();
+
+    const toSave = deduped.slice(0, Math.max(want * 3, want));
     const nums = toSave.map((r) => r.corporate_number);
-    const { data: existedRows, error: exErr } = await admin
+
+    const { data: existedRows, error: exErr } = await sb
       .from("nta_corporates_cache")
       .select("corporate_number")
       .eq("tenant_id", tenantId)
       .in("corporate_number", nums);
+
     if (exErr) {
-      trace.push(`existing_query_error: ${exErr.message}`);
+      return NextResponse.json(
+        {
+          error: exErr.message,
+          hint: "既存取得に失敗",
+          trace,
+          rows_preview,
+        } as any,
+        { status: 500 }
+      );
     }
     const existed = new Set(
       (existedRows || []).map((r: any) => String(r.corporate_number))
     );
 
-    // upsert payload
     const now = new Date().toISOString();
     const payload = toSave.map((r) => ({
       tenant_id: tenantId,
@@ -358,29 +437,41 @@ export async function POST(req: Request) {
       scraped_at: now,
     }));
 
-    // upsert 実行
-    const { error: upErr } = await admin
+    const { error: upErr } = await sb
       .from("nta_corporates_cache")
       .upsert(payload as any, { onConflict: "tenant_id,corporate_number" });
+
     if (upErr) {
+      const rlsBlocked =
+        !usingServiceRole &&
+        /row-level security|permission denied|RLS/i.test(upErr.message || "");
       return NextResponse.json(
-        { error: upErr.message, trace },
+        {
+          error: upErr.message,
+          rls_blocked: rlsBlocked || undefined,
+          hint: rlsBlocked
+            ? "SUPABASE_SERVICE_ROLE_KEY をサーバ環境変数に追加するか、RLSポリシーで匿名挿入を許可してください。"
+            : "DBの権限・onConflict列・テーブル名を確認してください。",
+          trace,
+          rows_preview,
+        } as any,
         { status: 500 }
       );
     }
 
-    // 新規件数のみを返す
     const newCount = nums.filter((n) => !existed.has(n)).length;
 
     return NextResponse.json({
       new_cache: newCount,
+      saved_rows: payload.length,
       tried,
       keywords_used: keywordsUsed.slice(0, 40),
-      saved_rows: payload.length,
+      rows_preview,
+      using_service_role: usingServiceRole,
       trace,
-    });
+    } as any);
   } catch (e: unknown) {
     const msg = (e as Error)?.message || String(e);
-    return NextResponse.json({ error: msg }, { status: 500 });
+    return NextResponse.json({ error: msg, trace: [] } as any, { status: 500 });
   }
 }
