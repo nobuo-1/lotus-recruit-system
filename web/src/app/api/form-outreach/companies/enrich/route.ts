@@ -42,6 +42,7 @@ type ProspectRow = {
   hq_address: string | null;
   capital: number | null;
   established_on: string | null;
+  phone?: string | null; // ← 追加（選択の取得にも使う）
 };
 
 function getAdmin(): { sb: any; usingServiceRole: boolean } {
@@ -220,7 +221,7 @@ function extractIndustry(s: string): string | null {
 }
 
 /** --- DuckDuckGoでHP推定（回数とタイムアウトを短縮） --- */
-const DDG = ["https://html.duckduckgo.com/html/?q="]; // 1種類に絞る
+const DDG = ["https://html.duckduckgo.com/html/?q="];
 const BAD_DOMAINS = [
   "nta.go.jp",
   "houjin-bangou.nta.go.jp",
@@ -258,12 +259,12 @@ async function guessHomepage(
   company: string,
   addr?: string | null
 ): Promise<string | null> {
-  const queries = [`${company} ${addr || ""} 公式`, `${company} ${addr || ""}`]; // ← 最大2クエリに制限
+  const queries = [`${company} ${addr || ""} 公式`, `${company} ${addr || ""}`];
   for (const q0 of queries) {
     const q = encodeURIComponent(q0.trim());
     for (const base of DDG) {
       try {
-        const r = await fetchWithTimeout(base + q, {}, 5000); // ← 5s
+        const r = await fetchWithTimeout(base + q, {}, 5000);
         if (!r.ok) continue;
         const html = await r.text();
         const links = Array.from(
@@ -312,7 +313,6 @@ function pickDetailLinks(baseHtml: string, baseUrl: string): string[] {
       } catch {}
     }
   }
-  // 典型パスの追加
   [
     "/contact",
     "/inquiry",
@@ -328,7 +328,7 @@ function pickDetailLinks(baseHtml: string, baseUrl: string): string[] {
       if (!items.includes(u)) items.push(u);
     } catch {}
   });
-  return items.slice(0, 5); // ← 最大5件まで
+  return items.slice(0, 5);
 }
 
 function passesFilters(
@@ -421,7 +421,7 @@ export async function POST(req: Request) {
     const tryLLM: boolean = !!body?.try_llm;
     const filters: Filters | undefined = body?.filters;
 
-    // ★ 全体のソフト・タイムアウト（規定45秒：必要に応じて body.timeout_ms で調整可能）
+    // 全体ソフトタイムアウト（既定45秒）
     const started = Date.now();
     const SOFT_TIMEOUT_MS = Math.min(
       Math.max(10000, Number(body?.timeout_ms) || 45000),
@@ -433,7 +433,7 @@ export async function POST(req: Request) {
     const { sb } = getAdmin();
     const nowIso = new Date().toISOString();
 
-    // 1) 直近キャッシュを取得
+    // 1) キャッシュから候補
     let q = (sb as any)
       .from("nta_corporates_cache")
       .select("corporate_number, company_name, address, scraped_at")
@@ -453,7 +453,7 @@ export async function POST(req: Request) {
         { status: 200 }
       );
 
-    // 2) 既存prospects & 既存rejected を排除
+    // 2) 既存prospects / rejected を除外
     const nums = candidates
       .map((c: any) => String(c.corporate_number || ""))
       .filter((v) => /^\d{13}$/.test(v));
@@ -478,18 +478,18 @@ export async function POST(req: Request) {
       (existedRej || []).map((r: any) => String(r.corporate_number))
     );
 
-    // 3) HP探索 & 詳細抽出（時間予算を守りつつ）
+    // 3) HP探索 & 詳細抽出
     const rowsForInsert: any[] = [];
     const rejected: any[] = [];
 
-    // 時間切れを避けるため、処理候補は「多めに渡されても」時間に応じて途中打ち切り
+    // 処理プールを十分に確保（従来の 2倍→4倍）
     const picked = candidates
       .filter(
         (c: any) =>
           !existedProsSet.has(String(c.corporate_number)) &&
           !existedRejSet.has(String(c.corporate_number))
       )
-      .slice(0, want * 2);
+      .slice(0, want * 4);
 
     for (const c of picked) {
       if (timedOut()) break;
@@ -499,7 +499,7 @@ export async function POST(req: Request) {
       const addr = String(c.address || "");
       const prefs = extractPrefectures(addr);
 
-      // 3-1) HP推定（短めタイムアウト）
+      // 3-1) HP推定
       let website: string | null = null;
       try {
         if (timeLeft() > 2000) {
@@ -508,31 +508,34 @@ export async function POST(req: Request) {
       } catch {}
 
       if (!website) {
+        // ← 「公式サイトが見つからない」は不適合として必ず保存対象にカウント
         rejected.push({
           tenant_id: tenantId,
+          corporate_number: corpNo || null,
           company_name: name,
           website: null,
           contact_email: null,
+          phone: null, // ← rejectedは phone
           contact_form_url: null,
-          phone_number: null,
           industry_large: null,
           industry_small: null,
           company_size: null,
           company_size_extracted: null,
           prefectures: prefs,
-          corporate_number: corpNo || null,
           hq_address: addr || null,
           capital: null,
           established_on: null,
-          reject_reasons: ["公式サイトが見つからない"],
           source_site: "nta-crawl",
+          reject_reasons: ["公式サイトが見つからない"],
           created_at: nowIso,
           updated_at: nowIso,
         });
+        // ★ want達成判定は「採用+不採用」の合計で行う
+        if (rowsForInsert.length + rejected.length >= want) break;
         continue;
       }
 
-      // 3-2) TOP取得（7s）
+      // 3-2) TOP取得
       let baseHtml = "";
       try {
         const r = await fetchWithTimeout(
@@ -544,16 +547,16 @@ export async function POST(req: Request) {
       } catch {}
       const baseText = htmlToText(baseHtml);
 
-      // 先に mailto / tel を拾う（クリック型の問い合わせに対応）
+      // mailto / tel を先に抽出
       let email: string | null =
         extractMailtoAll(baseHtml)[0] || extractEmailFromText(baseText);
-      let phone: string | null =
+      let phoneNum: string | null =
         extractTelAll(baseHtml)[0] || extractPhoneJP(baseText);
 
-      // 3-3) 詳細リンク探索（最大5件）
+      // 3-3) 詳細リンク
       const detailLinks = pickDetailLinks(baseHtml, website);
 
-      // 3-4) 詳細抽出（1リンク 5–6s、十分揃えば即break）
+      // 3-4) 詳細抽出
       let contactFormUrl: string | null = null;
       let est: string | null = extractEstablishedOn(baseText);
       let cap: number | null = extractCapitalJPY(baseText);
@@ -572,7 +575,7 @@ export async function POST(req: Request) {
             continue;
           }
           if (/^tel:/i.test(u)) {
-            if (!phone) phone = u.replace(/^tel:/i, "").trim();
+            if (!phoneNum) phoneNum = u.replace(/^tel:/i, "").trim();
             continue;
           }
 
@@ -586,18 +589,20 @@ export async function POST(req: Request) {
             /問い合わせ|contact|inquiry|フォーム/i.test(text)
           )
             contactFormUrl = u;
-          if (!phone) phone = extractTelAll(html)[0] || extractPhoneJP(text);
+          if (!phoneNum)
+            phoneNum = extractTelAll(html)[0] || extractPhoneJP(text);
           if (!email)
             email = extractMailtoAll(html)[0] || extractEmailFromText(text);
           if (!est) est = extractEstablishedOn(text);
           if (cap == null) cap = extractCapitalJPY(text);
           if (!ind) ind = extractIndustry(text);
 
-          if (phone && (email || contactFormUrl) && (est || cap) && ind) break;
+          if (phoneNum && (email || contactFormUrl) && (est || cap) && ind)
+            break;
         } catch {}
       }
 
-      // 3-5) フィルタ適合判定
+      // 3-5) フィルタ適合
       const { ok, reasons } = passesFilters(
         {
           prefectures: prefs,
@@ -614,25 +619,26 @@ export async function POST(req: Request) {
       if (!ok) {
         rejected.push({
           tenant_id: tenantId,
+          corporate_number: corpNo || null,
           company_name: name,
           website,
           contact_email: email,
+          phone: phoneNum, // ← rejectedは phone
           contact_form_url: contactFormUrl,
-          phone_number: phone,
           industry_large: null,
           industry_small: null,
           company_size: null,
           company_size_extracted: null,
           prefectures: prefs,
-          corporate_number: corpNo || null,
           hq_address: addr || null,
           capital: cap,
           established_on: est,
-          reject_reasons: reasons.length ? reasons : ["フィルタに不適合"],
           source_site: "nta-crawl",
+          reject_reasons: reasons.length ? reasons : ["フィルタに不適合"],
           created_at: nowIso,
           updated_at: nowIso,
         });
+        if (rowsForInsert.length + rejected.length >= want) break;
         continue;
       }
 
@@ -643,7 +649,8 @@ export async function POST(req: Request) {
         website: website || null,
         contact_form_url: contactFormUrl || null,
         contact_email: email || null,
-        phone_number: phone || null,
+        phone_number: phoneNum || null, // ← prospectsは phone_number
+        phone: phoneNum || null, // ← 併せて phone も保存
         industry: ind || null,
         company_size: null,
         job_site_source: "nta-crawl",
@@ -657,10 +664,11 @@ export async function POST(req: Request) {
         established_on: est,
       });
 
-      if (rowsForInsert.length >= want) break; // 目標到達
+      // ★ 採用+不採用の合計で want 達成判定
+      if (rowsForInsert.length + rejected.length >= want) break;
     }
 
-    // 4) DB保存
+    // 4) DB保存（prospects）
     let rows: ProspectRow[] = [];
     let inserted = 0;
     if (rowsForInsert.length) {
@@ -671,7 +679,7 @@ export async function POST(req: Request) {
           ignoreDuplicates: true,
         })
         .select(
-          "id,tenant_id,company_name,website,contact_form_url,contact_email,phone_number,industry,company_size,job_site_source,status,created_at,updated_at,prefectures,corporate_number,hq_address,capital,established_on"
+          "id,tenant_id,company_name,website,contact_form_url,contact_email,phone_number,phone,industry,company_size,job_site_source,status,created_at,updated_at,prefectures,corporate_number,hq_address,capital,established_on"
         );
 
       if (ins.error) {
@@ -680,7 +688,7 @@ export async function POST(req: Request) {
             .from("form_prospects")
             .insert(rowsForInsert)
             .select(
-              "id,tenant_id,company_name,website,contact_form_url,contact_email,phone_number,industry,company_size,job_site_source,status,created_at,updated_at,prefectures,corporate_number,hq_address,capital,established_on"
+              "id,tenant_id,company_name,website,contact_form_url,contact_email,phone_number,phone,industry,company_size,job_site_source,status,created_at,updated_at,prefectures,corporate_number,hq_address,capital,established_on"
             );
           if (ins2.error)
             return NextResponse.json(
@@ -701,17 +709,42 @@ export async function POST(req: Request) {
       }
     }
 
-    // 5) DB保存（rejected）
-    // 504対策の早期打ち切りでも、ここまで来た分は保存
-    // 失敗しても致命ではないのでエラーにしない
+    // 5) DB保存（rejected）— 失敗は返却
+    let rejected_saved = 0;
     if (rejected.length) {
-      await (sb as any).from("form_prospects_rejected").upsert(rejected, {
-        onConflict: "tenant_id,corporate_number",
-        ignoreDuplicates: true,
-      });
+      const insr = await (sb as any)
+        .from("form_prospects_rejected")
+        .upsert(rejected, {
+          onConflict: "tenant_id,corporate_number",
+          ignoreDuplicates: true,
+        })
+        .select("corporate_number");
+      if (insr.error) {
+        return NextResponse.json(
+          {
+            error: insr.error.message,
+            // ここまで保存できたprospectsは返す
+            rows,
+            inserted,
+            rejected_attempted: rejected.length,
+          },
+          { status: 500 }
+        );
+      }
+      rejected_saved = Array.isArray(insr.data) ? insr.data.length : 0;
     }
 
-    return NextResponse.json({ rows, inserted, rejected }, { status: 200 });
+    return NextResponse.json(
+      {
+        rows,
+        inserted,
+        rejected, // 保存内容のプレビュー（必要に応じてUIで件数のみ表示）
+        rejected_saved,
+        processed_total: rowsForInsert.length + rejected.length,
+        want,
+      },
+      { status: 200 }
+    );
   } catch (e: any) {
     return NextResponse.json(
       { error: String(e?.message || e) },
