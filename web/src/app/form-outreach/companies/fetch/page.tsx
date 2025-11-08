@@ -84,6 +84,10 @@ type CrawlDebug = {
   rows_preview?: CrawlPreviewRow[];
   trace?: string[];
   warning?: string;
+  /** ← 追加：接続先可視化 */
+  project_ref?: string | null;
+  db_url_host?: string | null;
+  db_probe_found?: number;
 };
 
 /** ===== Flow Titles ===== */
@@ -298,6 +302,13 @@ export default function ManualFetch() {
         const toInsert = Number(j?.to_insert_count || 0);
         const usingSrv = !!j?.using_service_role;
 
+        // 追加：接続先 & プローブ
+        const projectRef: string | null =
+          j?.project_ref != null ? String(j.project_ref) : null;
+        const dbUrlHost: string | null =
+          j?.db_url_host != null ? String(j.db_url_host) : null;
+        const probeFound: number = Number(j?.db_probe_found ?? 0);
+
         // debug state
         setCrawlDebug({
           step: j?.step,
@@ -308,6 +319,9 @@ export default function ManualFetch() {
           rows_preview: Array.isArray(j?.rows_preview) ? j.rows_preview : [],
           trace: Array.isArray(j?.trace) ? j.trace : [],
           warning: j?.warning,
+          project_ref: projectRef,
+          db_url_host: dbUrlHost,
+          db_probe_found: probeFound,
         });
 
         // A-2 result
@@ -345,6 +359,9 @@ export default function ManualFetch() {
             `権限: ${usingSrv ? "service-role" : "anon"}${
               j?.warning ? " / 警告あり" : ""
             }`,
+            `Probe: project_ref=${projectRef ?? "-"}, db_url_host=${
+              dbUrlHost ?? "-"
+            }, db_probe_found=${probeFound}`,
           ].join("\n")
         );
 
@@ -651,7 +668,7 @@ export default function ManualFetch() {
                         ⚠ {crawlDebug.warning}
                       </div>
                     )}
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
                       <div className="rounded border border-neutral-200 p-2">
                         <div className="font-semibold mb-1">Step</div>
                         <pre className="whitespace-pre-wrap">
@@ -664,6 +681,14 @@ export default function ManualFetch() {
                           {`new_cache: ${crawlDebug.new_cache ?? 0}
 to_insert: ${crawlDebug.to_insert_count ?? 0}
 using_service_role: ${crawlDebug.using_service_role ? "true" : "false"}`}
+                        </pre>
+                      </div>
+                      <div className="rounded border border-neutral-200 p-2">
+                        <div className="font-semibold mb-1">Probe</div>
+                        <pre className="whitespace-pre-wrap">
+                          {`project_ref: ${crawlDebug.project_ref ?? "-"}
+db_url_host: ${crawlDebug.db_url_host ?? "-"}
+db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                         </pre>
                       </div>
                       <div className="rounded border border-neutral-200 p-2">

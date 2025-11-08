@@ -4,7 +4,7 @@ export const runtime = "nodejs";
 export const maxDuration = 30;
 
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
 
 /** ========= Types ========= */
 type Filters = { prefectures?: string[] };
@@ -17,10 +17,14 @@ type RawRow = {
 type PrefOpt = { code: string; name: string };
 type CityOpt = { code: string; name: string };
 
-/** ========= ENV ========= */
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+/** ========= ENV (サーバ優先で解決) ========= */
+const SUPABASE_URL =
+  process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 const SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
-const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
+const ANON_KEY =
+  process.env.SUPABASE_ANON_KEY ||
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+  "";
 
 /** ========= HTTP helpers ========= */
 const UA =
@@ -70,6 +74,10 @@ function shuffle<T>(arr: T[], seed: number) {
     [a[i], a[j]] = [a[j], a[i]];
   }
   return a;
+}
+function parseProjectRef(url: string) {
+  const m = /^https?:\/\/([^.]+)\.supabase\.co/i.exec(url || "");
+  return m?.[1] || null;
 }
 
 /** ========= 1) Cookie/Token/Pref ========= */
@@ -249,22 +257,35 @@ function parseResultTable(html: string): RawRow[] {
   return out;
 }
 
-/** ========= Supabase ========= */
-function getAdmin(): { sb: any; usingServiceRole: boolean } {
-  if (!SUPABASE_URL) throw new Error("NEXT_PUBLIC_SUPABASE_URL is missing");
-  if (SERVICE_ROLE)
-    return {
-      sb: createClient(SUPABASE_URL, SERVICE_ROLE) as any,
-      usingServiceRole: true,
-    };
-  if (!ANON_KEY)
-    throw new Error(
-      "SUPABASE_SERVICE_ROLE_KEY / NEXT_PUBLIC_SUPABASE_ANON_KEY missing"
-    );
-  return {
-    sb: createClient(SUPABASE_URL, ANON_KEY) as any,
-    usingServiceRole: false,
-  };
+/** ========= Supabase Client (public schema 明示 & server優先) ========= */
+function getAdmin(): {
+  sb: SupabaseClient;
+  usingServiceRole: boolean;
+  project_ref: string | null;
+  db_url_host: string | null;
+} {
+  if (!SUPABASE_URL)
+    throw new Error("SUPABASE_URL / NEXT_PUBLIC_SUPABASE_URL is missing");
+  const usingServiceRole = !!SERVICE_ROLE;
+  const key = SERVICE_ROLE || ANON_KEY; // サービスロール優先
+  if (!key) throw new Error("SUPABASE keys not provided");
+
+  const sb = createClient(SUPABASE_URL, key, {
+    auth: { persistSession: false, autoRefreshToken: false },
+    db: { schema: "public" },
+  });
+
+  const project_ref = parseProjectRef(SUPABASE_URL);
+  const db_url_host = (() => {
+    try {
+      const u = new URL(SUPABASE_URL);
+      return u.host;
+    } catch {
+      return null;
+    }
+  })();
+
+  return { sb, usingServiceRole, project_ref, db_url_host };
 }
 
 /** ========= Handler ========= */
@@ -325,6 +346,7 @@ export async function POST(req: Request) {
           html_sig: {},
           trace,
           using_service_role: !!SERVICE_ROLE,
+          project_ref: parseProjectRef(SUPABASE_URL),
         },
         { status: 200 }
       );
@@ -379,16 +401,16 @@ export async function POST(req: Request) {
       detail_url: r.detail_url,
     }));
 
-    const { sb, usingServiceRole } = getAdmin();
+    const { sb, usingServiceRole, project_ref, db_url_host } = getAdmin();
     let inserted_new = 0;
-    let rlsWarning: string | undefined;
     let toInsert: any[] = [];
+    let db_probe_found = 0;
 
     if (deduped.length) {
       const nums = deduped.map((r) => r.corporate_number);
 
-      // ★★★ ここが修正点：必ず await を付与 ★★★
-      const { data: existedRows, error: exErr } = await (sb as any)
+      // 既存チェック
+      const { data: existedRows, error: exErr } = await sb
         .from("nta_corporates_cache")
         .select("corporate_number")
         .eq("tenant_id", tenantId)
@@ -403,6 +425,8 @@ export async function POST(req: Request) {
             html_sig: { ...lastSig, resultCount: lastCount },
             trace,
             using_service_role: usingServiceRole,
+            project_ref,
+            db_url_host,
           },
           { status: 500 }
         );
@@ -426,25 +450,22 @@ export async function POST(req: Request) {
         }));
 
       if (toInsert.length) {
-        // まずは upsert（ユニーク制約がある場合に最適）
-        const tryUpsert = async () => {
-          // ★★★ ここも修正点：await を付与 ★★★
-          const { data, error } = await (sb as any)
-            .from("nta_corporates_cache")
-            .upsert(toInsert, {
-              onConflict: "tenant_id,corporate_number",
-              ignoreDuplicates: true,
-            })
-            .select("corporate_number");
+        // upsert → 失敗なら insert へフォールバック
+        let data: any[] | null = null;
+        let error: any = null;
 
-          return { data, error };
-        };
+        const up = await sb
+          .from("nta_corporates_cache")
+          .upsert(toInsert, {
+            onConflict: "tenant_id,corporate_number",
+            ignoreDuplicates: true,
+          })
+          .select("corporate_number");
+        data = up.data;
+        error = up.error;
 
-        let { data, error } = await tryUpsert();
-
-        // ユニーク制約が無い場合は upsert が失敗するので insert にフォールバック
         if (error && /no unique|ON CONFLICT/i.test(error.message || "")) {
-          const ins = await (sb as any)
+          const ins = await sb
             .from("nta_corporates_cache")
             .insert(toInsert)
             .select("corporate_number");
@@ -453,20 +474,16 @@ export async function POST(req: Request) {
         }
 
         if (error) {
-          const rlsBlocked = /row-level security|permission denied|RLS/i.test(
-            error.message || ""
-          );
           return NextResponse.json(
             {
               error: error.message,
-              rls_blocked: rlsBlocked || undefined,
-              hint: rlsBlocked
-                ? "RLSによりINSERTが拒否。SUPABASE_SERVICE_ROLE_KEY を設定するか、RLSポリシーでINSERTを許可してください。"
-                : "テーブルのユニーク制約/権限/制約を確認してください。",
+              hint: "テーブルのユニーク制約/権限/制約を確認してください（service role であればRLSは無視されます）。",
               step: { a2_crawled, a3_picked, a4_filled, a5_inserted: 0 },
               html_sig: { ...lastSig, resultCount: lastCount },
               trace,
               using_service_role: usingServiceRole,
+              project_ref,
+              db_url_host,
             },
             { status: 500 }
           );
@@ -474,10 +491,19 @@ export async function POST(req: Request) {
 
         inserted_new = Array.isArray(data) ? data.length : 0;
 
-        if (!usingServiceRole && toInsert.length > 0 && inserted_new === 0) {
-          rlsWarning =
-            "新規候補は検出されましたが保存できませんでした。RLS により匿名INSERTが拒否の可能性。SUPABASE_SERVICE_ROLE_KEY を設定してください。";
-        }
+        // ★ 保存直後に DB を再読込（「本当に入った？」を確認）★
+        const insertedNums =
+          Array.isArray(data) && data.length
+            ? data.map((d: any) => d.corporate_number)
+            : toInsert.map((x) => x.corporate_number);
+
+        const probe = await sb
+          .from("nta_corporates_cache")
+          .select("id", { count: "exact", head: true })
+          .eq("tenant_id", tenantId)
+          .in("corporate_number", insertedNums);
+
+        db_probe_found = probe.count || 0;
       }
     }
 
@@ -490,7 +516,10 @@ export async function POST(req: Request) {
         using_service_role: usingServiceRole,
         html_sig: { ...lastSig, resultCount: lastCount },
         trace,
-        warning: rlsWarning,
+        // ここを見れば「どのSupabaseに書いたか」が一目で分かる
+        project_ref,
+        db_url_host,
+        db_probe_found, // ← 実DB再読込で確認できた件数
       },
       { status: 200 }
     );
