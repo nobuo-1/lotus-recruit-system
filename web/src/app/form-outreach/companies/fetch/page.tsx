@@ -129,6 +129,20 @@ export default function ManualFetch() {
   const [rejected, setRejected] = useState<RejectedRow[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
 
+  // === 表示件数制御（10件は常時、Moreで追加読み込み） ===
+  const MORE_STEP = 20;
+  const [addedLimit, setAddedLimit] = useState<number>(10);
+  const [rejectedLimit, setRejectedLimit] = useState<number>(10);
+
+  const displayedAdded = useMemo(
+    () => added.slice(0, Math.max(10, addedLimit)),
+    [added, addedLimit]
+  );
+  const displayedRejected = useMemo(
+    () => rejected.slice(0, Math.max(10, rejectedLimit)),
+    [rejected, rejectedLimit]
+  );
+
   const [filters, setFilters] = useState<Filters>({
     prefectures: [],
     employee_size_ranges: [],
@@ -331,7 +345,7 @@ export default function ManualFetch() {
       setActiveIdx(-1);
 
       // ---- 取得件数で制御：Phase A と B を反復 ----
-      let obtained = 0; // form_prospects に今回追加できた数
+      let obtained = 0;
       let attempts = 0;
       const MAX_ATTEMPTS = Math.ceil(total / 5) + 30;
       const BATCH = Math.min(
@@ -369,14 +383,12 @@ export default function ManualFetch() {
         const toInsert = Number(j?.to_insert_count || 0);
         const usingSrv = !!j?.using_service_role;
 
-        // 追加：接続先 & プローブ
         const projectRef: string | null =
           j?.project_ref != null ? String(j.project_ref) : null;
         const dbUrlHost: string | null =
           j?.db_url_host != null ? String(j.db_url_host) : null;
         const probeFound: number = Number(j?.db_probe_found ?? 0);
 
-        // debug state
         setCrawlDebug({
           step: j?.step,
           new_cache: newCache,
@@ -413,7 +425,7 @@ export default function ManualFetch() {
         if (!rCrawl.ok)
           throw new Error(j?.error || `crawl failed (${rCrawl.status})`);
 
-        // ---- Phase B（このループで即時実行）----
+        // ---- Phase B ----
         setActiveIdx(6);
         setS((a) => a.map((v, idx) => (idx === 6 ? "running" : v)));
         await delay(100);
@@ -447,7 +459,6 @@ export default function ManualFetch() {
           throw new Error(ej?.error || `enrich failed (${enrichRes.status})`);
         }
 
-        // 直近12時間のみ反映
         const now = Date.now();
 
         const rowsRaw: AddedRow[] = Array.isArray(ej?.rows)
@@ -468,6 +479,8 @@ export default function ManualFetch() {
               LS_KEY,
               JSON.stringify({ ts: new Date().toISOString(), rows: merged })
             );
+            // 10件固定 + 追加はMoreで
+            setAddedLimit((lim) => Math.max(10, lim));
             return merged;
           });
         }
@@ -491,13 +504,14 @@ export default function ManualFetch() {
               LS_REJECT_KEY,
               JSON.stringify({ ts: new Date().toISOString(), rows: next })
             );
+            setRejectedLimit((lim) => Math.max(10, lim));
             return next;
           });
         }
 
         const insertedNow = Number.isFinite(ej?.inserted as number)
           ? Number(ej?.inserted as number)
-          : rows.length; // inserted が無い場合は rows.length を採用
+          : rows.length;
         obtained += Math.max(0, insertedNow);
 
         setS((a) => a.map((v, idx) => (idx === lastIdx ? "done" : v)));
@@ -550,6 +564,7 @@ export default function ManualFetch() {
       if (!r.ok) throw new Error(j?.error || "cancel failed");
       setMsg(`取消しました：削除 ${j.deleted ?? 0} 件`);
       setAdded([]);
+      setAddedLimit(10);
       localStorage.removeItem(LS_KEY);
     } catch (e: any) {
       setMsg(String(e?.message || e));
@@ -577,6 +592,7 @@ export default function ManualFetch() {
             LS_KEY,
             JSON.stringify({ ts: new Date().toISOString(), rows: next })
           );
+          setAddedLimit((lim) => Math.max(10, lim));
           return next;
         });
       }
@@ -586,6 +602,7 @@ export default function ManualFetch() {
           LS_REJECT_KEY,
           JSON.stringify({ ts: new Date().toISOString(), rows: next })
         );
+        setRejectedLimit((lim) => Math.max(10, lim));
         return next;
       });
       setMsg("不適合から採用に追加しました。");
@@ -601,6 +618,7 @@ export default function ManualFetch() {
         LS_REJECT_KEY,
         JSON.stringify({ ts: new Date().toISOString(), rows: next })
       );
+      setRejectedLimit((lim) => Math.max(10, lim));
       return next;
     });
   };
@@ -837,12 +855,30 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                         <table className="min-w-[900px] w-full text-xs">
                           <thead className="bg-neutral-50 text-neutral-600">
                             <tr>
-                              <th className="px-2 py-2 text-left">法人番号</th>
-                              <th className="px-2 py-2 text-left">
+                              <th
+                                className="px-2 py-2 text-left whitespace-nowrap"
+                                style={{ writingMode: "horizontal-tb" }}
+                              >
+                                法人番号
+                              </th>
+                              <th
+                                className="px-2 py-2 text-left whitespace-nowrap"
+                                style={{ writingMode: "horizontal-tb" }}
+                              >
                                 商号又は名称
                               </th>
-                              <th className="px-2 py-2 text-left">所在地</th>
-                              <th className="px-2 py-2 text-left">履歴等</th>
+                              <th
+                                className="px-2 py-2 text-left whitespace-nowrap"
+                                style={{ writingMode: "horizontal-tb" }}
+                              >
+                                所在地
+                              </th>
+                              <th
+                                className="px-2 py-2 text-left whitespace-nowrap"
+                                style={{ writingMode: "horizontal-tb" }}
+                              >
+                                履歴等
+                              </th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-neutral-200">
@@ -923,24 +959,34 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
             <table className="min-w-[1300px] w-full text-sm">
               <thead className="bg-neutral-50 text-neutral-600">
                 <tr>
-                  <th className="px-3 py-3 text-left">企業名</th>
-                  <th className="px-3 py-3 text-left">サイトURL</th>
-                  <th className="px-3 py-3 text-left">メール</th>
-                  <th className="px-3 py-3 text-left">電話</th>
-                  <th className="px-3 py-3 text-left">フォーム</th>
-                  <th className="px-3 py-3 text-left">規模</th>
-                  <th className="px-3 py-3 text-left">都道府県</th>
-                  <th className="px-3 py-3 text-left">業種</th>
-                  <th className="px-3 py-3 text-left">資本金</th>
-                  <th className="px-3 py-3 text-left">設立</th>
-                  <th className="px-3 py-3 text-left">法人番号</th>
-                  <th className="px-3 py-3 text-left">本社所在地</th>
-                  <th className="px-3 py-3 text-left">取得元</th>
-                  <th className="px-3 py-3 text-left">取得日時</th>
+                  {[
+                    "企業名",
+                    "サイトURL",
+                    "メール",
+                    "電話",
+                    "フォーム",
+                    "規模",
+                    "都道府県",
+                    "業種",
+                    "資本金",
+                    "設立",
+                    "法人番号",
+                    "本社所在地",
+                    "取得元",
+                    "取得日時",
+                  ].map((h) => (
+                    <th
+                      key={h}
+                      className="px-3 py-3 text-left whitespace-nowrap"
+                      style={{ writingMode: "horizontal-tb" }}
+                    >
+                      {h}
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-200">
-                {added.map((c: AddedRow) => (
+                {displayedAdded.map((c: AddedRow) => (
                   <tr key={c.id}>
                     <td className="px-3 py-2">{c.company_name || "-"}</td>
                     <td className="px-3 py-2">
@@ -1009,6 +1055,22 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
               </tbody>
             </table>
           </div>
+
+          {/* More ボタン */}
+          {added.length > displayedAdded.length && (
+            <div className="flex justify-center py-3 border-t border-neutral-200">
+              <button
+                onClick={() =>
+                  setAddedLimit((n) =>
+                    Math.min(added.length, Math.max(10, n + MORE_STEP))
+                  )
+                }
+                className="rounded-lg border border-neutral-300 px-4 py-1.5 text-sm hover:bg-neutral-50"
+              >
+                More（{displayedAdded.length} / {added.length}）
+              </button>
+            </div>
+          )}
         </section>
 
         {/* 不適合一覧（form_prospects_rejected 反映） */}
@@ -1026,24 +1088,34 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
             <table className="min-w-[1500px] w-full text-sm">
               <thead className="bg-neutral-50 text-neutral-600">
                 <tr>
-                  <th className="px-3 py-3 text-left">企業名</th>
-                  <th className="px-3 py-3 text-left">サイトURL</th>
-                  <th className="px-3 py-3 text-left">都道府県</th>
-                  <th className="px-3 py-3 text-left">資本金</th>
-                  <th className="px-3 py-3 text-left">設立</th>
-                  <th className="px-3 py-3 text-left">法人番号</th>
-                  <th className="px-3 py-3 text-left">本社所在地</th>
-                  <th className="px-3 py-3 text-left">メール</th>
-                  <th className="px-3 py-3 text-left">電話</th>
-                  <th className="px-3 py-3 text-left">フォーム</th>
-                  <th className="px-3 py-3 text-left">推定規模</th>
-                  <th className="px-3 py-3 text-left">業種</th>
-                  <th className="px-3 py-3 text-left">不採用理由</th>
-                  <th className="px-3 py-3 text-left">操作</th>
+                  {[
+                    "企業名",
+                    "サイトURL",
+                    "都道府県",
+                    "資本金",
+                    "設立",
+                    "法人番号",
+                    "本社所在地",
+                    "メール",
+                    "電話",
+                    "フォーム",
+                    "推定規模",
+                    "業種",
+                    "不採用理由",
+                    "操作",
+                  ].map((h) => (
+                    <th
+                      key={h}
+                      className="px-3 py-3 text-left whitespace-nowrap"
+                      style={{ writingMode: "horizontal-tb" }}
+                    >
+                      {h}
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-200">
-                {rejected.map((r: RejectedRow, idx: number) => (
+                {displayedRejected.map((r: RejectedRow, idx: number) => (
                   <tr key={idx}>
                     <td className="px-3 py-2">{r.company_name}</td>
                     <td className="px-3 py-2">
@@ -1138,6 +1210,22 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
               </tbody>
             </table>
           </div>
+
+          {/* More ボタン */}
+          {rejected.length > displayedRejected.length && (
+            <div className="flex justify-center py-3 border-t border-neutral-200">
+              <button
+                onClick={() =>
+                  setRejectedLimit((n) =>
+                    Math.min(rejected.length, Math.max(10, n + MORE_STEP))
+                  )
+                }
+                className="rounded-lg border border-neutral-300 px-4 py-1.5 text-sm hover:bg-neutral-50"
+              >
+                More（{displayedRejected.length} / {rejected.length}）
+              </button>
+            </div>
+          )}
         </section>
 
         {msg && (
@@ -1208,7 +1296,7 @@ function CountModal({
   const clampVal = (v: number) => Math.max(1, Math.min(2000, Math.floor(v)));
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-      <div className="w=[520px] max-w-[96vw] rounded-2xl bg-white shadow-xl border border-neutral-200 overflow-hidden">
+      <div className="w-[520px] max-w-[96vw] rounded-2xl bg-white shadow-xl border border-neutral-200 overflow-hidden">
         <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200">
           <div className="font-semibold">取得件数の指定</div>
           <button
