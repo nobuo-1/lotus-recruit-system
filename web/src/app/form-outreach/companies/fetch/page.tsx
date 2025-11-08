@@ -56,18 +56,37 @@ type Filters = {
   keywords: string[];
   industries_large: string[];
   industries_small: string[];
-  // レンジ系
   capital_min?: number | null;
   capital_max?: number | null;
-  established_from?: string | null; // YYYY-MM-DD
-  established_to?: string | null; // YYYY-MM-DD
+  established_from?: string | null;
+  established_to?: string | null;
   updated_at?: string | null;
 };
 
-/** ===== Flow Titles =====
- * Phase A: 1〜6（NTA→キャッシュ）
- * Phase B: 7〜9（HP解決→抽出→prospects保存）
- */
+/** デバッグ表示用 */
+type CrawlPreviewRow = {
+  corporate_number: string;
+  name: string;
+  address?: string | null;
+  detail_url?: string | null;
+};
+type CrawlDebug = {
+  step?: {
+    a2_crawled?: number;
+    a3_picked?: number;
+    a4_filled?: number;
+    a5_inserted?: number;
+  };
+  new_cache?: number;
+  to_insert_count?: number;
+  using_service_role?: boolean;
+  html_sig?: Record<string, any>;
+  rows_preview?: CrawlPreviewRow[];
+  trace?: string[];
+  warning?: string;
+};
+
+/** ===== Flow Titles ===== */
 const FLOW_A_TITLES = [
   "1. 条件読み込み/表示",
   "2. 国税庁をクロール",
@@ -76,7 +95,6 @@ const FLOW_A_TITLES = [
   "5. キャッシュ保存",
   "6. 実行数到達まで反復",
 ];
-
 const FLOW_B_TITLES = [
   "7. 新規キャッシュ分のHP推定",
   "8. 到達性チェック/会社概要抽出",
@@ -113,6 +131,10 @@ export default function ManualFetch() {
 
   const abortRef = useRef<AbortController | null>(null);
   const cancelledRef = useRef(false);
+
+  /** Debug pane */
+  const [crawlDebug, setCrawlDebug] = useState<CrawlDebug | null>(null);
+  const [showDebug, setShowDebug] = useState<boolean>(true);
 
   /** ===== Effects: tenant & filters & restore local ===== */
   useEffect(() => {
@@ -168,7 +190,7 @@ export default function ManualFetch() {
           updated_at: incoming.updated_at ?? null,
         });
 
-        // keep "added" within 24h
+        // keep "added"
         const raw = localStorage.getItem(LS_KEY);
         if (raw) {
           const obj = JSON.parse(raw);
@@ -176,7 +198,6 @@ export default function ManualFetch() {
           if (Date.now() - ts < 24 * 3600 * 1000) setAdded(obj.rows ?? []);
           else localStorage.removeItem(LS_KEY);
         }
-
         // keep "rejected"
         const rejRaw = localStorage.getItem(LS_REJECT_KEY);
         if (rejRaw) {
@@ -186,7 +207,6 @@ export default function ManualFetch() {
             setRejected(Array.isArray(obj.rows) ? obj.rows : []);
           else localStorage.removeItem(LS_REJECT_KEY);
         }
-
         // last fetch count
         const last = Number(localStorage.getItem(LS_FETCH_COUNT));
         if (Number.isFinite(last) && last > 0)
@@ -221,12 +241,13 @@ export default function ManualFetch() {
     await runLoop(fetchTotal);
   };
 
-  /** 実行ループ：Phase A（crawl）→ Phase B（enrich） */
+  /** 実行ループ */
   const runLoop = async (total: number) => {
     if (!tenantId) return;
     setMsg("");
     setLoading(true);
     cancelledRef.current = false;
+    setCrawlDebug(null);
 
     // Steps init
     setS(Array(totalSteps).fill("idle"));
@@ -235,14 +256,14 @@ export default function ManualFetch() {
     abortRef.current = new AbortController();
 
     try {
-      /** ---- Phase 0: 条件表示（A-1） ---- */
+      // A-1
       setActiveIdx(0);
       setS((a) => a.map((v, i) => (i === 0 ? "running" : "idle")));
       await delay(180);
       setS((a) => a.map((v, i) => (i === 0 ? "done" : v)));
       setActiveIdx(-1);
 
-      /** ---- Phase A: NTA → キャッシュ保存（1〜6） ---- */
+      // ---- Phase A ----
       let savedCache = 0;
       let attempts = 0;
       const MAX_ATTEMPTS = Math.ceil(total / 5) + 10;
@@ -254,12 +275,11 @@ export default function ManualFetch() {
         const want = Math.min(BATCH, total - savedCache);
         const seed = `${Date.now()}-${attempts}`;
 
-        // A-2: 実処理前に running にしてフレームを進め、描画を確定させる
+        // A-2
         setActiveIdx(1);
         setS((a) => a.map((v, i) => (i === 1 ? "running" : v)));
         await nextFrame();
 
-        // 実API: crawl
         const r = await fetch("/api/form-outreach/companies/crawl", {
           method: "POST",
           headers: {
@@ -271,68 +291,76 @@ export default function ManualFetch() {
         });
         const j = await safeJson(r);
 
-        // 実測ステップを UI に反映（A-2〜A-4）
         const a2 = Number(j?.step?.a2_crawled || 0);
         const a3 = Number(j?.step?.a3_picked || 0);
         const a4 = Number(j?.step?.a4_filled || 0);
+        const newCache = Math.max(0, Number(j?.new_cache || 0));
+        const toInsert = Number(j?.to_insert_count || 0);
+        const usingSrv = !!j?.using_service_role;
 
-        // A-2: クロール結果
+        // debug state
+        setCrawlDebug({
+          step: j?.step,
+          new_cache: newCache,
+          to_insert_count: toInsert,
+          using_service_role: usingSrv,
+          html_sig: j?.html_sig || {},
+          rows_preview: Array.isArray(j?.rows_preview) ? j.rows_preview : [],
+          trace: Array.isArray(j?.trace) ? j.trace : [],
+          warning: j?.warning,
+        });
+
+        // A-2 result
         setS((a) =>
           a.map((v, idx) => (idx === 1 ? (a2 > 0 ? "done" : "error") : v))
         );
 
-        // A-3: ピック結果
+        // A-3
         setActiveIdx(2);
         setS((a) =>
           a.map((v, idx) => (idx === 2 ? (a3 > 0 ? "done" : "error") : v))
         );
 
-        // A-4: 詳細補完（0件でも処理は成功扱い）
+        // A-4
         setActiveIdx(3);
         setS((a) => a.map((v, idx) => (idx === 3 ? "done" : v)));
 
-        // A-5: 保存（API 側で完了済みなので done、A-6 は反復進行表示）
+        // A-5
         setActiveIdx(4);
         setS((a) => a.map((v, idx) => (idx === 4 ? "done" : v)));
 
-        // A-6（保存反映/反復）
+        // A-6
         setActiveIdx(5);
         setS((a) => a.map((v, idx) => (idx === 5 ? "running" : v)));
         await delay(120);
 
-        // 保存数の加算（API の new_cache を使用）
-        const newCache = Math.max(0, Number(j?.new_cache || 0));
         savedCache += newCache;
 
         setS((a) => a.map((v, idx) => (idx === 5 ? "done" : v)));
         setActiveIdx(-1);
 
         setMsg(
-          `キャッシュ保存進行：${savedCache}/${total} 件  (raw:${a2}, pick:${a3}, fill:${a4}, ins:${newCache}, to_insert:${Number(
-            j?.to_insert_count || 0
-          )})`
+          [
+            `キャッシュ保存進行：${savedCache}/${total} 件  (raw:${a2}, pick:${a3}, fill:${a4}, ins:${newCache}, to_insert:${toInsert})`,
+            `権限: ${usingSrv ? "service-role" : "anon"}${
+              j?.warning ? " / 警告あり" : ""
+            }`,
+          ].join("\n")
         );
 
-        if (!r.ok) {
-          throw new Error(j?.error || `crawl failed (${r.status})`);
-        }
+        if (!r.ok) throw new Error(j?.error || `crawl failed (${r.status})`);
 
-        if (newCache === 0) {
-          // 0件が続くときの緩衝
-          await delay(240);
-        }
+        if (newCache === 0) await delay(240);
       }
 
-      /** ---- Phase B: エンリッチ（7〜9） ---- */
-      const since = new Date(Date.now() - 15 * 60 * 1000).toISOString(); // 直近15分の新規キャッシュを対象
+      // ---- Phase B ----
+      const since = new Date(Date.now() - 15 * 60 * 1000).toISOString();
 
-      // B-7: HP推定（ここではAPIにまとめて任せる前段の表示）
       setActiveIdx(6);
       setS((a) => a.map((v, idx) => (idx === 6 ? "running" : v)));
       await delay(160);
       setS((a) => a.map((v, idx) => (idx === 6 ? "done" : v)));
 
-      // B-8: 到達/抽出（実APIで B-8〜9 を実行）
       setActiveIdx(7);
       setS((a) => a.map((v, idx) => (idx === 7 ? "running" : v)));
 
@@ -347,11 +375,9 @@ export default function ManualFetch() {
       });
       const ej = await safeJson(enrichRes);
 
-      // B-8 done
       setS((a) => a.map((v, idx) => (idx === 7 ? "done" : v)));
 
-      // B-9: 保存反映
-      const lastIdx = FLOW_A_TITLES.length + 2; // 0-based index: B-9 の位置
+      const lastIdx = FLOW_A_TITLES.length + 2;
       setActiveIdx(lastIdx);
       setS((a) => a.map((v, idx) => (idx === lastIdx ? "running" : v)));
       await delay(120);
@@ -391,7 +417,6 @@ export default function ManualFetch() {
     }
   };
 
-  /** 取消（今回追加分を削除） */
   const cancelAdditions = async () => {
     if (!tenantId || added.length === 0) return;
     if (!confirm("今回追加分をすべて取り消して削除します。よろしいですか？"))
@@ -416,7 +441,6 @@ export default function ManualFetch() {
     }
   };
 
-  /** 不適合 → 採用に追加（手動） */
   const addFromRejected = async (row: RejectedRow) => {
     try {
       if (!tenantId) throw new Error("tenant missing");
@@ -455,7 +479,6 @@ export default function ManualFetch() {
     }
   };
 
-  /** 不適合の一時非表示 */
   const hideRejected = (row: RejectedRow) => {
     setRejected((prev) => {
       const next = prev.filter((x) => !sameRejected(x, row));
@@ -467,7 +490,6 @@ export default function ManualFetch() {
     });
   };
 
-  /** フィルタ表示用サマリ */
   const summaryParts = useMemo(() => {
     const pref = filters.prefectures.length
       ? filters.prefectures.join(" / ")
@@ -605,6 +627,126 @@ export default function ManualFetch() {
           </div>
         </section>
 
+        {/* Debug Section */}
+        <section className="rounded-2xl border border-neutral-200 p-4 mb-4">
+          <div className="mb-2 flex items-center justify-between">
+            <div className="text-sm font-medium text-neutral-800">
+              デバッグ（API応答の詳細）
+            </div>
+            <button
+              onClick={() => setShowDebug((v) => !v)}
+              className="rounded border border-neutral-300 px-2 py-1 text-xs hover:bg-neutral-50"
+            >
+              {showDebug ? "閉じる" : "開く"}
+            </button>
+          </div>
+
+          {showDebug && (
+            <div className="space-y-3">
+              <div className="text-xs text-neutral-700">
+                {crawlDebug ? (
+                  <>
+                    {crawlDebug.warning && (
+                      <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-amber-900 mb-2">
+                        ⚠ {crawlDebug.warning}
+                      </div>
+                    )}
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                      <div className="rounded border border-neutral-200 p-2">
+                        <div className="font-semibold mb-1">Step</div>
+                        <pre className="whitespace-pre-wrap">
+                          {JSON.stringify(crawlDebug.step || {}, null, 2)}
+                        </pre>
+                      </div>
+                      <div className="rounded border border-neutral-200 p-2">
+                        <div className="font-semibold mb-1">Meta</div>
+                        <pre className="whitespace-pre-wrap">
+                          {`new_cache: ${crawlDebug.new_cache ?? 0}
+to_insert: ${crawlDebug.to_insert_count ?? 0}
+using_service_role: ${crawlDebug.using_service_role ? "true" : "false"}`}
+                        </pre>
+                      </div>
+                      <div className="rounded border border-neutral-200 p-2">
+                        <div className="font-semibold mb-1">html_sig</div>
+                        <pre className="whitespace-pre-wrap">
+                          {JSON.stringify(crawlDebug.html_sig || {}, null, 2)}
+                        </pre>
+                      </div>
+                    </div>
+                    <div className="rounded border border-neutral-200 p-2">
+                      <div className="font-semibold mb-1">trace</div>
+                      <pre className="whitespace-pre-wrap">
+                        {(crawlDebug.trace || []).join("\n")}
+                      </pre>
+                    </div>
+
+                    <div className="rounded border border-neutral-200">
+                      <div className="px-3 py-2 border-b border-neutral-200 bg-neutral-50 font-semibold">
+                        rows_preview（最大12件）
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="min-w-[900px] w-full text-xs">
+                          <thead className="bg-neutral-50 text-neutral-600">
+                            <tr>
+                              <th className="px-2 py-2 text-left">法人番号</th>
+                              <th className="px-2 py-2 text-left">
+                                商号又は名称
+                              </th>
+                              <th className="px-2 py-2 text-left">所在地</th>
+                              <th className="px-2 py-2 text-left">履歴等</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-neutral-200">
+                            {(crawlDebug.rows_preview || []).map((r) => (
+                              <tr key={r.corporate_number}>
+                                <td className="px-2 py-1 font-mono">
+                                  {r.corporate_number}
+                                </td>
+                                <td className="px-2 py-1">{r.name}</td>
+                                <td className="px-2 py-1">
+                                  {r.address || "-"}
+                                </td>
+                                <td className="px-2 py-1">
+                                  {r.detail_url ? (
+                                    <a
+                                      href={r.detail_url}
+                                      target="_blank"
+                                      className="text-indigo-700 hover:underline"
+                                    >
+                                      履歴等
+                                    </a>
+                                  ) : (
+                                    "-"
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                            {(!crawlDebug.rows_preview ||
+                              crawlDebug.rows_preview.length === 0) && (
+                              <tr>
+                                <td
+                                  colSpan={4}
+                                  className="px-3 py-6 text-center text-neutral-400"
+                                >
+                                  取得プレビューはありません
+                                </td>
+                              </tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-neutral-400">
+                    まだデバッグ情報はありません（実行すると表示されます）。
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </section>
+
         {/* 今回追加テーブル */}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden">
           <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 bg-neutral-50">
@@ -712,7 +854,7 @@ export default function ManualFetch() {
           </div>
         </section>
 
-        {/* 不適合一覧（手動追加可） */}
+        {/* 不適合一覧 */}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden mt-6">
           <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 bg-neutral-50">
             <div className="text-sm font-medium text-neutral-800">
@@ -965,17 +1107,13 @@ function CountModal({
 }
 
 /** ===== Helpers ===== */
-
 function delay(ms: number) {
   return new Promise((res) => setTimeout(res, ms));
 }
-
-// 画面更新を2フレーム待ってから重い処理へ（アイコンが固まって見えるのを防ぐ）
 async function nextFrame() {
   await new Promise((r) => requestAnimationFrame(() => r(null)));
   await new Promise((r) => requestAnimationFrame(() => r(null)));
 }
-
 async function safeJson(res: Response) {
   try {
     const t = await res.text();
@@ -984,7 +1122,6 @@ async function safeJson(res: Response) {
     return {};
   }
 }
-
 function normalizeSite(u?: string | null) {
   if (!u) return "";
   try {
