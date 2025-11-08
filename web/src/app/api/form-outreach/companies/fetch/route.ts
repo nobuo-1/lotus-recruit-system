@@ -1,6 +1,7 @@
 // web/src/app/api/form-outreach/companies/fetch/route.ts
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
+export const maxDuration = 30; // Vercel上限ガード
 
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
@@ -42,9 +43,15 @@ const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 
-// Playwright の ON/OFF & 実行回数上限（町レベルでのみ使用）
-const USE_PW = String(process.env.FO_USE_PLAYWRIGHT ?? "1") === "1";
-const PW_MAX_PER_CALL = Number(process.env.FO_PW_MAX_PER_CALL ?? 1);
+/** ---------- Tunables (timeout/budget) ---------- */
+// 総時間予算（サーバー側実測 22秒以内で終了させる）
+const HARD_BUDGET_MS = Number(process.env.FO_BUDGET_MS ?? 22_000);
+// アドレスキーワード数・ページ数を強制制限
+const MAX_ADDR_KEYS = Number(process.env.FO_MAX_ADDR_KEYS ?? 3);
+const MAX_PAGES_PER_KEY = Number(process.env.FO_MAX_PAGES ?? 1);
+
+// 既定は高速モード：LLM・HP到達をスキップして DB まで確実に到達
+const DEFAULT_FAST_MODE = String(process.env.FO_DEFAULT_FAST ?? "1") === "1";
 
 /** ---------- Utils ---------- */
 const UA =
@@ -55,10 +62,18 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const clamp = (n: unknown, min: number, max: number) =>
   Math.max(min, Math.min(max, Math.floor(Number(n) || 0)));
 
+function deadlineGuard(ms = HARD_BUDGET_MS) {
+  const deadline = Date.now() + ms;
+  return {
+    left: () => deadline - Date.now(),
+    ok: (reserve = 0) => Date.now() + reserve < deadline,
+  };
+}
+
 async function fetchWithTimeout(
   url: string,
   init: RequestInit = {},
-  ms = 12000
+  ms = 10_000
 ): Promise<Response> {
   const ctl = new AbortController();
   const id = setTimeout(() => ctl.abort(), ms);
@@ -152,7 +167,6 @@ function normalizeUrl(u?: string | null): string | undefined {
     return;
   }
 }
-
 function extractEmailsFrom(
   html: string,
   text: string,
@@ -425,7 +439,7 @@ async function crawlByAddressKeyword(keyword: string, page = 1) {
   ];
   for (const url of tries) {
     try {
-      const r = await fetchWithTimeout(url, {}, 15000);
+      const r = await fetchWithTimeout(url, {}, 8_000);
       if (!r.ok) continue;
       const html = await r.text();
       const rows = parseSearchHtml(html);
@@ -444,7 +458,7 @@ async function fetchDetailAndFill(row: {
 }) {
   if (!row.detail_url) return row;
   try {
-    const r = await fetchWithTimeout(row.detail_url, {}, 15000);
+    const r = await fetchWithTimeout(row.detail_url, {}, 8_000);
     if (!r.ok) return row;
     const html = await r.text();
     const name =
@@ -470,162 +484,11 @@ async function fetchDetailAndFill(row: {
   }
 }
 
-/** LLM: 公式HP推定（未設定でもOK） */
-async function resolveHomepageWithLLM(
-  c: Candidate
-): Promise<string | undefined> {
-  if (!OPENAI_API_KEY) return normalizeUrl(c.website || undefined);
-  const sys =
-    "You are a helpful assistant. Output STRICT JSON only, no commentary.";
-  const prompt = `次の法人の公式ホームページURLを1つ推定してください。不明なら空。必ず https:// から。
-入力: {"company_name":"${c.company_name}","hq_address":"${
-    c.hq_address ?? ""
-  }","corporate_number":"${c.corporate_number ?? ""}"}
-出力: {"website": "https://... | \"\""}`;
-
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${OPENAI_API_KEY}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "gpt-4o",
-      temperature: 0.1,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: sys },
-        { role: "user", content: prompt },
-      ],
-    }),
-  });
-  const txt = await res.text();
-  if (!res.ok) return normalizeUrl(c.website || undefined);
-  try {
-    const j = JSON.parse(txt);
-    const content = j?.choices?.[0]?.message?.content ?? "{}";
-    const payload = JSON.parse(content);
-    return normalizeUrl(payload?.website);
-  } catch {
-    return normalizeUrl(c.website || undefined);
-  }
-}
-
-/** HP 到達・抽出 */
-async function verifyAndEnrichWebsite(c: Candidate): Promise<Candidate | null> {
-  const site = normalizeUrl(c.website || undefined);
-  if (!site) return null;
-  try {
-    const r = await fetchWithTimeout(site, {}, 12000);
-    if (!r.ok) return null;
-    const html = await r.text();
-    const text = textFromHtml(html);
-    let host = "";
-    try {
-      host = new URL(site).host;
-    } catch {}
-    const emails = extractEmailsFrom(html, text, host);
-    const contact_form_url = await (async () => {
-      const links =
-        html.match(/<a\s+[^>]*href=["'][^"']+["'][^>]*>[\s\S]*?<\/a>/gi) || [];
-      const find = (href: string, label: string) =>
-        /contact|inquiry|お問い合わせ|お問合せ|問合せ/i.test(
-          href + " " + label
-        );
-      for (const a of links) {
-        const href = /href=["']([^"']+)["']/.exec(a)?.[1] || "";
-        const label = a
-          .replace(/<[^>]*>/g, " ")
-          .trim()
-          .slice(0, 120);
-        try {
-          const abs = new URL(href, site).toString();
-          if (find(abs, label)) return abs;
-        } catch {}
-      }
-      for (const p of [
-        "/contact",
-        "/contact-us",
-        "/inquiry",
-        "/inquiries",
-        "/お問い合わせ",
-        "/お問合せ",
-        "/問合せ",
-      ]) {
-        try {
-          const u = new URL(p, site).toString();
-          const rr = await fetchWithTimeout(u, { method: "HEAD" }, 5000);
-          if (rr.ok) return u;
-        } catch {}
-      }
-      return null;
-    })();
-
-    const sizeExtracted = extractCompanySizeToRange(text);
-    const cap = extractCapital(text);
-    const est = extractEstablishedOn(text);
-
-    return {
-      ...c,
-      website: site,
-      contact_email: emails[0] ?? c.contact_email ?? null,
-      contact_form_url,
-      company_size: sizeExtracted ?? c.company_size ?? null,
-      company_size_extracted: sizeExtracted ?? null,
-      capital: c.capital ?? cap ?? null,
-      established_on: c.established_on ?? est ?? null,
-    };
-  } catch {
-    return null;
-  }
-}
-
-/** 事前/最終フィルタ */
-function prefilterByRegistry(c: Candidate, f: Filters) {
-  const reasons: string[] = [];
-  if (f.capital_min != null && Number.isFinite(f.capital_min)) {
-    if (c.capital == null || c.capital < (f.capital_min as number)) {
-      reasons.push("資本金が下限未満、または不明");
-    }
-  }
-  if (f.capital_max != null && Number.isFinite(f.capital_max)) {
-    if (c.capital == null || c.capital > (f.capital_max as number)) {
-      reasons.push("資本金が上限超過、または不明");
-    }
-  }
-  if (f.established_from) {
-    if (!c.established_on || c.established_on < f.established_from) {
-      reasons.push("設立日が下限より前、または不明");
-    }
-  }
-  if (f.established_to) {
-    if (!c.established_on || c.established_on > f.established_to) {
-      reasons.push("設立日が上限より後、または不明");
-    }
-  }
-  return { ok: reasons.length === 0, reasons };
-}
-function matchesFilters(c: Candidate, f: Filters) {
-  const reasons: string[] = [];
-  if (f.prefectures?.length) {
-    const set = new Set((c.prefectures ?? []).map(String));
-    const some = [...set].some((p) => f.prefectures!.includes(p));
-    if (!some) reasons.push("所在都道府県が不一致");
-  }
-  if (f.employee_size_ranges?.length) {
-    const ex = c.company_size_extracted ?? null;
-    if (!ex) reasons.push("従業員数の実測が不明");
-    else if (!f.employee_size_ranges.includes(ex))
-      reasons.push("従業員数レンジ不一致");
-  }
-  const pre = prefilterByRegistry(c, f);
-  if (!pre.ok) reasons.push(...pre.reasons);
-  return { ok: reasons.length === 0, reasons };
-}
-
 /** ---------- Handler: POST ---------- */
 export async function POST(req: Request) {
   const trace: string[] = [];
+  const budget = deadlineGuard();
+
   try {
     if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
       return NextResponse.json(
@@ -643,10 +506,13 @@ export async function POST(req: Request) {
 
     const body: any = await req.json().catch(() => ({}));
     const filters: Filters = body?.filters ?? {};
-    const want: number = clamp(body?.want ?? filters.max ?? 12, 1, 200);
+    const want: number = clamp(body?.want ?? filters.max ?? 12, 1, 100);
+    const fast: boolean = body?.fast === false ? false : DEFAULT_FAST_MODE; // 既定: fast=true
     const seed: string = String(body?.seed || Math.random()).slice(2);
     const seedNum = Number(seed.replace(/\D/g, "")) || Date.now();
-    trace.push(`want=${want} seed=${seed}`);
+    trace.push(
+      `want=${want} seed=${seed} fast=${fast} budget=${budget.left()}ms`
+    );
 
     const admin: any = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
@@ -693,8 +559,8 @@ export async function POST(req: Request) {
         .filter(Boolean)
     );
 
-    // 住所キーワード（ランダム）
-    const addrPool = buildAddressKeywords(filters, seedNum);
+    // 住所キーワード（ランダム）— 数を強制制限してタイムアウト回避
+    let addrPool = buildAddressKeywords(filters, seedNum);
     if (!addrPool.length) {
       return NextResponse.json({
         inserted: 0,
@@ -704,9 +570,13 @@ export async function POST(req: Request) {
         trace,
       });
     }
-    trace.push(`addrPool=${addrPool.length}`);
+    addrPool = addrPool.slice(
+      0,
+      Math.max(1, Math.min(MAX_ADDR_KEYS, addrPool.length))
+    );
+    trace.push(`addrPool_used=${addrPool.length}`);
 
-    // 検索 → 行抽出
+    // 検索 → 行抽出（時間予算を常にチェック）
     const rawRows: Array<{
       corporate_number: string;
       name: string | null;
@@ -714,51 +584,17 @@ export async function POST(req: Request) {
       detail_url: string | null;
     }> = [];
 
-    let pwUsed = 0;
-    const MAX_PAGES_PER_KEY = 2;
-
     for (const k of addrPool) {
-      // 町レベル + Playwright有効時は UI ベース検索を一度だけ試す
-      if (USE_PW && k.level === "town" && pwUsed < PW_MAX_PER_CALL) {
-        try {
-          const { searchNtaByAddressPW } = await import(
-            "@/server/scrapers/ntaPlaywright"
-          );
-          const rows = await searchNtaByAddressPW({
-            keyword: [k.pref, k.city, k.town].filter(Boolean).join(" "),
-            timeoutMs: 12000,
-          });
-          pwUsed++;
-          for (const r of rows) {
-            const num = String(r.corporate_number || "").trim();
-            if (!/^\d{13}$/.test(num)) continue;
-            if (existingCorpNum.has(num)) continue;
-            rawRows.push({
-              corporate_number: num,
-              name: r.name || null,
-              address: r.address || null,
-              detail_url: r.detail_url || null,
-            });
-          }
-          trace.push(
-            `pw_ok:${k.city}${k.town ? "_" + k.town : ""}=${rows.length}`
-          );
-          if (rawRows.length >= Math.max(want * 40, 1000)) break;
-          // 成功時は同キーのHTTPクロールはスキップし次のキーへ
-          continue;
-        } catch (e: any) {
-          trace.push(`pw_err:${e?.message || e}`);
-          // フォールバックしてHTTPクロールへ
-        }
-      }
+      if (!budget.ok(6_000)) break; // このキーを始める余裕がなければ打ち切り
 
-      // 通常の HTTP クロール
       for (let page = 1; page <= MAX_PAGES_PER_KEY; page++) {
+        if (!budget.ok(4_000)) break;
+
         const rows = await crawlByAddressKeyword(k.keyword, page);
         for (const r of rows) {
           const num = String(r.corporate_number || "").trim();
           if (!/^\d{13}$/.test(num)) continue;
-          if (existingCorpNum.has(num)) continue; // 既存
+          if (existingCorpNum.has(num)) continue;
           rawRows.push({
             corporate_number: num,
             name: r.name || null,
@@ -766,23 +602,24 @@ export async function POST(req: Request) {
             detail_url: r.detail_url || null,
           });
         }
-        await sleep(50);
-        if (rawRows.length >= Math.max(want * 40, 1000)) break;
+        await sleep(30);
+        if (rawRows.length >= Math.max(want * 20, 400)) break;
       }
-      if (rawRows.length >= Math.max(want * 40, 1000)) break;
+      if (rawRows.length >= Math.max(want * 20, 400)) break;
     }
-    trace.push(`crawl=${rawRows.length}, pwUsed=${pwUsed}`);
+    trace.push(`crawl=${rawRows.length} left=${budget.left()}ms`);
 
     // 詳細ページ補完（/number/13桁）
     const filled: typeof rawRows = [];
-    const DETAIL_CONC = 8;
+    const DETAIL_CONC = 6;
     for (let i = 0; i < rawRows.length; i += DETAIL_CONC) {
+      if (!budget.ok(3_000)) break;
       const chunk = rawRows.slice(i, i + DETAIL_CONC);
       const got = await Promise.all(chunk.map((r) => fetchDetailAndFill(r)));
       filled.push(...got);
-      if (filled.length >= Math.max(want * 30, 800)) break;
+      if (filled.length >= Math.max(want * 16, 320)) break;
     }
-    trace.push(`detail=${filled.length}`);
+    trace.push(`detail=${filled.length} left=${budget.left()}ms`);
 
     // cache へ保存（nta_corporates_cache）— 新規だけ
     const cachePayload = filled
@@ -797,7 +634,7 @@ export async function POST(req: Request) {
         scraped_at: new Date().toISOString(),
       }));
     let cacheInserted = 0;
-    if (cachePayload.length) {
+    if (cachePayload.length && budget.ok(1_000)) {
       const { data, error } = await admin
         .from("nta_corporates_cache")
         .upsert(cachePayload as any, {
@@ -806,9 +643,9 @@ export async function POST(req: Request) {
       if (error) trace.push(`cache_upsert_error: ${error.message}`);
       else cacheInserted = (data || []).length;
     }
-    trace.push(`cache_upsert=${cacheInserted} ok`);
+    trace.push(`cache_upsert=${cacheInserted} left=${budget.left()}ms`);
 
-    // Candidate化
+    // Candidate化（HPは未解決のまま。まず表に出す）
     const basePool: Candidate[] = filled
       .map((r) => ({
         company_name: String(r.name || ""),
@@ -827,7 +664,7 @@ export async function POST(req: Request) {
       );
     }
     base = dedupeCands(base);
-    trace.push(`base=${base.length}`);
+    trace.push(`base=${base.length} left=${budget.left()}ms`);
 
     if (!base.length) {
       return NextResponse.json({
@@ -839,64 +676,91 @@ export async function POST(req: Request) {
       });
     }
 
-    // LLMでHP推定（任意）
-    const CONCURRENCY = 6;
-    const withSite: Candidate[] = [];
-    for (let i = 0; i < base.length; i += CONCURRENCY) {
-      const chunk = base.slice(i, i + CONCURRENCY);
-      const solved: Candidate[] = await Promise.all(
-        chunk.map(async (cand: Candidate): Promise<Candidate> => {
-          if (!cand.website) cand.website = await resolveHomepageWithLLM(cand);
-          return cand;
-        })
-      );
-      withSite.push(...solved);
-      if (withSite.length >= want * 8) break;
-    }
-    trace.push(`withSite=${withSite.length}`);
-
-    // HP到達/抽出
-    let accepted: Candidate[] = [];
+    // ---- FASTモード：LLM/HP抽出をスキップし、まずは保存して表に出す ----
+    let accepted: Candidate[] = base.slice(0, Math.min(want, 20));
     let rejected: Rejected[] = [];
 
-    const resolvable = withSite.filter((x) => !!x.website);
-    const unresolved = withSite.filter((x) => !x.website);
-    for (const ng of unresolved)
-      rejected.push({ ...ng, reject_reasons: ["公式サイト未解決"] });
-    trace.push(
-      `hp_resolvable=${resolvable.length}, unresolved=${unresolved.length}`
-    );
-
-    for (let i = 0; i < resolvable.length; i += CONCURRENCY) {
-      const chunk = resolvable.slice(i, i + CONCURRENCY);
-      const verified: Array<Candidate | null> = await Promise.all(
-        chunk.map((c: Candidate) => verifyAndEnrichWebsite(c))
+    // OPTIONAL: enrich（要求があり、かつ時間に余力があれば少数のみ）
+    if (!fast && budget.ok(6_000) && OPENAI_API_KEY) {
+      const limit = Math.min(5, want); // LLMは最大5件まで
+      const subset = base.slice(0, limit);
+      // 公式HP推定
+      const withSite = await Promise.all(
+        subset.map(async (c) => {
+          c.website = await (async () => {
+            try {
+              const sys =
+                "You are a helpful assistant. Output STRICT JSON only, no commentary.";
+              const prompt = `次の法人の公式ホームページURLを1つ推定してください。不明なら空。必ず https:// から。
+入力: {"company_name":"${c.company_name}","hq_address":"${
+                c.hq_address ?? ""
+              }","corporate_number":"${c.corporate_number ?? ""}"}
+出力: {"website": "https://... | \"\""}`;
+              const res = await fetch(
+                "https://api.openai.com/v1/chat/completions",
+                {
+                  method: "POST",
+                  headers: {
+                    authorization: `Bearer ${OPENAI_API_KEY}`,
+                    "content-type": "application/json",
+                  },
+                  body: JSON.stringify({
+                    model: "gpt-4o",
+                    temperature: 0.1,
+                    response_format: { type: "json_object" },
+                    messages: [
+                      { role: "system", content: sys },
+                      { role: "user", content: prompt },
+                    ],
+                  }),
+                }
+              );
+              if (!res.ok) return null;
+              const txt = await res.text();
+              const j = JSON.parse(txt);
+              const content = j?.choices?.[0]?.message?.content ?? "{}";
+              const payload = JSON.parse(content);
+              return normalizeUrl(payload?.website);
+            } catch {
+              return null;
+            }
+          })();
+          return c;
+        })
       );
-      for (const cc of verified) {
-        if (!cc) continue;
-        const webKey = String(cc.website || "").toLowerCase();
-        if (existingWebsite.has(webKey)) {
-          rejected.push({ ...cc, reject_reasons: ["既存URLと重複"] });
-          continue;
-        }
-        const fin = matchesFilters(cc, filters);
-        if (fin.ok) {
-          accepted.push(cc);
-          existingWebsite.add(webKey);
-          if (accepted.length >= want) break;
-        } else {
-          rejected.push({ ...cc, reject_reasons: fin.reasons });
-        }
-      }
-      if (accepted.length >= want) break;
-    }
-    accepted = dedupeCands(accepted).slice(0, want);
-    trace.push(`accepted=${accepted.length}, rejected=${rejected.length}`);
 
-    // form_prospects へ保存
+      // HP到達・抽出（各1リクエスト）
+      const enriched: Candidate[] = [];
+      for (const c of withSite) {
+        if (!c.website || !budget.ok(1_000)) continue;
+        try {
+          const r = await fetchWithTimeout(c.website, {}, 6_000);
+          if (!r.ok) continue;
+          const html = await r.text();
+          const text = textFromHtml(html);
+          const host = new URL(c.website).host;
+          const emails = extractEmailsFrom(html, text, host);
+          const sizeExtracted = extractCompanySizeToRange(text);
+          const cap = extractCapital(text);
+          const est = extractEstablishedOn(text);
+          enriched.push({
+            ...c,
+            contact_email: emails[0] ?? null,
+            company_size: sizeExtracted ?? null,
+            company_size_extracted: sizeExtracted ?? null,
+            capital: cap ?? null,
+            established_on: est ?? null,
+          });
+        } catch {}
+      }
+      if (enriched.length) accepted = enriched.slice(0, want);
+      trace.push(`enriched=${enriched.length} left=${budget.left()}ms`);
+    }
+
+    // form_prospects へ保存（まずは最小項目だけでも保存）
     let inserted = 0;
     let insertedRows: any[] = [];
-    if (accepted.length) {
+    if (accepted.length && budget.ok(1_000)) {
       const rows = accepted.map((c) => ({
         tenant_id: tenantId,
         company_name: c.company_name,
@@ -907,7 +771,7 @@ export async function POST(req: Request) {
           [c.industry_large, c.industry_small].filter(Boolean).join(" / ") ||
           null,
         company_size: c.company_size_extracted ?? c.company_size ?? null,
-        job_site_source: "nta-crawl+web",
+        job_site_source: fast ? "nta-crawl-fast" : "nta-crawl+web",
         status: "new",
         prefectures: c.prefectures ?? [],
         corporate_number: c.corporate_number ?? null,
@@ -922,40 +786,26 @@ export async function POST(req: Request) {
         .select(
           "id, tenant_id, company_name, website, contact_email, contact_form_url, industry, company_size, job_site_source, prefectures, corporate_number, hq_address, capital, established_on, created_at"
         );
+
       if (error) {
         trace.push(`prospects_upsert_error: ${error.message}`);
       } else {
         inserted = (data || []).length;
         insertedRows = data || [];
-        trace.push(`prospects_upsert=${inserted} ok`);
+        trace.push(`prospects_upsert=${inserted}`);
       }
     }
 
-    // 不適合の理由マージ
-    const dedupedRejectedMap = new Map<string, Rejected>();
-    for (const it of rejected) {
-      const k = keyForRejected(it);
-      const ex = dedupedRejectedMap.get(k);
-      if (!ex) dedupedRejectedMap.set(k, it);
-      else {
-        dedupedRejectedMap.set(k, {
-          ...ex,
-          reject_reasons: Array.from(
-            new Set([
-              ...(ex.reject_reasons || []),
-              ...(it.reject_reasons || []),
-            ])
-          ),
-        });
-      }
-    }
-    const dedupedRejected = Array.from(dedupedRejectedMap.values());
+    // 不適合（今回は最小動作優先のため、rejectは最小限）
+    const dedupedRejected: Rejected[] = rejected;
 
     return NextResponse.json({
       inserted,
       rows: insertedRows,
-      rejected: dedupedRejected.slice(0, Math.max(60, want * 3)),
-      note: "debug trace included",
+      rejected: dedupedRejected,
+      note: fast
+        ? "FASTモード：NTA→詳細補完のみで保存。HP/メール等の付加情報は後段で取得。"
+        : "一部を簡易エンリッチ済み。",
       trace,
     });
   } catch (e: unknown) {
