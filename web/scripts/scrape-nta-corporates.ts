@@ -1,189 +1,54 @@
+// web/scripts/scrape-nta-corporates.ts
 /**
- * scripts/scrape-nta-corporates.ts
+ * 目的:
+ *  - 国税庁「法人番号公表サイト」の検索結果ページを “住所キーワード” でクロール（※API未使用）
+ *  - 会社名 / 法人番号 / 本店所在地 / 詳細ページURL を抽出
+ *  - Supabase の nta_corporates_cache に upsert（tenant_id 付き）
  *
  * 使い方:
- *   pnpm tsx scripts/scrape-nta-corporates.ts --pref "東京都" --city "渋谷区" --limit 200 --seed 123
+ *  node -r esbuild-register scripts/scrape-nta-corporates.ts --tenant <UUID> --pref 東京都 --city 渋谷区 --limit 500
  *
- * 概要:
- *  - 国税庁 Web-API v4（住所検索）を利用して、都道府県＋市区町村＋町丁名シードから法人候補を収集
- *  - 乱択 & 重複排除
- *  - Supabase の `nta_corporates_cache` に保存
- *    カラム: id(uuid/DB既定), tenant_id(null), corporate_number, company_name, address, detail_url(null可), source, scraped_at
- *
- * 必須環境変数:
- *  - NEXT_PUBLIC_SUPABASE_URL
- *  - SUPABASE_SERVICE_ROLE_KEY
- *  - NTA_CORP_API_KEY  … 国税庁 Web-API キー
+ * 備考:
+ *  - 住所キーワードは「都道府県 + 市区町村 + 町丁名（丁目・マンション名除去）」の seed を利用。
+ *  - 検索UIのクエリ仕様は公開されていないため、複数の候補パラメータを試すフォールバック実装。
+ *  - 結果件数が少ない seed はスキップし、別 seed に回る。
+ *  - サイト側構造変更に強いよう、詳細ページURL (/number/13桁) を主キーとして抽出。
  */
 
-import { createClient } from "@supabase/supabase-js";
-import fs from "node:fs";
+import "dotenv/config";
 import path from "node:path";
+import fs from "node:fs/promises";
+import { createClient } from "@supabase/supabase-js";
+import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 
-type CliArgs = {
-  pref?: string;
-  city?: string;
-  limit: number;
-  seed: string;
-  outfile?: string;
-};
+// 生成済み seed を利用
+import { NTA_TOWN_SEEDS } from "@/constants/ntaTownSeeds.generated";
 
-type Candidate = {
-  corporate_number: string;
-  company_name: string;
+type CacheRow = {
+  tenant_id: string;
+  corporate_number: string | null;
+  company_name: string | null;
   address: string | null;
   detail_url: string | null;
+  source: string | null;
+  scraped_at: string | null;
 };
 
-const SB_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const SB_SVC = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-const NTA_KEY = process.env.NTA_CORP_API_KEY || "";
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 
-if (!SB_URL || !SB_SVC) {
-  console.error("[ERR] Supabase 環境変数が未設定です。");
-  process.exit(1);
-}
-if (!NTA_KEY) {
-  console.error("[ERR] NTA_CORP_API_KEY が未設定です。");
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  console.error("Supabase 環境変数が未設定です。");
   process.exit(1);
 }
 
-function parseArgs(argv: string[]): CliArgs {
-  const arg = (k: string) => {
-    const i = argv.findIndex((x) => x === k);
-    return i >= 0 ? argv[i + 1] : undefined;
-  };
-  const n = Number(arg("--limit") || "120");
-  return {
-    pref: arg("--pref"),
-    city: arg("--city"),
-    limit: Number.isFinite(n) && n > 0 ? Math.min(5000, Math.floor(n)) : 120,
-    seed: String(arg("--seed") || Date.now()),
-    outfile: arg("--outfile"),
-  };
-}
-
-const JP_PREFS = [
-  "北海道",
-  "青森県",
-  "岩手県",
-  "宮城県",
-  "秋田県",
-  "山形県",
-  "福島県",
-  "茨城県",
-  "栃木県",
-  "群馬県",
-  "埼玉県",
-  "千葉県",
-  "東京都",
-  "神奈川県",
-  "新潟県",
-  "富山県",
-  "石川県",
-  "福井県",
-  "山梨県",
-  "長野県",
-  "岐阜県",
-  "静岡県",
-  "愛知県",
-  "三重県",
-  "滋賀県",
-  "京都府",
-  "大阪府",
-  "兵庫県",
-  "奈良県",
-  "和歌山県",
-  "鳥取県",
-  "島根県",
-  "岡山県",
-  "広島県",
-  "山口県",
-  "徳島県",
-  "香川県",
-  "愛媛県",
-  "高知県",
-  "福岡県",
-  "佐賀県",
-  "長崎県",
-  "熊本県",
-  "大分県",
-  "宮崎県",
-  "鹿児島県",
-  "沖縄県",
-];
-
-const SHIBUYA_TOWNS = [
-  "宇田川町",
-  "道玄坂",
-  "円山町",
-  "猿楽町",
-  "恵比寿",
-  "恵比寿西",
-  "恵比寿南",
-  "元代々木町",
-  "広尾",
-  "笹塚",
-  "初台",
-  "松濤",
-  "上原",
-  "神宮前",
-  "神山町",
-  "神泉町",
-  "神南",
-  "西原",
-  "千駄ヶ谷",
-  "代々木",
-  "代々木神園町",
-  "代官山町",
-  "大山町",
-  "東",
-  "南平台町",
-  "幡ヶ谷",
-  "鉢山町",
-  "富ヶ谷",
-  "本町",
-  "鶯谷町",
-  "渋谷",
-];
-
-const MUNICIPALITY_SEEDS: Record<string, Record<string, string[]>> = {
-  東京都: {
-    渋谷区: SHIBUYA_TOWNS,
-    新宿区: [
-      "西新宿",
-      "歌舞伎町",
-      "四谷",
-      "新小川町",
-      "神楽坂",
-      "高田馬場",
-      "早稲田",
-    ],
-    港区: ["芝", "麻布", "六本木", "白金", "台場", "高輪", "赤坂", "青山"],
-    // 必要に応じて増やす
-  },
-  大阪府: {
-    大阪市北区: ["梅田", "堂島", "中之島", "曽根崎", "天神橋"],
-    大阪市中央区: ["本町", "心斎橋", "難波", "内本町", "農人橋"],
-  },
-};
-
-function randInt(max: number, seedN: number) {
-  return Math.floor(seedN % max);
-}
-
-function shuffleInPlace<T>(arr: T[], seedN: number) {
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = (seedN + i) % (i + 1);
-    [arr[i], arr[j]] = [arr[j], arr[i]];
-  }
-  return arr;
-}
-
+const UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)";
 async function fetchWithTimeout(
   url: string,
   init: RequestInit = {},
-  ms = 12000
+  ms = 15000
 ) {
   const ctl = new AbortController();
   const id = setTimeout(() => ctl.abort(), ms);
@@ -192,9 +57,8 @@ async function fetchWithTimeout(
       ...init,
       signal: ctl.signal,
       headers: {
-        "user-agent":
-          (init.headers as any)?.["user-agent"] ||
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "user-agent": UA,
+        ...(init.headers || {}),
       },
     });
   } finally {
@@ -202,176 +66,267 @@ async function fetchWithTimeout(
   }
 }
 
-function deepCollectCorporateLike(root: any): any[] {
-  const out: any[] = [];
-  const st = [root];
-  while (st.length) {
-    const cur = st.pop();
-    if (!cur) continue;
-    if (Array.isArray(cur)) {
-      for (const v of cur) st.push(v);
-      continue;
-    }
-    if (typeof cur === "object") {
-      const keys = Object.keys(cur);
-      const hasNum = keys.some((k) => /corporate[_]?number/i.test(k));
-      const hasName = keys.some((k) => /(name|corporationName)/i.test(k));
-      if (hasNum && hasName) out.push(cur);
-      for (const k of keys) st.push(cur[k]);
-    }
+/** 検索結果HTMLから 会社名・法人番号・住所・詳細URL を抽出 */
+function parseSearchHtml(html: string) {
+  const out: Array<{
+    corporate_number: string | null;
+    name: string | null;
+    address: string | null;
+    detail_url: string | null;
+  }> = [];
+
+  // 1) 詳細ページリンク /number/13digits を軸に抽出
+  const linkRe = /href=["'](\/number\/(\d{13}))[#"']/g;
+  let m: RegExpExecArray | null;
+  const seen = new Set<string>();
+  while ((m = linkRe.exec(html))) {
+    const rel = m[1];
+    const num = m[2];
+    if (!rel || !num || seen.has(num)) continue;
+    seen.add(num);
+
+    // 付近テキストから会社名・住所を緩く抽出
+    const ctxStart = Math.max(0, m.index - 1200);
+    const ctxEnd = Math.min(html.length, m.index + 1200);
+    const ctx = html.slice(ctxStart, ctxEnd).replace(/\s+/g, " ");
+
+    // 会社名候補: リンク近傍の <strong> or 太字 or 「名称」「商号」ラベル
+    let name: string | null =
+      />(?:名称|商号|法人名)[^<]{0,10}<\/[^>]*>\s*<[^>]*>([^<]{2,120})<\//i
+        .exec(ctx)?.[1]
+        ?.trim() ||
+      />\s*([^<]{2,120})\s*<\/a>/.exec(ctx)?.[1]?.trim() ||
+      /<strong[^>]*>([^<]{2,180})<\/strong>/.exec(ctx)?.[1]?.trim() ||
+      null;
+
+    // 住所候補: 「本店」や「所在地」ラベル近傍
+    const addr =
+      /(所在地|本店|本社)[^<]{0,20}<\/[^>]*>\s*<[^>]*>([^<]{6,200})<\//i
+        .exec(ctx)?.[2]
+        ?.trim() ||
+      /(所在地|本店|本社)[^\u4e00-\u9fafA-Za-z0-9]{0,5}([^<>{}]{6,200})/i
+        .exec(ctx)?.[2]
+        ?.trim() ||
+      null;
+
+    const detailUrl = new URL(
+      rel,
+      "https://www.houjin-bangou.nta.go.jp"
+    ).toString();
+    out.push({
+      corporate_number: num,
+      name: name || null,
+      address: addr || null,
+      detail_url: detailUrl,
+    });
   }
+
+  // 2) リンクが拾えなかった残差のための保険（法人番号の裸テキスト）
+  const loose = Array.from(new Set(html.match(/\b\d{13}\b/g) || []));
+  for (const num of loose) {
+    if (seen.has(num)) continue;
+    seen.add(num);
+    out.push({
+      corporate_number: num,
+      name: null,
+      address: null,
+      detail_url: `https://www.houjin-bangou.nta.go.jp/number/${num}`,
+    });
+  }
+
   return out;
 }
 
-/** 国税庁 v4 住所検索（divide=1） */
-async function ntaAddressSearch(
-  address: string,
-  take = 400
-): Promise<Candidate[]> {
-  const base = "https://api.houjin-bangou.nta.go.jp/4/address";
-  // ※ API の細かい仕様差に備えて冗長に指定
-  const qs = new URLSearchParams({
-    id: NTA_KEY,
-    address,
-    type: "12", // 住所検索
-    mode: "2", // 緩めの一致
-    target: "1", // 現在情報
-    divide: "1", // ページ分割あり（サーバ側都合で無視される可能性あり）
-  });
-  const url = `${base}?${qs.toString()}`;
-  const r = await fetchWithTimeout(url);
-  const txt = await r.text();
-  if (!r.ok) {
-    console.warn(
-      `[WARN] NTA API error ${r.status} for "${address}": ${txt.slice(0, 150)}`
-    );
-    return [];
+/** 国税庁の検索結果を、住所のテキストで叩いて結果を得る（フォールバックを多段で試す） */
+async function crawlByAddressKeyword(keyword: string, page = 1) {
+  const tries: string[] = [
+    // 公式のクエリ仕様は非公開のため、既知の実装から安全そうな候補を複数試す
+    `https://www.houjin-bangou.nta.go.jp/kensaku-kekka.html?searchString=${encodeURIComponent(
+      keyword
+    )}&page=${page}`,
+    `https://www.houjin-bangou.nta.go.jp/kensaku-kekka.html?q=${encodeURIComponent(
+      keyword
+    )}&page=${page}`,
+    `https://www.houjin-bangou.nta.go.jp/kensaku-kekka.html?name=&location=${encodeURIComponent(
+      keyword
+    )}&page=${page}`,
+  ];
+
+  for (const url of tries) {
+    try {
+      const r = await fetchWithTimeout(url, {}, 15000);
+      if (!r.ok) continue;
+      const html = await r.text();
+      const rows = parseSearchHtml(html);
+      if (rows.length) return rows;
+    } catch {}
   }
-  let j: any = {};
-  try {
-    j = JSON.parse(txt);
-  } catch {
-    return [];
+  return [];
+}
+
+function pick<T>(arr: T[], n: number, seed: number) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = (seed + i) % (i + 1);
+    [a[i], a[j]] = [a[j], a[i]];
   }
-  const rows = deepCollectCorporateLike(j);
-  const out: Candidate[] = rows
-    .slice(0, take)
-    .map((x) => {
-      const num = String(
-        x?.corporate_number ?? x?.corporateNumber ?? ""
-      ).trim();
-      const nm = String(x?.name ?? x?.corporationName ?? "").trim();
-      const ad = String(x?.address ?? x?.location ?? "").trim() || null;
-      return {
-        corporate_number: num,
-        company_name: nm,
-        address: ad,
-        detail_url: null,
-      };
-    })
-    .filter((c) => c.corporate_number && c.company_name);
-  return out;
+  return a.slice(0, n);
+}
+
+function prefecturesFromAddress(addr?: string | null): string[] {
+  if (!addr) return [];
+  const JP_PREFS = [
+    "北海道",
+    "青森県",
+    "岩手県",
+    "宮城県",
+    "秋田県",
+    "山形県",
+    "福島県",
+    "茨城県",
+    "栃木県",
+    "群馬県",
+    "埼玉県",
+    "千葉県",
+    "東京都",
+    "神奈川県",
+    "新潟県",
+    "富山県",
+    "石川県",
+    "福井県",
+    "山梨県",
+    "長野県",
+    "岐阜県",
+    "静岡県",
+    "愛知県",
+    "三重県",
+    "滋賀県",
+    "京都府",
+    "大阪府",
+    "兵庫県",
+    "奈良県",
+    "和歌山県",
+    "鳥取県",
+    "島根県",
+    "岡山県",
+    "広島県",
+    "山口県",
+    "徳島県",
+    "香川県",
+    "愛媛県",
+    "高知県",
+    "福岡県",
+    "佐賀県",
+    "長崎県",
+    "熊本県",
+    "大分県",
+    "宮崎県",
+    "鹿児島県",
+    "沖縄県",
+  ];
+  const hit = JP_PREFS.filter((p) => addr.includes(p));
+  return hit.slice(0, 2);
 }
 
 async function main() {
-  const args = parseArgs(process.argv);
-  const pref = (args.pref || "").trim();
-  const city = (args.city || "").trim();
-  const limit = args.limit;
-  const seedNum = Number(String(args.seed).replace(/\D/g, "")) || Date.now();
+  // ---- 引数
+  const argv = process.argv.slice(2);
+  const getArg = (k: string, def = "") => {
+    const i = argv.indexOf(k);
+    return i >= 0 ? String(argv[i + 1] || "") : def;
+  };
 
-  if (!pref || !JP_PREFS.includes(pref)) {
-    console.error(`[ERR] --pref は必須です（例: 東京都）`);
+  const tenantId = getArg("--tenant");
+  const pref = getArg("--pref"); // 例: 東京都
+  const city = getArg("--city"); // 例: 渋谷区
+  const limit = Math.max(50, Math.min(5000, Number(getArg("--limit", "800"))));
+
+  if (!tenantId) {
+    console.error("--tenant <UUID> は必須です");
     process.exit(1);
   }
 
-  const seedsByCity = MUNICIPALITY_SEEDS[pref] || {};
-  const towns = city && seedsByCity[city] ? seedsByCity[city] : [];
-  const seedTowns = towns.length ? towns.slice() : [city || pref];
-
-  // 乱択で順序を変える
-  shuffleInPlace(seedTowns, seedNum);
-
-  console.log(
-    `[INFO] Start scrape: ${pref}/${
-      city || "(city unspecified)"
-    } limit=${limit}`
-  );
-  const bag: Candidate[] = [];
-  const seen = new Set<string>();
-
-  // シードごとに収集（過剰呼び出しを避けるため控えめ）
-  for (const t of seedTowns) {
-    if (bag.length >= limit * 5) break;
-    const addr = city
-      ? `${pref}${city}${t.replace(/丁目.*/, "")}`
-      : `${pref}${t}`;
-    const rows = await ntaAddressSearch(addr, 600);
-    for (const r of rows) {
-      const k = `${r.corporate_number}__${r.company_name.toLowerCase()}`;
-      if (!seen.has(k)) {
-        seen.add(k);
-        bag.push(r);
-      }
+  // ---- seed 生成
+  const seeds: Array<{ pref: string; city: string; town: string }> = [];
+  const prefKeys = pref ? [pref] : Object.keys(NTA_TOWN_SEEDS);
+  for (const p of prefKeys) {
+    const cityMap = NTA_TOWN_SEEDS[p] || {};
+    const cityKeys = city ? [city] : Object.keys(cityMap);
+    for (const c of cityKeys) {
+      const towns = (cityMap[c] || []).filter(Boolean);
+      for (const t of towns) seeds.push({ pref: p, city: c, town: t });
     }
   }
-
-  // 乱択して上限まで
-  shuffleInPlace(bag, seedNum);
-  const picks = bag.slice(0, limit);
-
-  console.log(`[INFO] Collected raw=${bag.length}, unique=${picks.length}`);
-
-  // Supabase 保存
-  const sb = createClient(SB_URL, SB_SVC);
-  const rows = picks.map((c) => ({
-    tenant_id: null,
-    corporate_number: c.corporate_number,
-    company_name: c.company_name,
-    address: c.address,
-    detail_url: c.detail_url,
-    source: `nta_api_v4_address:${pref}/${city || "-"}`,
-    scraped_at: new Date().toISOString(),
-  }));
-
-  // `corporate_number` で upsert（同じ法人は上書き/更新）
-  const { data, error } = await sb
-    .from("nta_corporates_cache")
-    .upsert(rows, { onConflict: "corporate_number" })
-    .select("corporate_number");
-
-  if (error) {
-    console.error("[ERR] insert/upsert failed:", error.message);
+  if (!seeds.length) {
+    console.error(
+      "シードが見つかりません。generate-nta-town-seeds-from-postal.ts を実行してください。"
+    );
     process.exit(1);
   }
 
-  console.log(`[OK] Saved ${data?.length || 0} rows to nta_corporates_cache`);
+  const admin: any = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-  // 任意: JSONL にも書き出し（デバッグ用）
-  if (args.outfile) {
-    const file = path.resolve(args.outfile);
-    const outdir = path.dirname(file);
-    fs.mkdirSync(outdir, { recursive: true });
-    const now = new Date().toISOString();
-    const lines = picks
-      .map((c) =>
-        JSON.stringify({
-          corporate_number: c.corporate_number,
-          name: c.company_name,
-          address: c.address || "",
-          pref,
-          city: city || "",
-          source_url: "https://www.houjin-bangou.nta.go.jp/kensaku-kekka.html",
-          scraped_at: now,
-        })
-      )
-      .join("\n");
-    fs.writeFileSync(file, lines);
-    console.log(`[OK] Debug JSONL written: ${file}`);
+  let inserted = 0;
+  let tried = 0;
+  const stamp = new Date().toISOString();
+
+  // シャッフルして順に叩く
+  const seedNum = Date.now();
+  const bag = pick(
+    seeds,
+    Math.min(seeds.length, Math.ceil(limit / 10) * 5),
+    seedNum
+  );
+
+  for (const s of bag) {
+    if (inserted >= limit) break;
+    tried++;
+    const keyword = `${s.pref}${s.city}${s.town}`;
+
+    // ページ送り：最大3ページ
+    let rows: any[] = [];
+    for (let page = 1; page <= 3 && rows.length < 120; page++) {
+      const one = await crawlByAddressKeyword(keyword, page);
+      if (!one.length) break;
+      rows.push(...one);
+      await delay(100);
+    }
+
+    // クリーニング→upsert
+    if (!rows.length) continue;
+    const payload: CacheRow[] = rows
+      .map((r) => ({
+        tenant_id: tenantId,
+        corporate_number: r.corporate_number || null,
+        company_name: r.name || null,
+        address: r.address || null,
+        detail_url: r.detail_url || null,
+        source: "nta-crawl",
+        scraped_at: stamp,
+      }))
+      .filter((x) => x.corporate_number && x.company_name);
+
+    if (!payload.length) continue;
+
+    const { error } = await admin
+      .from("nta_corporates_cache")
+      .upsert(payload as any, { onConflict: "tenant_id,corporate_number" });
+
+    if (!error) {
+      inserted += payload.length;
+      process.stdout.write(
+        `\r[${inserted}/${limit}] ${s.pref}${s.city}${s.town} (+${payload.length})   `
+      );
+    } else {
+      console.warn("\nUpsert error:", error.message);
+    }
+    await delay(60);
   }
+
+  console.log(`\nDone. seeds_tried=${tried}, inserted~=${inserted}`);
 }
 
 main().catch((e) => {
-  console.error("[FATAL]", e?.message || e);
+  console.error(e?.stack || e?.message || String(e));
   process.exit(1);
 });
