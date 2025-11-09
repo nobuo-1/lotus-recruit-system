@@ -103,25 +103,29 @@ type CrawlDebug = {
 };
 
 /** ===== Flow Titles ===== */
+// A: 1〜5
 const FLOW_A_TITLES = [
   "1. 条件読み込み/表示",
   "2. 国税庁をクロール",
   "3. ランダム地域/企業抽出",
   "4. 詳細補完（名称/住所）",
   "5. キャッシュ保存",
-  "6. 取得件数到達まで反復",
 ];
+// B: 6〜8
 const FLOW_B_TITLES = [
-  "7. 新規キャッシュ分のHP推定",
-  "8. 到達性チェック/会社概要抽出",
-  "9. form_prospects保存/反映 + 不適合保存",
+  "6. 新規キャッシュ分のHP推定",
+  "7. 到達性チェック/会社概要抽出",
+  "8. form_prospects保存/反映 + 不適合保存",
 ];
+// Tail: 9
+const FLOW_TAIL_TITLES = ["9. 取得件数到達まで反復"];
 
 export default function ManualFetch() {
   /** ===== State ===== */
   const [tenantId, setTenantId] = useState<string | null>(null);
   const [msg, setMsg] = useState<string>("");
-  const totalSteps = FLOW_A_TITLES.length + FLOW_B_TITLES.length;
+  const totalSteps =
+    FLOW_A_TITLES.length + FLOW_B_TITLES.length + FLOW_TAIL_TITLES.length;
   const [s, setS] = useState<StepState[]>(Array(totalSteps).fill("idle"));
   const [activeIdx, setActiveIdx] = useState<number>(-1);
 
@@ -322,7 +326,7 @@ export default function ManualFetch() {
     await runLoop(fetchTotal);
   };
 
-  /** 実行ループ（取得件数ベースで A/B を反復） */
+  /** 実行ループ（取得件数ベースで A→B→Tail を反復） */
   const runLoop = async (total: number) => {
     if (!tenantId) return;
     setMsg("");
@@ -344,7 +348,7 @@ export default function ManualFetch() {
       setS((a) => a.map((v, i) => (i === 0 ? "done" : v)));
       setActiveIdx(-1);
 
-      // ---- 取得件数で制御：Phase A と B を反復 ----
+      // ---- 取得件数で制御：Phase A → Phase B → Tail を反復 ----
       let obtained = 0;
       let attempts = 0;
       const MAX_ATTEMPTS = Math.ceil(total / 5) + 30;
@@ -360,8 +364,8 @@ export default function ManualFetch() {
         const want = Math.min(BATCH, Math.max(1, total - obtained));
         const seed = `${Date.now()}-${attempts}`;
 
-        // A-2 ～ A-5（クロール＆キャッシュ）
-        setActiveIdx(1);
+        // ===== Phase A (index: 1..4) =====
+        setActiveIdx(1); // 2.クロール
         setS((a) => a.map((v, i) => (i === 1 ? "running" : v)));
         await nextFrame();
 
@@ -408,31 +412,28 @@ export default function ManualFetch() {
         setS((a) =>
           a.map((v, idx) => (idx === 1 ? (a2 > 0 ? "done" : "error") : v))
         );
-        setActiveIdx(2);
+        setActiveIdx(2); // 3.ランダム抽出
         setS((a) =>
           a.map((v, idx) => (idx === 2 ? (a3 > 0 ? "done" : "error") : v))
         );
-        setActiveIdx(3);
+        setActiveIdx(3); // 4.詳細補完
         setS((a) => a.map((v, idx) => (idx === 3 ? "done" : v)));
-        setActiveIdx(4);
+        setActiveIdx(4); // 5.キャッシュ保存
         setS((a) => a.map((v, idx) => (idx === 4 ? "done" : v)));
-
-        // A-6（反復の進行表示）
-        setActiveIdx(5);
-        setS((a) => a.map((v, idx) => (idx === 5 ? "done" : v)));
         setActiveIdx(-1);
 
         if (!rCrawl.ok)
           throw new Error(j?.error || `crawl failed (${rCrawl.status})`);
 
-        // ---- Phase B ----
-        setActiveIdx(6);
-        setS((a) => a.map((v, idx) => (idx === 6 ? "running" : v)));
-        await delay(100);
-        setS((a) => a.map((v, idx) => (idx === 6 ? "done" : v)));
+        // ===== Phase B (index: 5..7) =====
+        setActiveIdx(5); // 6.HP推定
+        setS((a) => a.map((v, idx) => (idx === 5 ? "running" : v)));
+        await delay(80);
+        setS((a) => a.map((v, idx) => (idx === 5 ? "done" : v)));
 
-        setActiveIdx(7);
-        setS((a) => a.map((v, idx) => (idx === 7 ? "running" : v)));
+        setActiveIdx(6); // 7.到達性/抽出
+        setS((a) => a.map((v, idx) => (idx === 6 ? "running" : v)));
+
         const enrichRes = await fetch("/api/form-outreach/companies/enrich", {
           method: "POST",
           headers: {
@@ -447,15 +448,14 @@ export default function ManualFetch() {
           signal: abortRef.current.signal,
         });
         const ej = await safeJson(enrichRes);
-        setS((a) => a.map((v, idx) => (idx === 7 ? "done" : v)));
+        setS((a) => a.map((v, idx) => (idx === 6 ? "done" : v)));
 
-        const lastIdx = FLOW_A_TITLES.length + 2;
-        setActiveIdx(lastIdx);
-        setS((a) => a.map((v, idx) => (idx === lastIdx ? "running" : v)));
-        await delay(80);
+        setActiveIdx(7); // 8.保存/反映 + 不適合
+        setS((a) => a.map((v, idx) => (idx === 7 ? "running" : v)));
+        await delay(60);
 
         if (!enrichRes.ok) {
-          setS((a) => a.map((v, idx) => (idx === lastIdx ? "error" : v)));
+          setS((a) => a.map((v, idx) => (idx === 7 ? "error" : v)));
           throw new Error(ej?.error || `enrich failed (${enrichRes.status})`);
         }
 
@@ -479,7 +479,6 @@ export default function ManualFetch() {
               LS_KEY,
               JSON.stringify({ ts: new Date().toISOString(), rows: merged })
             );
-            // 10件固定 + 追加はMoreで
             setAddedLimit((lim) => Math.max(10, lim));
             return merged;
           });
@@ -514,7 +513,15 @@ export default function ManualFetch() {
           : rows.length;
         obtained += Math.max(0, insertedNow);
 
-        setS((a) => a.map((v, idx) => (idx === lastIdx ? "done" : v)));
+        setS((a) => a.map((v, idx) => (idx === 7 ? "done" : v)));
+        setActiveIdx(-1);
+
+        // ===== Tail (index: 8) ・・・Phase B の後に「反復」表示 =====
+        const tailIdx = FLOW_A_TITLES.length + FLOW_B_TITLES.length; // = 8
+        setActiveIdx(tailIdx);
+        setS((a) => a.map((v, idx) => (idx === tailIdx ? "running" : v)));
+        await delay(40);
+        setS((a) => a.map((v, idx) => (idx === tailIdx ? "done" : v)));
         setActiveIdx(-1);
 
         setMsg(
@@ -728,7 +735,7 @@ export default function ManualFetch() {
             </Link>
           </div>
 
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-3 lg:grid-cols-6">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-3 lg:grid-cols-5">
             {FLOW_A_TITLES.map((title, idx) => (
               <FlowNode
                 key={title}
@@ -748,6 +755,23 @@ export default function ManualFetch() {
           <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
             {FLOW_B_TITLES.map((title, bIdx) => {
               const idx = FLOW_A_TITLES.length + bIdx;
+              return (
+                <FlowNode
+                  key={title}
+                  title={title}
+                  state={s[idx]}
+                  active={activeIdx === idx}
+                />
+              );
+            })}
+          </div>
+        </section>
+
+        {/* Tail (Phase B の後) */}
+        <section className="rounded-2xl border border-neutral-200 p-4 mb-4">
+          <div className="grid grid-cols-1 md:grid-cols-1 gap-3">
+            {FLOW_TAIL_TITLES.map((title, tIdx) => {
+              const idx = FLOW_A_TITLES.length + FLOW_B_TITLES.length + tIdx;
               return (
                 <FlowNode
                   key={title}

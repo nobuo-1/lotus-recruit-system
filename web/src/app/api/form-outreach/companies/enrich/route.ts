@@ -125,7 +125,6 @@ function isLikelyOfficial(url: string, company?: string | null): boolean {
     "linkedin.com",
     "indeed.com",
     "jp.indeed.com",
-    "findy-code.io",
     "wantedly.com",
     "en-gage.net",
     "mynavi",
@@ -250,94 +249,35 @@ async function loadRecentCache(
   return (data || []) as CacheRow[];
 }
 
-/** ========= 重複存在チェック ========= */
-async function existsProspect(
-  sb: any,
-  tenantId: string,
-  corporateNumber?: string | null,
-  website?: string | null
-): Promise<boolean> {
-  const q = sb
-    .from("form_prospects")
-    .select("id", { count: "exact", head: true })
-    .eq("tenant_id", tenantId);
-  if (corporateNumber) q.eq("corporate_number", corporateNumber);
-  else if (website) q.eq("website", website);
-  const { count, error } = await q;
-  if (error) throw new Error(error.message);
-  return (count ?? 0) > 0;
-}
-
-/** ========= 競合安全なUPSERT（重複時は既存を返す） ========= */
+/** ========= 競合安全なUPSERT ========= */
 async function upsertProspect(
   sb: any,
   row: Omit<AddedRow, "id" | "created_at"> & { created_at?: string | null }
-): Promise<AddedRow | null> {
+): Promise<AddedRow> {
   const now = new Date().toISOString();
   const payload = { ...row, created_at: row.created_at ?? now };
 
-  // まず素直に INSERT（同時実行で衝突したら 23505 を拾う）
-  let ins = await sb
+  // corporate_number がある場合はユニークキーに合わせて onConflict を指定
+  if (row.corporate_number) {
+    const { data, error } = await sb
+      .from("form_prospects")
+      .upsert(payload, { onConflict: "tenant_id,corporate_number" })
+      .select("*")
+      .limit(1)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return data as AddedRow;
+  }
+
+  // 無い場合は通常INSERT（ここでは重複ユニークは想定しない）
+  const { data, error } = await sb
     .from("form_prospects")
     .insert(payload)
     .select("*")
     .limit(1)
     .maybeSingle();
-
-  if (!ins.error) {
-    return (ins.data || null) as AddedRow | null;
-  }
-
-  const msg: string = String(ins.error?.message || "");
-  const isDup =
-    ins.error?.code === "23505" ||
-    /duplicate key value|ux_fpr_tenant_corpnum/i.test(msg);
-
-  if (!isDup) {
-    throw new Error(ins.error.message);
-  }
-
-  // 重複：ユニークは (tenant_id, corporate_number) 想定
-  if (row.corporate_number) {
-    // 既存行を取りにいく
-    const ex = await sb
-      .from("form_prospects")
-      .select("*")
-      .eq("tenant_id", row.tenant_id)
-      .eq("corporate_number", row.corporate_number)
-      .limit(1)
-      .maybeSingle();
-
-    if (!ex.error && ex.data) {
-      // 既存があり、空欄が多い場合は控えめに更新（website 等）
-      const patch: Record<string, any> = {};
-      if (row.website && !ex.data.website) patch.website = row.website;
-      if (row.job_site_source && !ex.data.job_site_source)
-        patch.job_site_source = row.job_site_source;
-      if (row.hq_address && !ex.data.hq_address)
-        patch.hq_address = row.hq_address;
-
-      if (Object.keys(patch).length) {
-        await sb
-          .from("form_prospects")
-          .update(patch)
-          .eq("tenant_id", row.tenant_id)
-          .eq("corporate_number", row.corporate_number);
-        const ex2 = await sb
-          .from("form_prospects")
-          .select("*")
-          .eq("tenant_id", row.tenant_id)
-          .eq("corporate_number", row.corporate_number)
-          .limit(1)
-          .maybeSingle();
-        if (!ex2.error && ex2.data) return ex2.data as AddedRow;
-      }
-      return ex.data as AddedRow;
-    }
-  }
-
-  // corporate_number が無い重複や取得失敗時は諦める
-  return null;
+  if (error) throw new Error(error.message);
+  return data as AddedRow;
 }
 
 /** ========= rejected へ INSERT ========= */
@@ -419,24 +359,7 @@ export async function POST(req: Request) {
         continue;
       }
 
-      // 既存重複（楽観チェック）
-      const dup = await existsProspect(
-        sb,
-        tenantId,
-        c.corporate_number,
-        website
-      );
-      if (dup) {
-        rejected.push({
-          company_name: name,
-          website,
-          corporate_number: c.corporate_number || null,
-          hq_address: c.address || null,
-          reject_reasons: ["既にprospectsへ登録済み（重複）"],
-        });
-        continue;
-      }
-
+      // 競合安全 upsert（重複でも 500 を出さない）
       const saved = await upsertProspect(sb, {
         tenant_id: tenantId,
         company_name: name,
@@ -457,14 +380,19 @@ export async function POST(req: Request) {
 
       if (saved) {
         rows.push(saved);
-        inserted += 1;
+        // 直近の run で新規作成されたものだけカウント（既存アップサートはカウントしない）
+        const createdAt = saved.created_at ? Date.parse(saved.created_at) : NaN;
+        const sinceAt = Date.parse(since);
+        if (Number.isFinite(createdAt) && createdAt >= sinceAt) {
+          inserted += 1;
+        }
       } else {
         rejected.push({
           company_name: name,
           website,
           corporate_number: c.corporate_number || null,
           hq_address: c.address || null,
-          reject_reasons: ["prospectsへの保存に失敗（重複競合の可能性）"],
+          reject_reasons: ["prospectsへの保存に失敗（未知の要因）"],
         });
       }
     }
