@@ -183,6 +183,13 @@ function zen2han(s: string) {
     .replace(/\s+/g, "");
 }
 
+/** --- 和暦→西暦 変換 --- */
+function eraToYear(era: "令和" | "平成" | "昭和", y: number): number {
+  if (era === "令和") return 2018 + y; // R1=2019
+  if (era === "平成") return 1988 + y; // H1=1989
+  return 1925 + y; // S1=1926
+}
+
 function addressBlocksMatch(a?: string | null, b?: string | null): boolean {
   if (!a || !b) return false;
   const A = zen2han(a);
@@ -342,57 +349,34 @@ function isValidJPPhone(s: string): boolean {
   return true;
 }
 
-/** ====== 追加: 資本金（円）を万/千/億表記から正規化 ====== */
-function parseCapitalYen(s: string): number | null {
+function parseYenNumber(s: string) {
   try {
-    const z = zen2han((s || "").replace(/[,，]/g, ""));
-    let found = false;
-    let yen = 0;
-
-    const mOk = z.match(/(\d+(?:\.\d+)?)\s*億/);
-    if (mOk) {
-      yen += Math.round(parseFloat(mOk[1]) * 1e8);
-      found = true;
-    }
-    const mMan = z.match(/(\d+(?:\.\d+)?)\s*万(?!円?未満)/);
-    if (mMan) {
-      yen += Math.round(parseFloat(mMan[1]) * 1e4);
-      found = true;
-    }
-    const mSen = z.match(/(\d+(?:\.\d+)?)\s*千(?!円?未満)/);
-    if (mSen) {
-      yen += Math.round(parseFloat(mSen[1]) * 1e3);
-      found = true;
-    }
-
-    // 末尾が「円」か単純数値だけの場合
-    if (!found) {
-      const m = z.match(/(\d+(?:\.\d+)?)(?=\s*円|$)/);
-      if (m) {
-        yen = Math.round(parseFloat(m[1]));
-        found = true;
-      }
-    }
-    return found ? yen : null;
+    const m = s.replace(/[,，]/g, "").match(/\d{2,}/);
+    if (!m) return null;
+    return Number(m[0]);
   } catch {
     return null;
   }
 }
 
-/** ====== 追加: 従業員数を名/人優先で抽出 ====== */
-function parseHeadcount(s: string): string | null {
-  const z = zen2han((s || "").replace(/[,，]/g, ""));
-  const withUnit =
-    z.match(/(\d{1,6})\s*(?:名|人)(?:[^0-9]|$)/) ||
-    z.match(/約\s*(\d{1,6})\s*(?:名|人)/);
-  if (withUnit) return `${withUnit[1]}名`;
-  const plain = z.match(/(?:従業員|社員|職員)[^0-9]{0,8}(\d{1,6})/);
-  if (plain) return `${plain[1]}名`;
-  return null;
-}
-
+/** --- 和暦/西暦 混在に対応した日付パース --- */
 function parseDate(s: string): string | null {
   const z = s.replace(/\s+/g, "");
+
+  // 和暦（令和/平成/昭和、元年対応）
+  const eraM = z.match(
+    /(令和|平成|昭和)\s*(元|\d{1,2})年(?:\s*(\d{1,2})月(?:\s*(\d{1,2})日)?)?/
+  );
+  if (eraM) {
+    const era = eraM[1] as "令和" | "平成" | "昭和";
+    const y = eraM[2] === "元" ? 1 : Number(eraM[2]);
+    const yyyy = eraToYear(era, y);
+    const mm = eraM[3] ? String(Number(eraM[3])).padStart(2, "0") : "01";
+    const dd = eraM[4] ? String(Number(eraM[4])).padStart(2, "0") : "01";
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  // 西暦 YYYY-MM-DD / YYYY-MM
   let m = z.match(/(\d{4})[\/\-年](\d{1,2})[\/\-月](\d{1,2})/);
   if (m) {
     const [_, y, mth, d] = m;
@@ -591,7 +575,6 @@ async function profileScrape(baseUrl: string): Promise<{
     ) || null;
   const aboutLink = findLink(ABOUT_RX) || null;
 
-  // href を string に確定させてから URL を生成
   const contactHref = contactLink?.href ?? "";
   if (contactHref) {
     try {
@@ -640,10 +623,9 @@ async function profileScrape(baseUrl: string): Promise<{
     if (info.hq_address && !res.hq_address) res.hq_address = info.hq_address;
   }
 
-  // 追加でテキスト正規表現（資本金/従業員数の拾い強化）
+  // テキスト抽出（資本金/従業員数/設立）
   const infoPool = [res.htmlAbout, res.htmlTop].filter(Boolean).join("\n");
   if (infoPool) {
-    // 資本金：出現位置から近傍を切り出して解釈（億/万/千対応）
     if (res.capital == null) {
       const idx = infoPool.search(/資本金/);
       if (idx >= 0) {
@@ -653,15 +635,14 @@ async function profileScrape(baseUrl: string): Promise<{
       }
     }
 
-    // 設立
     if (!res.established_on) {
-      const estBlock =
-        infoPool.match(/設立[^0-9]{0,10}([0-9０-９年\/\-月日\s]+)/) ||
-        infoPool.match(/創業[^0-9]{0,10}([0-9０-９年\/\-月日\s]+)/);
-      if (estBlock?.[1]) res.established_on = parseDate(zen2han(estBlock[1]));
+      // 和暦も含めて parseDate
+      const estBlock = infoPool.match(
+        /(設立|創業)[^0-9令和平成昭和元]{0,10}([0-9０-９年\/\-月日\s令和平成昭和元]+)/
+      );
+      if (estBlock?.[2]) res.established_on = parseDate(zen2han(estBlock[2]));
     }
 
-    // 住所候補（参考抽出・保存時は NTA を採用）
     if (!res.hq_address) {
       const addrBlock =
         infoPool.match(/所在地[^<]{0,80}(〒?\s?\d{3}-\d{4}[^<\n]{3,120})/) ||
@@ -670,7 +651,6 @@ async function profileScrape(baseUrl: string): Promise<{
         res.hq_address = addrBlock[1].replace(/<[^>]+>/g, "").trim();
     }
 
-    // 従業員数（名/人対応）
     if (!res.company_size) {
       const k1 = infoPool.search(/従業員/);
       const k2 = infoPool.search(/社員数/);
@@ -687,7 +667,55 @@ async function profileScrape(baseUrl: string): Promise<{
   return res;
 }
 
-/** ========= LLM業種判定 ========= */
+/** 従業員数（名/人） */
+function parseHeadcount(s: string): string | null {
+  const z = zen2han((s || "").replace(/[,，]/g, ""));
+  const withUnit =
+    z.match(/(\d{1,6})\s*(?:名|人)(?:[^0-9]|$)/) ||
+    z.match(/約\s*(\d{1,6})\s*(?:名|人)/);
+  if (withUnit) return `${withUnit[1]}名`;
+  const plain = z.match(/(?:従業員|社員|職員)[^0-9]{0,8}(\d{1,6})/);
+  if (plain) return `${plain[1]}名`;
+  return null;
+}
+
+/** 資本金（円）を万/千/億表記から正規化 */
+function parseCapitalYen(s: string): number | null {
+  try {
+    const z = zen2han((s || "").replace(/[,，]/g, ""));
+    let found = false;
+    let yen = 0;
+
+    const mOk = z.match(/(\d+(?:\.\d+)?)\s*億/);
+    if (mOk) {
+      yen += Math.round(parseFloat(mOk[1]) * 1e8);
+      found = true;
+    }
+    const mMan = z.match(/(\d+(?:\.\d+)?)\s*万(?!円?未満)/);
+    if (mMan) {
+      yen += Math.round(parseFloat(mMan[1]) * 1e4);
+      found = true;
+    }
+    const mSen = z.match(/(\d+(?:\.\d+)?)\s*千(?!円?未満)/);
+    if (mSen) {
+      yen += Math.round(parseFloat(mSen[1]) * 1e3);
+      found = true;
+    }
+
+    if (!found) {
+      const m = z.match(/(\d+(?:\.\d+)?)(?=\s*円|$)/);
+      if (m) {
+        yen = Math.round(parseFloat(m[1]));
+        found = true;
+      }
+    }
+    return found ? yen : null;
+  } catch {
+    return null;
+  }
+}
+
+/** ========= LLM業種判定（既存） ========= */
 async function classifyIndustryWithLLM(input: {
   companyName: string;
   htmlTop?: string | null;
@@ -1175,8 +1203,8 @@ export async function POST(req: Request) {
         contact_email = uniq.find((e) => emailDomainOK(e, site)) || null;
       }
 
-      // 5) 都道府県・業種
-      const pref = extractPrefecture(c.address); // ← 本店所在地は NTA のまま
+      // 5) 都道府県・業種（本店所在地はNTAの住所を使用）
+      const pref = extractPrefecture(c.address);
       let industryValue: string | null = null;
       if (tryLLM) {
         const cls = await classifyIndustryWithLLM({
@@ -1187,7 +1215,7 @@ export async function POST(req: Request) {
         industryValue = `${cls.large} / ${cls.small}`;
       }
 
-      // 6) UPSERT（ユニーク整合に耐性）※ 本店所在地は NTA の住所を採用
+      // 6) UPSERT
       try {
         const { saved } = await upsertProspectSafe(sb, {
           tenant_id: tenantId,

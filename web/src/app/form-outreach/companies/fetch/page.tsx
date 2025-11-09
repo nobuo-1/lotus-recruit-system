@@ -176,7 +176,7 @@ export default function ManualFetch() {
           updated_at: incoming.updated_at ?? null,
         });
 
-        // 初回ロードのみ、直近12hのローカル保持を復元（開始ボタン押下後は消去する）
+        // 直近表示の復元（省略：前回と同様）
         const raw = localStorage.getItem(LS_KEY);
         if (raw) {
           const obj = JSON.parse(raw);
@@ -227,19 +227,61 @@ export default function ManualFetch() {
 
   const anyRunning = loading;
 
-  /** ===== Filters summary（修正3） ===== */
+  /** ===== Helpers for fetch with retry (修正2) ===== */
+  function isTransient(status: number) {
+    return [408, 429, 500, 502, 503, 504].includes(status);
+  }
+  async function apiPostWithRetry<T = any>(
+    url: string,
+    body: any,
+    headers: any
+  ) {
+    const maxRetry = 3;
+    let lastErr: any = null;
+    for (let i = 0; i <= maxRetry; i++) {
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { ...headers, "content-type": "application/json" },
+          body: JSON.stringify(body),
+          signal: abortRef.current?.signal,
+        });
+        const txt = await res.text();
+        const j = txt ? JSON.parse(txt) : {};
+        if (!res.ok && isTransient(res.status)) {
+          lastErr = new Error(j?.error || `HTTP ${res.status}`);
+          await delay(300 * (i + 1)); // 300ms, 600ms, 900ms, 1200ms
+          continue;
+        }
+        if (!res.ok) throw new Error(j?.error || `HTTP ${res.status}`);
+        return j as T;
+      } catch (e: any) {
+        lastErr = e;
+        // Abortされたら即 throw
+        if (String(e?.name) === "AbortError") throw e;
+        await delay(300 * (i + 1));
+      }
+    }
+    throw lastErr || new Error("request failed");
+  }
+
+  /** ===== Filters summary（修正1: 20文字超は省略） ===== */
   const filterSummary = useMemo(() => {
+    const trunc = (s: string, n = 20) =>
+      (s || "").length > n ? s.slice(0, n) + "…" : s || "";
+    const joinTrunc = (arr: string[]) => arr.map((x) => trunc(x)).join(" / ");
+
     const parts: string[] = [];
     if (filters.prefectures?.length)
-      parts.push(`都道府県: ${filters.prefectures.join(" / ")}`);
+      parts.push(`都道府県: ${joinTrunc(filters.prefectures)}`);
     if (filters.industries_large?.length)
-      parts.push(`業種(大): ${filters.industries_large.join(" / ")}`);
+      parts.push(`業種(大): ${joinTrunc(filters.industries_large)}`);
     if (filters.industries_small?.length)
-      parts.push(`業種(小): ${filters.industries_small.join(" / ")}`);
+      parts.push(`業種(小): ${joinTrunc(filters.industries_small)}`);
     if (filters.employee_size_ranges?.length)
-      parts.push(`従業員: ${filters.employee_size_ranges.join(" / ")}`);
+      parts.push(`従業員: ${joinTrunc(filters.employee_size_ranges)}`);
     if (filters.keywords?.length)
-      parts.push(`キーワード: ${filters.keywords.join(" / ")}`);
+      parts.push(`キーワード: ${joinTrunc(filters.keywords)}`);
     if (
       typeof filters.capital_min === "number" ||
       typeof filters.capital_max === "number"
@@ -297,7 +339,7 @@ export default function ManualFetch() {
     await runLoop(fetchTotal, startIso);
   };
 
-  /** 実行ループ（修正2: since=開始ボタンの押下時刻。修正3: リアルタイム表示） */
+  /** 実行ループ（修正2: リトライ & 追い込み） */
   const runLoop = async (targetNew: number, sinceIso: string) => {
     if (!tenantId) return;
     setMsg("");
@@ -318,8 +360,8 @@ export default function ManualFetch() {
       setActiveIdx(-1);
 
       let attempts = 0;
-      const MAX_ATTEMPTS = Math.ceil(targetNew / 5) + 30;
-      const BATCH = Math.min(
+      const MAX_ATTEMPTS = Math.max(10, targetNew * 6);
+      const BATCH_BASE = Math.min(
         25,
         Math.max(8, Math.floor(Math.max(10, targetNew) / 4))
       );
@@ -331,114 +373,164 @@ export default function ManualFetch() {
       while (recentProspectsCount < targetNew && attempts < MAX_ATTEMPTS) {
         if (cancelledRef.current) throw new Error("ABORTED");
         attempts++;
-        const wantNow = Math.min(
-          BATCH,
-          Math.max(1, targetNew - recentProspectsCount)
-        );
+        const leftover = Math.max(1, targetNew - recentProspectsCount);
+        const wantNow = Math.min(BATCH_BASE, leftover);
         const seed = `${Date.now()}-${attempts}`;
 
         // Phase A: クロール〜キャッシュ
-        setActiveIdx(1);
         setS((a) => a.map((v, i) => (i === 1 ? "running" : v)));
-        const rCrawl = await fetch("/api/form-outreach/companies/crawl", {
-          method: "POST",
-          headers: {
-            "x-tenant-id": tenantId,
-            "content-type": "application/json",
-          },
-          body: JSON.stringify({ filters, want: wantNow, seed }),
-          signal: abortRef.current.signal,
-        });
-        const j = await safeJson(rCrawl);
-        setS((a) =>
-          a.map((v, idx) => (idx === 1 ? (rCrawl.ok ? "done" : "error") : v))
-        );
-        setS((a) => a.map((v, idx) => (idx === 2 ? "done" : v)));
-        setS((a) => a.map((v, idx) => (idx === 3 ? "done" : v)));
-        setS((a) => a.map((v, idx) => (idx === 4 ? "done" : v)));
-        if (!rCrawl.ok)
-          throw new Error(j?.error || `crawl failed (${rCrawl.status})`);
+        try {
+          await apiPostWithRetry(
+            "/api/form-outreach/companies/crawl",
+            { filters, want: wantNow, seed },
+            { "x-tenant-id": tenantId }
+          );
+          setS((a) => a.map((v, idx) => (idx === 1 ? "done" : v)));
+          setS((a) => a.map((v, idx) => (idx === 2 ? "done" : v)));
+          setS((a) => a.map((v, idx) => (idx === 3 ? "done" : v)));
+          setS((a) => a.map((v, idx) => (idx === 4 ? "done" : v)));
+        } catch (e: any) {
+          // 過渡エラーはリトライ内で処理済。ここまで来たら permanent とみなして継続。
+          setS((a) => a.map((v, idx) => (idx === 1 ? "error" : v)));
+          setMsg(`crawl failed: ${String(e?.message || e)}`);
+        }
 
         // Phase B: 会社概要抽出 → 保存
         setS((a) => a.map((v, idx) => (idx === 5 ? "running" : v)));
-        await delay(50);
+        await delay(30);
         setS((a) => a.map((v, idx) => (idx === 5 ? "done" : v)));
 
         setS((a) => a.map((v, idx) => (idx === 6 ? "running" : v)));
-        const enrichRes = await fetch("/api/form-outreach/companies/enrich", {
-          method: "POST",
-          headers: {
-            "x-tenant-id": tenantId,
-            "content-type": "application/json",
-          },
-          body: JSON.stringify({
-            since: sinceIso, // 修正2: 開始時刻以降のみを対象
-            want: Math.max(1, targetNew - recentProspectsCount),
-            try_llm: true,
-          }),
-          signal: abortRef.current.signal,
-        });
-        const ej = await safeJson(enrichRes);
-        setS((a) =>
-          a.map((v, idx) => (idx === 6 ? (enrichRes.ok ? "done" : "error") : v))
-        );
-        if (!enrichRes.ok)
-          throw new Error(ej?.error || `enrich failed (${enrichRes.status})`);
+        try {
+          const ej = await apiPostWithRetry<{
+            recent_rows: AddedRow[];
+            recent_count: number;
+            recent_similar_count: number;
+            rejected: RejectedRow[];
+          }>(
+            "/api/form-outreach/companies/enrich",
+            {
+              since: sinceIso,
+              want: leftover,
+              try_llm: true,
+            },
+            { "x-tenant-id": tenantId }
+          );
 
-        // 表示は DB の “recent_rows” を採用（since 以降のみ）
-        const recvRows: AddedRow[] = Array.isArray(ej?.recent_rows)
-          ? (ej.recent_rows as AddedRow[])
-          : [];
-        setAdded(recvRows);
-        localStorage.setItem(
-          LS_KEY,
-          JSON.stringify({ ts: new Date().toISOString(), rows: recvRows })
-        );
+          setS((a) => a.map((v, idx) => (idx === 6 ? "done" : v)));
 
-        // 不適合は従来通り保持
-        const rejAll: RejectedRow[] = Array.isArray(ej?.rejected)
-          ? (ej.rejected as RejectedRow[])
-          : [];
-        if (rejAll.length) {
-          setRejected((prev) => {
-            const next = dedupeRejected([...rejAll, ...prev]);
-            localStorage.setItem(
-              LS_REJECT_KEY,
-              JSON.stringify({ ts: new Date().toISOString(), rows: next })
-            );
-            return next;
-          });
+          // 表示は DB の “recent_rows” を採用（since 以降のみ）
+          const recvRows: AddedRow[] = Array.isArray(ej?.recent_rows)
+            ? (ej.recent_rows as AddedRow[])
+            : [];
+          setAdded(recvRows);
+          localStorage.setItem(
+            LS_KEY,
+            JSON.stringify({ ts: new Date().toISOString(), rows: recvRows })
+          );
+
+          // 不適合は従来通り保持（重複除去）
+          const rejAll: RejectedRow[] = Array.isArray(ej?.rejected)
+            ? (ej.rejected as RejectedRow[])
+            : [];
+          if (rejAll.length) {
+            setRejected((prev) => {
+              const next = dedupeRejected([...rejAll, ...prev]);
+              localStorage.setItem(
+                LS_REJECT_KEY,
+                JSON.stringify({ ts: new Date().toISOString(), rows: next })
+              );
+              return next;
+            });
+          }
+
+          // カウンタ更新
+          recentProspectsCount = Number(ej?.recent_count || 0);
+          recentSimilarCount = Number(ej?.recent_similar_count || 0);
+          setRtProspectCount(recentProspectsCount);
+          setRtSimilarCount(recentSimilarCount);
+
+          // ループ継続ノード
+          setS((a) => a.map((v, idx) => (idx === 7 ? "running" : v)));
+          setMsg(
+            `新規追加: ${recentProspectsCount}/${targetNew} 件 / 近似サイト（新規）: ${recentSimilarCount} 件`
+          );
+          await delay(30);
+          setS((a) => a.map((v, idx) => (idx === 7 ? "done" : v)));
+        } catch (e: any) {
+          // enrich が 504 等で落ちても継続。attempts を消費しない
+          setS((a) => a.map((v, idx) => (idx === 6 ? "error" : v)));
+          attempts--;
+          const msgText = String(e?.message || e);
+          setMsg(
+            msgText.includes("HTTP 504")
+              ? "状態: enrich failed (504) / リトライ中…"
+              : `状態: enrich failed / ${msgText}`
+          );
+          await delay(300);
+          continue;
         }
-
-        // 修正3: リアルタイムの件数（絶対値）を画面表示
-        recentProspectsCount = Number(ej?.recent_count || 0);
-        recentSimilarCount = Number(ej?.recent_similar_count || 0);
-        setRtProspectCount(recentProspectsCount);
-        setRtSimilarCount(recentSimilarCount);
-
-        // ループ継続ノード
-        setS((a) => a.map((v, idx) => (idx === 7 ? "running" : v)));
-        setMsg(
-          `新規追加: ${recentProspectsCount}/${targetNew} 件 / 近似サイト（新規）: ${recentSimilarCount} 件`
-        );
-        await delay(40);
-        setS((a) => a.map((v, idx) => (idx === 7 ? "done" : v)));
       }
 
-      // 修正2: 終了メッセージはローカル変数で確定表示（未達考慮）
-      if (recentProspectsCount >= targetNew) {
+      // 最終追い込み（まだ未達ならもう一度だけ enrich）
+      if (rtProspectCount < targetNew) {
+        try {
+          const leftover = Math.max(1, targetNew - rtProspectCount);
+          setS((a) => a.map((v, idx) => (idx === 6 ? "running" : v)));
+          const ej = await apiPostWithRetry<any>(
+            "/api/form-outreach/companies/enrich",
+            {
+              since: sinceIso,
+              want: leftover,
+              try_llm: true,
+            },
+            { "x-tenant-id": tenantId }
+          );
+          setS((a) => a.map((v, idx) => (idx === 6 ? "done" : v)));
+
+          const recvRows: AddedRow[] = Array.isArray(ej?.recent_rows)
+            ? (ej.recent_rows as AddedRow[])
+            : [];
+          setAdded(recvRows);
+          localStorage.setItem(
+            LS_KEY,
+            JSON.stringify({ ts: new Date().toISOString(), rows: recvRows })
+          );
+
+          const rejAll: RejectedRow[] = Array.isArray(ej?.rejected)
+            ? (ej.rejected as RejectedRow[])
+            : [];
+          if (rejAll.length) {
+            setRejected((prev) => {
+              const next = dedupeRejected([...rejAll, ...prev]);
+              localStorage.setItem(
+                LS_REJECT_KEY,
+                JSON.stringify({ ts: new Date().toISOString(), rows: next })
+              );
+              return next;
+            });
+          }
+
+          const rc = Number(ej?.recent_count || 0);
+          const rs = Number(ej?.recent_similar_count || 0);
+          setRtProspectCount(rc);
+          setRtSimilarCount(rs);
+        } catch {}
+      }
+
+      // 終了メッセージ（未達考慮）
+      if (rtProspectCount >= targetNew) {
         setMsg(
-          `完了：新規追加が目標件数に達しました（${recentProspectsCount}/${targetNew} 件）`
+          `完了：新規追加が目標件数に達しました（${rtProspectCount}/${targetNew} 件）`
         );
       } else {
-        setMsg(
-          `終了：新規追加は ${recentProspectsCount}/${targetNew} 件（未達）`
-        );
+        setMsg(`終了：新規追加は ${rtProspectCount}/${targetNew} 件（未達）`);
       }
     } catch (e: any) {
       setActiveIdx(-1);
       setS((arr) => arr.map((v) => (v === "running" ? "error" : v)));
-      if (String(e?.message || e) === "ABORTED") setMsg("実行を中止しました。");
+      if (String(e?.name) === "AbortError" || String(e?.message) === "ABORTED")
+        setMsg("実行を中止しました。");
       else setMsg(String(e?.message || e));
     } finally {
       setLoading(false);
@@ -483,7 +575,6 @@ export default function ManualFetch() {
             <p className="text-sm text-neutral-500">
               二段フローで保存を逐次反映。アイコンの動きは実処理に同期します。
             </p>
-            {/* テナント詳細表示は不要（非表示のまま） */}
           </div>
           <div className="shrink-0 whitespace-nowrap flex gap-2">
             <Link
@@ -492,7 +583,6 @@ export default function ManualFetch() {
             >
               企業一覧へ
             </Link>
-            {/* 修正3: メッセージ手動送信ページへの遷移ボタンを追加 */}
             <Link
               href="/form-outreach/runs/manual"
               className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
@@ -520,12 +610,12 @@ export default function ManualFetch() {
           </div>
         </div>
 
-        {/* 修正3: フィルタ内容の薄字表示（今回新規追加カードの上あたり） */}
+        {/* フィルタ内容（修正1: 20文字で省略） */}
         <div className="mb-1 text-[12px] text-neutral-500">
           {filterSummary || "フィルタ：指定なし"}
         </div>
 
-        {/* 修正3: リアルタイムカウンタ（上部に常時表示） */}
+        {/* リアルタイムカウンタ */}
         <section className="mb-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
           <div className="rounded-xl border border-neutral-200 p-4 bg-white">
             <div className="text-xs text-neutral-500">
@@ -642,7 +732,7 @@ export default function ManualFetch() {
                     "資本金",
                     "設立",
                     "法人番号",
-                    "本店所在地", // ← 文言を本店所在地に統一
+                    "本店所在地",
                     "取得元",
                     "取得日時",
                   ].map((h) => (
@@ -658,11 +748,9 @@ export default function ManualFetch() {
               <tbody className="divide-y divide-neutral-200">
                 {added.map((c: AddedRow) => (
                   <tr key={c.id}>
-                    {/* 企業名は読みやすく広め */}
                     <td className="px-3 py-2 whitespace-normal break-words min-w-[16ch] max-w-[24ch]">
                       {c.company_name || "-"}
                     </td>
-
                     <td className="px-3 py-2">
                       {c.website ? (
                         <a
@@ -877,11 +965,10 @@ function FlowNode({
   state: StepState;
   active: boolean;
 }) {
+  // 修正1: running なら常に回転（activeに依存しない）
   const icon =
     state === "running" ? (
-      <Loader2
-        className={`h-6 w-6 ${active ? "animate-spin" : ""} text-neutral-700`}
-      />
+      <Loader2 className="h-6 w-6 animate-spin text-neutral-700" />
     ) : state === "done" ? (
       <CheckCircle className="h-6 w-6 text-emerald-600" />
     ) : state === "error" ? (
