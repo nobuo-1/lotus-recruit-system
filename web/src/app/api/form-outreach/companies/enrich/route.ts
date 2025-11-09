@@ -6,7 +6,7 @@ export const maxDuration = 60;
 import { NextResponse } from "next/server";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 
-// ✅ 業種カタログは共通モジュールを参照
+// ✅ 業種カタログは共通モジュールを参照（厳守）
 import {
   INDUSTRY_LARGE,
   INDUSTRY_CATEGORIES,
@@ -119,9 +119,9 @@ function normalizeUrl(u?: string | null): string | null {
   try {
     const url = new URL(/^https?:\/\//i.test(u) ? u : `https://${u}`);
     const ext = (url.pathname || "").toLowerCase();
-    if (/\.(pdf|docx?|xlsx?|pptx?)$/.test(ext)) return null;
+    if (/\.(pdf|docx?|xlsx?|pptx?)$/.test(ext)) return null; // PDF等はサイトURLにしない
     url.hash = "";
-    // ルート固定
+    // トップへ正規化
     url.pathname = "/";
     url.search = "";
     return url.toString();
@@ -201,7 +201,7 @@ function addressBlocksMatch(a?: string | null, b?: string | null): boolean {
     if (ta[i] === tb[i]) match++;
     else break;
   }
-  return match >= 3; // 1丁目-2番-3号 まで一致を要求
+  return match >= 3; // 1丁目-2番-3号 まで一致
 }
 
 function nameVariants(n: string) {
@@ -220,6 +220,38 @@ function htmlContainsCompany(html?: string | null, company?: string | null) {
   const h = html.replace(/\s+/g, "");
   const variants = nameVariants(company).map((x) => x.replace(/\s+/g, ""));
   return variants.some((v) => h.includes(v));
+}
+
+/** ========= ドメイン系 ========= */
+function hostnameOf(site: string): string | null {
+  try {
+    return new URL(site).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function rootDomainOf(host?: string | null): string | null {
+  if (!host) return null;
+  const parts = host.split(".").filter(Boolean);
+  if (parts.length <= 2) return host;
+  // co.jp 等のセカンドレベルTLD対応（簡易）
+  const sld2 = ["co.jp", "or.jp", "ne.jp", "ac.jp", "ed.jp", "go.jp", "lg.jp"];
+  const last2 = parts.slice(-2).join(".");
+  const last3 = parts.slice(-3).join(".");
+  if (sld2.includes(last2)) return last3;
+  return last2;
+}
+
+function emailDomainOK(email: string, site: string): boolean {
+  const m = email.toLowerCase().match(/@([^@]+)$/);
+  if (!m) return false;
+  const dom = m[1];
+  if (dom === "gmail.com") return true;
+  const host = hostnameOf(site);
+  const root = rootDomainOf(host);
+  if (!root) return false;
+  return dom === root || dom.endsWith("." + root);
 }
 
 /** ========= Google 検索 ========= */
@@ -280,20 +312,38 @@ async function findWebsiteByGoogleMaps(
   return null;
 }
 
-/** ========= HTML & Profile Scrape (軽量) ========= */
+/** ========= HTML & Profile Scrape (強化) ========= */
 async function getHtml(url: string): Promise<string | null> {
   try {
     const r = await fetchWithTimeout(url, {}, 10000);
     if (!r.ok) return null;
     const t = await r.text();
-    return t.slice(0, 2_000_000);
+    // script/style 除去（電話/メールの誤検出を抑止）
+    return t
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .slice(0, 2_000_000);
   } catch {
     return null;
   }
 }
 
 const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
-const PHONE_RE = /0\d{1,3}[-(（]?\d{1,4}[)-）]?\d{3,4}/g;
+// 国内向け・緩め（のちに厳格フィルタ）
+const PHONE_CANDIDATE_RE = /0\d{1,3}[-–(（]?\d{1,4}[)-）]?\d{3,4}/g;
+
+function digitsOnly(s: string) {
+  return (s || "").replace(/\D/g, "");
+}
+function isValidJPPhone(s: string): boolean {
+  const d = digitsOnly(s);
+  if (!(d.length === 10 || d.length === 11)) return false;
+  if (/^0{5,}$/.test(d)) return false;
+  if (/^0{2,}/.test(d)) return false;
+  // 固定/携帯・ありえない市外局番を簡易で弾く（03,06,04x,05x,07x,08x,09x, 070/080/090 等）
+  if (!/^0(3|6|4\d|5\d|7\d|8\d|9\d)/.test(d)) return false;
+  return true;
+}
 
 function parseYenNumber(s: string) {
   try {
@@ -381,6 +431,7 @@ function extractPrefecture(addr?: string | null): string[] | null {
 async function profileScrape(baseUrl: string): Promise<{
   htmlTop?: string | null;
   htmlAbout?: string | null;
+  htmlContact?: string | null;
   contact_form_url?: string | null;
   contact_email?: string | null;
   phone?: string | null;
@@ -393,71 +444,87 @@ async function profileScrape(baseUrl: string): Promise<{
   const html = await getHtml(baseUrl);
   res.htmlTop = html;
 
+  // aタグ探索
   const linkMatch =
-    html?.match(/href\s*=\s*["']([^"']+)["'][^>]*>([^<]{0,40})<\/a>/gi) || [];
+    html?.match(
+      /<a\s+[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]{0,60}?)<\/a>/gi
+    ) || [];
   const links = linkMatch
     .map((a) => {
       const href = a.match(/href\s*=\s*["']([^"']+)["']/i)?.[1] ?? "";
-      const text = a.replace(/<[^>]+>/g, "");
-      return { href, text };
+      const text = a
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      return { href, text: text.toLowerCase() };
     })
     .filter(Boolean);
 
-  const findLink = (kw: RegExp) =>
-    links.find(
-      (l) =>
-        kw.test((l.text || "").toLowerCase()) ||
-        kw.test((l.href || "").toLowerCase())
-    );
+  const findLink = (rx: RegExp) =>
+    links.find((l) => rx.test(l.text) || rx.test((l.href || "").toLowerCase()));
 
-  const contactCandidate =
-    findLink(/contact|お問い合わせ|問合せ|問合わせ|お問合せ/) ||
-    findLink(/inquiry|inquiries/);
-  if (contactCandidate?.href) {
-    try {
-      const u = new URL(contactCandidate.href, baseUrl).toString();
-      res.contact_form_url = u;
-    } catch {}
-  }
-
-  if (html) {
-    const mail = html.match(EMAIL_RE)?.[0];
-    if (mail) res.contact_email = mail;
-    const ph = html.match(PHONE_RE)?.[0];
-    if (ph) res.phone = ph;
-  }
-
-  const aboutCandidate =
+  const contactLink =
+    findLink(
+      /contact|お問い合わせ|問合せ|問合わせ|お問合せ|inquiry|inquiries/
+    ) || null;
+  const aboutLink =
     findLink(/会社概要|企業情報|会社情報|corporate|about|会社案内|沿革/) ||
     null;
-  if (aboutCandidate?.href) {
+
+  if (contactLink?.href) {
     try {
-      const aboutUrl = new URL(aboutCandidate.href, baseUrl).toString();
-      res.htmlAbout = await getHtml(aboutUrl);
+      const u = new URL(contactLink.href, baseUrl).toString();
+      res.contact_form_url = u;
+      res.htmlContact = await getHtml(u);
+    } catch {}
+  }
+  if (aboutLink?.href) {
+    try {
+      const u = new URL(aboutLink.href, baseUrl).toString();
+      res.htmlAbout = await getHtml(u);
     } catch {}
   }
 
-  const pool = [res.htmlTop, res.htmlAbout].filter(Boolean).join("\n");
-  if (pool) {
+  // 連絡先（メールはドメイン制限は後段で実施）
+  const emailPool = [res.htmlContact, res.htmlAbout, res.htmlTop]
+    .filter(Boolean)
+    .join("\n");
+  const phonePool = [res.htmlContact, res.htmlAbout, res.htmlTop]
+    .filter(Boolean)
+    .join("\n");
+
+  if (emailPool) {
+    const m = emailPool.match(EMAIL_RE);
+    if (m && m.length) res.contact_email = m[0]; // 一旦最初（後段でフィルタ）
+  }
+
+  if (phonePool) {
+    const cand = phonePool.match(PHONE_CANDIDATE_RE) || [];
+    const good = cand.find(isValidJPPhone);
+    if (good) res.phone = good;
+  }
+
+  const infoPool = [res.htmlAbout, res.htmlTop].filter(Boolean).join("\n");
+  if (infoPool) {
     const capBlock =
-      pool.match(/資本金[^0-9]{0,10}([0-9,，]+)万?円/) ||
-      pool.match(/capital[^0-9]{0,10}([0-9,，]+)/i);
+      infoPool.match(/資本金[^0-9]{0,20}([0-9,，]+)万?円/) ||
+      infoPool.match(/capital[^0-9]{0,10}([0-9,，]+)/i);
     if (capBlock?.[1]) res.capital = parseYenNumber(capBlock[1]);
 
     const estBlock =
-      pool.match(/設立[^0-9]{0,10}([0-9０-９年\/\-月日\s]+)/) ||
-      pool.match(/創業[^0-9]{0,10}([0-9０-９年\/\-月日\s]+)/);
+      infoPool.match(/設立[^0-9]{0,10}([0-9０-９年\/\-月日\s]+)/) ||
+      infoPool.match(/創業[^0-9]{0,10}([0-9０-９年\/\-月日\s]+)/);
     if (estBlock?.[1]) res.established_on = parseDate(zen2han(estBlock[1]));
 
     const addrBlock =
-      pool.match(/所在地[^<]{0,40}(〒?\s?\d{3}-\d{4}[^<\n]{4,60})/) ||
-      pool.match(/住所[^<]{0,40}(〒?\s?\d{3}-\d{4}[^<\n]{4,60})/);
+      infoPool.match(/所在地[^<]{0,60}(〒?\s?\d{3}-\d{4}[^<\n]{3,80})/) ||
+      infoPool.match(/住所[^<]{0,60}(〒?\s?\d{3}-\d{4}[^<\n]{3,80})/);
     if (addrBlock?.[1])
       res.hq_address = addrBlock[1].replace(/<[^>]+>/g, "").trim();
 
     const sizeBlock =
-      pool.match(/従業員[^0-9]{0,10}([0-9,，]+)名/) ||
-      pool.match(/社員数[^0-9]{0,10}([0-9,，]+)名/);
+      infoPool.match(/従業員[^0-9]{0,10}([0-9,，]+)名/) ||
+      infoPool.match(/社員数[^0-9]{0,10}([0-9,，]+)名/);
     if (sizeBlock?.[1])
       res.company_size = `${sizeBlock[1].replace(/[,，]/g, "")}名`;
   }
@@ -471,15 +538,10 @@ async function classifyIndustryWithLLM(input: {
   htmlTop?: string | null;
   htmlAbout?: string | null;
 }): Promise<{ large: IndustryLarge; small: string }> {
-  // フォールバック: カタログから妥当な組み合わせを合成
   const fallback = (): { large: IndustryLarge; small: string } => {
     const txt = [input.htmlTop || "", input.htmlAbout || ""]
       .join(" ")
       .toLowerCase();
-    const choose = <T extends string>(arr: readonly T[], def: T): T =>
-      (arr.find((x) => txt.includes(x as any)) as T) || def;
-
-    // 簡易ヒューリスティック
     if (/(病院|クリニック|介護|福祉|訪問看護)/.test(txt))
       return { large: "医療・福祉", small: "医療系サービス" };
     if (/(システム開発|ソフトウェア|saas|受託開発|クラウド)/.test(txt))
@@ -493,8 +555,6 @@ async function classifyIndustryWithLLM(input: {
         large: "宿泊・飲食",
         small: "飲食店（レストラン・カフェ・バー）",
       };
-
-    // デフォルト
     return {
       large: "その他サービス",
       small: INDUSTRY_CATEGORIES["その他サービス"][0] || "その他サービス",
@@ -688,7 +748,6 @@ async function upsertProspectSafe(
       if (error) throw error;
       return { saved: data as AddedRow };
     } catch (e: any) {
-      // 23505等は下でマージ対応
       const existed = await selectExistingProspect(
         sb,
         row.tenant_id,
@@ -756,6 +815,32 @@ async function insertRejected(
   const payload = { ...r, created_at: now };
   const { error } = await sb.from("form_prospects_rejected").insert(payload);
   if (error) throw new Error(error.message);
+}
+
+/** ========= 直近の form_prospects を取得（テーブル表示＆カウント用） ========= */
+async function loadRecentProspects(
+  sb: SupabaseClient,
+  tenant_id: string,
+  sinceISO: string
+): Promise<{ rows: AddedRow[]; count: number }> {
+  const sel =
+    "id,tenant_id,company_name,website,contact_email,contact_form_url,phone,industry,company_size,prefectures,job_site_source,corporate_number,hq_address,capital,established_on,created_at";
+  const { data, error } = await sb
+    .from("form_prospects")
+    .select(sel)
+    .eq("tenant_id", tenant_id)
+    .gte("created_at", sinceISO)
+    .order("created_at", { ascending: false })
+    .limit(500);
+  if (error) throw new Error(error.message);
+
+  const { count: cnt, error: e2 } = await sb
+    .from("form_prospects")
+    .select("*", { count: "exact", head: true })
+    .eq("tenant_id", tenant_id)
+    .gte("created_at", sinceISO);
+  if (e2) throw new Error(e2.message);
+  return { rows: (data || []) as AddedRow[], count: cnt || 0 };
 }
 
 /** ========= メイン ========= */
@@ -832,14 +917,11 @@ export async function POST(req: Request) {
         continue;
       }
 
-      // 2.5) トップページHTML
-      const htmlTop = await getHtml(website);
-
-      // 3) 会社概要等抽出
+      // 2.5) トップ/概要/お問い合わせ HTML
       const prof = await profileScrape(website);
 
-      // 3.1) トップHTMLに社名無し → 近似保存（フォーム or メールがある場合に限る）
-      if (!htmlContainsCompany(htmlTop, name)) {
+      // 3) トップHTMLに社名無し → 近似保存（フォーム or メールがある場合のみ）
+      if (!htmlContainsCompany(prof.htmlTop, name)) {
         const hasContact = !!(prof.contact_form_url || prof.contact_email);
         if (hasContact) {
           try {
@@ -876,7 +958,29 @@ export async function POST(req: Request) {
         continue;
       }
 
-      // 4) 都道府県・業種
+      /// 4) 連絡先メールはサイトドメイン or gmail のみ
+      let contact_email: string | null = null;
+
+      if (
+        prof.contact_email &&
+        website &&
+        emailDomainOK(prof.contact_email, website) // ここはコールバック外なので narrow OK
+      ) {
+        contact_email = prof.contact_email.toLowerCase();
+      } else if (
+        website && // narrow
+        (prof.htmlContact || prof.htmlAbout || prof.htmlTop)
+      ) {
+        const pool = [prof.htmlContact, prof.htmlAbout, prof.htmlTop]
+          .filter(Boolean)
+          .join("\n");
+        const found = pool.match(EMAIL_RE) || [];
+        const uniq = Array.from(new Set(found.map((x) => x.toLowerCase())));
+        const site = website as string; // ✅ FIX: コールバック内 narrow を維持するために局所変数へ
+        contact_email = uniq.find((e) => emailDomainOK(e, site)) || null;
+      }
+
+      // 5) 都道府県・業種
       const pref =
         extractPrefecture(prof.hq_address || c.address) ||
         extractPrefecture(c.address);
@@ -890,7 +994,7 @@ export async function POST(req: Request) {
         industryValue = `${cls.large} / ${cls.small}`;
       }
 
-      // 5) 競合安全 UPSERT（ユニーク整合に耐性あり）
+      // 6) UPSERT（ユニーク整合に耐性）
       try {
         const { saved } = await upsertProspectSafe(sb, {
           tenant_id: tenantId,
@@ -899,7 +1003,7 @@ export async function POST(req: Request) {
           job_site_source: (source || "google") as "google" | "map",
           corporate_number: (c.corporate_number || "").trim() || null,
           hq_address: prof.hq_address || c.address || null,
-          contact_email: prof.contact_email || null,
+          contact_email,
           contact_form_url: prof.contact_form_url || null,
           phone: prof.phone || null,
           industry: industryValue,
@@ -929,17 +1033,25 @@ export async function POST(req: Request) {
       }
     }
 
-    // 不適合を反映
+    // 不適合を反映（失敗しても全体は継続）
     for (const r of rejected) {
-      await insertRejected(sb, { ...r, tenant_id: tenantId });
+      try {
+        await insertRejected(sb, { ...r, tenant_id: tenantId });
+      } catch {}
     }
+
+    // ✅ ここが重要：DBの“今回追加”を返す（フロントは表もカウントもこの値を使用）
+    const recent = await loadRecentProspects(sb, tenantId, since);
 
     return NextResponse.json(
       {
-        rows,
+        rows, // 今回処理の成功レコード（参考）
         rejected,
         inserted,
         near_miss_saved: nearMissSaved,
+        // ▼ 以降をフロントが採用
+        recent_rows: recent.rows,
+        recent_count: recent.count,
         trace,
         used: {
           google_cse: Boolean(GOOGLE_CSE_KEY && GOOGLE_CSE_CX),

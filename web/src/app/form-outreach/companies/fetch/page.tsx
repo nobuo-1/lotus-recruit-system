@@ -16,7 +16,6 @@ import {
 } from "lucide-react";
 
 /** ===== LocalStorage Keys ===== */
-const LS_KEY = "fo_manual_fetch_latest";
 const LS_FETCH_COUNT = "fo_manual_fetch_count";
 const LS_REJECT_KEY = "fo_manual_fetch_rejected";
 const TWELVE_H_MS = 12 * 60 * 60 * 1000;
@@ -35,7 +34,7 @@ type AddedRow = {
   industry?: string | null;
   company_size?: string | null;
   prefectures?: string[] | null;
-  job_site_source?: string | null; // 取得元 ("google" | "map")
+  job_site_source?: string | null; // 取得元はここに統一
   corporate_number?: string | null;
   hq_address?: string | null;
   capital?: number | null;
@@ -103,7 +102,6 @@ type CrawlDebug = {
 };
 
 /** ===== Flow Titles ===== */
-// Phase A は 1〜5
 const FLOW_A_TITLES = [
   "1. 条件読み込み/表示",
   "2. 国税庁をクロール",
@@ -111,7 +109,6 @@ const FLOW_A_TITLES = [
   "4. 詳細補完（名称/住所）",
   "5. キャッシュ保存",
 ];
-// Phase B は 6〜9（反復のガイド表示を含む）
 const FLOW_B_TITLES = [
   "6. 新規キャッシュ分のHP推定",
   "7. 到達性チェック/会社概要抽出（AI可）",
@@ -127,11 +124,13 @@ export default function ManualFetch() {
   const [s, setS] = useState<StepState[]>(Array(totalSteps).fill("idle"));
   const [activeIdx, setActiveIdx] = useState<number>(-1);
 
+  // ✅ 今回追加＝DBの form_prospects（created_at >= runStart）
   const [added, setAdded] = useState<AddedRow[]>([]);
+  const [recentCount, setRecentCount] = useState<number>(0);
+
   const [rejected, setRejected] = useState<RejectedRow[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
 
-  // 表示件数
   const [visibleAdded, setVisibleAdded] = useState<number>(10);
   const [visibleRejected, setVisibleRejected] = useState<number>(10);
 
@@ -166,20 +165,17 @@ export default function ManualFetch() {
     () => (crawlDebug?.rows_preview ?? []) as CrawlPreviewRow[],
     [crawlDebug?.rows_preview]
   );
+
   const pageCount = Math.max(1, Math.ceil(previewRows.length / ROWS_PER_PAGE));
+
   const pagedPreview = useMemo<CrawlPreviewRow[]>(() => {
     const start = (rowsPage - 1) * ROWS_PER_PAGE;
     return previewRows.slice(start, start + ROWS_PER_PAGE);
   }, [previewRows, rowsPage]);
-  useEffect(() => setRowsPage(1), [previewRows.length]);
 
-  // ★ 進捗HUD
-  const [hud, setHud] = useState<{
-    obtained: number;
-    target: number;
-    near: number;
-    running: boolean;
-  }>({ obtained: 0, target: 0, near: 0, running: false });
+  useEffect(() => {
+    setRowsPage(1);
+  }, [previewRows.length]);
 
   const goFirst = () => setRowsPage(1);
   const goPrev = () => setRowsPage((p) => Math.max(1, p - 1));
@@ -241,28 +237,12 @@ export default function ManualFetch() {
           updated_at: incoming.updated_at ?? null,
         });
 
-        // keep "added"（直近12時間のみ）
-        const raw = localStorage.getItem(LS_KEY);
-        if (raw) {
-          const obj = JSON.parse(raw);
-          const ts = obj?.ts ? new Date(obj.ts).getTime() : 0;
-          if (Date.now() - ts < TWELVE_H_MS) {
-            const now = Date.now();
-            const rows = Array.isArray(obj.rows)
-              ? (obj.rows as AddedRow[])
-              : [];
-            const filtered = rows.filter((r) => {
-              const t = r?.created_at ? Date.parse(r.created_at) : ts;
-              return Number.isFinite(t) && now - t <= TWELVE_H_MS;
-            });
-            setAdded(filtered);
-            setVisibleAdded(10);
-          } else {
-            localStorage.removeItem(LS_KEY);
-          }
-        }
+        // last fetch count
+        const last = Number(localStorage.getItem(LS_FETCH_COUNT));
+        if (Number.isFinite(last) && last > 0)
+          setFetchTotal(Math.max(1, Math.min(2000, last)));
 
-        // keep "rejected"（直近12時間のみ）
+        // rejected は最近だけ復元（任意）
         const rejRaw = localStorage.getItem(LS_REJECT_KEY);
         if (rejRaw) {
           const obj = JSON.parse(rejRaw);
@@ -282,11 +262,6 @@ export default function ManualFetch() {
             localStorage.removeItem(LS_REJECT_KEY);
           }
         }
-
-        // last fetch count
-        const last = Number(localStorage.getItem(LS_FETCH_COUNT));
-        if (Number.isFinite(last) && last > 0)
-          setFetchTotal(Math.max(1, Math.min(2000, last)));
       } catch (e: any) {
         setMsg(String(e?.message || e));
       }
@@ -317,22 +292,24 @@ export default function ManualFetch() {
     await runLoop(fetchTotal);
   };
 
-  /** 実行ループ（★新規追加件数ベースで A/B を反復） */
+  /** 実行ループ（run開始以降の「新規追加数」をDB基準で反復） */
   const runLoop = async (targetNew: number) => {
     if (!tenantId) return;
     setMsg("");
     setLoading(true);
     cancelledRef.current = false;
     setCrawlDebug(null);
-
-    // HUD開始
-    setHud({ obtained: 0, target: targetNew, near: 0, running: true });
+    setAdded([]);
+    setRecentCount(0);
+    setVisibleAdded(10);
 
     // Steps init
     setS(Array(totalSteps).fill("idle"));
     setActiveIdx(-1);
     abortRef.current?.abort();
     abortRef.current = new AbortController();
+
+    const runStartISO = new Date().toISOString(); // ★ この時刻以降の form_prospects を「今回追加」とする
 
     try {
       // A-1
@@ -342,20 +319,18 @@ export default function ManualFetch() {
       setS((a) => a.map((v, i) => (i === 0 ? "done" : v)));
       setActiveIdx(-1);
 
-      // ---- 「新規追加」数で制御：Phase A と B を反復 ----
-      let obtainedNew = 0;
+      // ---- RUN ----
       let attempts = 0;
       const MAX_ATTEMPTS = Math.ceil(targetNew / 5) + 30;
       const BATCH = Math.min(
-        25,
-        Math.max(8, Math.floor(Math.max(10, targetNew) / 4))
+        40,
+        Math.max(10, Math.floor(Math.max(10, targetNew) / 3))
       );
-      const sinceAtStart = new Date().toISOString();
 
-      while (obtainedNew < targetNew && attempts < MAX_ATTEMPTS) {
+      while (recentCount < targetNew && attempts < MAX_ATTEMPTS) {
         if (cancelledRef.current) throw new Error("ABORTED");
         attempts++;
-        const wantNow = Math.min(BATCH, Math.max(1, targetNew - obtainedNew));
+        const wantNow = Math.min(BATCH, Math.max(1, targetNew - recentCount));
         const seed = `${Date.now()}-${attempts}`;
 
         // A-2 ～ A-5（クロール＆キャッシュ）
@@ -381,12 +356,7 @@ export default function ManualFetch() {
         const toInsert = Number(j?.to_insert_count || 0);
         const usingSrv = !!j?.using_service_role;
 
-        const projectRef: string | null =
-          j?.project_ref != null ? String(j.project_ref) : null;
-        const dbUrlHost: string | null =
-          j?.db_url_host != null ? String(j.db_url_host) : null;
-        const probeFound: number = Number(j?.db_probe_found ?? 0);
-
+        // debug state
         setCrawlDebug({
           step: j?.step,
           new_cache: newCache,
@@ -398,9 +368,9 @@ export default function ManualFetch() {
             : [],
           trace: Array.isArray(j?.trace) ? (j.trace as string[]) : [],
           warning: j?.warning,
-          project_ref: projectRef,
-          db_url_host: dbUrlHost,
-          db_probe_found: probeFound,
+          project_ref: j?.project_ref ?? null,
+          db_url_host: j?.db_url_host ?? null,
+          db_probe_found: Number(j?.db_probe_found ?? 0),
         });
 
         setS((a) =>
@@ -422,7 +392,7 @@ export default function ManualFetch() {
         // 6. HP推定（表示のみ）
         setActiveIdx(5);
         setS((a) => a.map((v, idx) => (idx === 5 ? "running" : v)));
-        await delay(80);
+        await delay(60);
         setS((a) => a.map((v, idx) => (idx === 5 ? "done" : v)));
 
         // 7. 抽出（AI可）
@@ -435,8 +405,8 @@ export default function ManualFetch() {
             "content-type": "application/json",
           },
           body: JSON.stringify({
-            since: sinceAtStart,
-            want: Math.max(1, targetNew - obtainedNew),
+            since: runStartISO,
+            want: Math.max(1, targetNew - recentCount),
             try_llm: true,
           }),
           signal: abortRef.current.signal,
@@ -455,46 +425,31 @@ export default function ManualFetch() {
           throw new Error(ej?.error || `enrich failed (${enrichRes.status})`);
         }
 
-        // 直近12時間のみ反映
-        const now = Date.now();
-        const rowsRaw: AddedRow[] = Array.isArray(ej?.rows)
-          ? (ej.rows as AddedRow[])
+        // ✅ “今回追加”は DBの recent_rows / recent_count を採用
+        const recentRows: AddedRow[] = Array.isArray(ej?.recent_rows)
+          ? (ej.recent_rows as AddedRow[])
           : [];
-        const rows: AddedRow[] = rowsRaw.filter((r: AddedRow) => {
-          const t = r?.created_at ? Date.parse(r.created_at) : now;
-          return Number.isFinite(t) && now - t <= TWELVE_H_MS;
-        });
+        setAdded(recentRows);
+        const cnt = Number(ej?.recent_count ?? 0);
+        setRecentCount(cnt);
 
-        if (rows.length) {
-          setAdded((prev) => {
-            const merged = [...rows, ...prev].filter((r: AddedRow) => {
-              const t = r?.created_at ? Date.parse(r.created_at) : now;
-              return Number.isFinite(t) && now - t <= TWELVE_H_MS;
-            });
-            localStorage.setItem(
-              LS_KEY,
-              JSON.stringify({ ts: new Date().toISOString(), rows: merged })
-            );
-            setVisibleAdded((v) => Math.max(10, v));
-            return merged;
-          });
-        }
-
+        // rejected は蓄積（12hのみローカル保持）
         const rejAll: RejectedRow[] = Array.isArray(ej?.rejected)
           ? (ej.rejected as RejectedRow[])
           : [];
-        const rej = rejAll.filter((r: RejectedRow) => {
-          const t = r?.created_at ? Date.parse(r.created_at!) : now;
-          return Number.isFinite(t) && now - t <= TWELVE_H_MS;
-        });
-        if (rej.length) {
+        if (rejAll.length) {
           setRejected((prev) => {
-            const next = dedupeRejected([...rej, ...prev]).filter(
-              (r: RejectedRow) => {
+            const now = Date.now();
+            const next = dedupeRejected([
+              ...rejAll.map((r) => ({
+                ...r,
+                created_at: new Date().toISOString(),
+              })),
+              ...prev.filter((r) => {
                 const t = r?.created_at ? Date.parse(r.created_at!) : now;
                 return Number.isFinite(t) && now - t <= TWELVE_H_MS;
-              }
-            );
+              }),
+            ]);
             localStorage.setItem(
               LS_REJECT_KEY,
               JSON.stringify({ ts: new Date().toISOString(), rows: next })
@@ -504,53 +459,31 @@ export default function ManualFetch() {
           });
         }
 
-        const nearNow = Number.isFinite(ej?.near_miss_saved as number)
-          ? Number(ej.near_miss_saved)
-          : 0;
-
-        const insertedNow = Number.isFinite(ej?.inserted as number)
-          ? Number(ej.inserted)
-          : rows.length;
-        obtainedNew += Math.max(0, insertedNow);
-
-        // HUD更新
-        setHud((prev) => ({
-          obtained: obtainedNew,
-          target: targetNew,
-          near: prev.near + Math.max(0, nearNow),
-          running: true,
-        }));
-
         setS((a) => a.map((v, idx) => (idx === idxSave ? "done" : v)));
 
-        // 9. 取得件数到達まで反復（進行表示）
+        // 9. 反復（進行表示）
         const idxLoop = FLOW_A_TITLES.length + FLOW_B_TITLES.length - 1;
         setActiveIdx(idxLoop);
         setS((a) => a.map((v, idx) => (idx === idxLoop ? "running" : v)));
         setMsg(
           [
-            `新規追加 進行：${obtainedNew}/${targetNew} 件 (+${insertedNow})`,
+            `新規追加 進行：${cnt}/${targetNew} 件`,
             `NTA: raw=${a2}, pick=${a3}, fill=${a4}, ins(cache)=${newCache}, to_insert(cache)=${toInsert}`,
             `権限: ${usingSrv ? "service-role" : "anon"}${
               j?.warning ? " / 警告あり" : ""
             }`,
-            `Probe: project_ref=${projectRef ?? "-"}, db_url_host=${
-              dbUrlHost ?? "-"
-            }, db_probe_found=${probeFound}`,
           ].join("\n")
         );
         await delay(40);
         setS((a) => a.map((v, idx) => (idx === idxLoop ? "done" : v)));
         setActiveIdx(-1);
 
-        if (insertedNow === 0 && newCache === 0) await delay(300);
+        if (cnt >= targetNew) break;
+        if (newCache === 0) await delay(300);
       }
 
       setMsg(
-        `完了：新規追加が目標件数に達しました（${Math.max(
-          0,
-          obtainedNew
-        )}/${targetNew} 件）`
+        `完了：新規追加が目標件数に達しました（${recentCount}/${targetNew} 件）`
       );
     } catch (e: any) {
       setActiveIdx(-1);
@@ -559,7 +492,6 @@ export default function ManualFetch() {
       else setMsg(String(e?.message || e));
     } finally {
       setLoading(false);
-      setHud((prev) => ({ ...prev, running: false }));
     }
   };
 
@@ -581,8 +513,8 @@ export default function ManualFetch() {
       if (!r.ok) throw new Error(j?.error || "cancel failed");
       setMsg(`取消しました：削除 ${j.deleted ?? 0} 件`);
       setAdded([]);
-      localStorage.removeItem(LS_KEY);
       setVisibleAdded(10);
+      setRecentCount(0);
     } catch (e: any) {
       setMsg(String(e?.message || e));
     }
@@ -602,27 +534,8 @@ export default function ManualFetch() {
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j?.error || "manual add failed");
 
-      if (j?.row) {
-        setAdded((prev) => {
-          const next = [j.row as AddedRow, ...prev];
-          localStorage.setItem(
-            LS_KEY,
-            JSON.stringify({ ts: new Date().toISOString(), rows: next })
-          );
-          setVisibleAdded((v) => Math.max(10, v));
-          return next;
-        });
-      }
-      setRejected((prev) => {
-        const next = prev.filter((x) => !sameRejected(x, row));
-        localStorage.setItem(
-          LS_REJECT_KEY,
-          JSON.stringify({ ts: new Date().toISOString(), rows: next })
-        );
-        setVisibleRejected((v) => Math.max(10, v));
-        return next;
-      });
-      setMsg("不適合から採用に追加しました。");
+      // 再読込は enrich 経由で集約しているのでここでは通知のみ
+      setMsg("不適合から採用に追加しました（表は次回の実行で反映）。");
     } catch (e: any) {
       setMsg(String(e?.message || e));
     }
@@ -677,46 +590,39 @@ export default function ManualFetch() {
     <>
       <AppHeader showBack />
 
-      {/* ★ Sticky HUD（実行中のみ） */}
-      {hud.running && (
-        <div className="sticky top-0 z-40">
-          <div className="mx-auto max-w-6xl px-6 py-3">
-            <div className="rounded-2xl border border-neutral-200 bg-white/95 backdrop-blur shadow-sm p-4">
-              <div className="flex items-center justify-between gap-3">
-                <div className="text-sm font-medium text-neutral-900">
-                  新規追加 進行：
-                  <span className="text-base font-semibold">
-                    {hud.obtained}
-                  </span>
-                  <span className="text-neutral-500"> / {hud.target} 件</span>
-                </div>
-                <div className="text-xs">
-                  <span className="inline-flex items-center rounded-full border border-indigo-200 px-2.5 py-1 text-indigo-700 bg-indigo-50">
-                    近似保存: {hud.near}
-                  </span>
-                </div>
-              </div>
+      {/* ✅ 進捗HUD */}
+      <div className="sticky top-0 z-40 w-full bg-white/90 backdrop-blur border-b border-neutral-200">
+        <div className="mx-auto max-w-6xl px-6 py-2 flex items-center justify-between">
+          <div className="text-sm text-neutral-700">
+            {tenantId ? (
+              <>
+                テナント: <span className="font-mono">{tenantId}</span>
+              </>
+            ) : (
+              "テナント未解決"
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="rounded-full bg-neutral-100 px-3 py-1 text-sm">
+              進捗: <span className="font-semibold">{recentCount}</span>
+              <span className="opacity-60"> / </span>
+              <span className="font-semibold">{fetchTotal}</span>
+              <span className="opacity-60"> 件</span>
+            </div>
+            <div className="w-40 h-2 bg-neutral-100 rounded-full overflow-hidden">
               <div
-                className="mt-2 h-2 w-full rounded-full bg-neutral-100 overflow-hidden"
-                aria-hidden
-              >
-                <div
-                  className="h-full bg-indigo-500 transition-all"
-                  style={{
-                    width: `${Math.min(
-                      100,
-                      Math.floor((hud.obtained / Math.max(1, hud.target)) * 100)
-                    )}%`,
-                  }}
-                />
-              </div>
-              <div className="sr-only" aria-live="polite">
-                新規追加 {hud.obtained} / {hud.target}、近似保存 {hud.near}
-              </div>
+                className="h-full bg-emerald-500 transition-all"
+                style={{
+                  width: `${Math.min(
+                    100,
+                    Math.round((recentCount / Math.max(1, fetchTotal)) * 100)
+                  )}%`,
+                }}
+              />
             </div>
           </div>
         </div>
-      )}
+      </div>
 
       <main className="mx-auto max-w-6xl p-6">
         {/* Header & Actions */}
@@ -729,8 +635,6 @@ export default function ManualFetch() {
               二段フローで保存を逐次反映。アイコンの動きは実処理に同期します。
             </p>
             <p className="text-xs text-neutral-500 mt-1 break-words">
-              テナント: <span className="font-mono">{tenantId ?? "-"}</span>
-              <br />
               現在のフィルタ:{" "}
               <span className="opacity-80">都道府県={summaryParts.pref}</span>
               <br />
@@ -915,28 +819,16 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                         <table className="min-w-[900px] w-full text-xs">
                           <thead className="bg-neutral-50 text-neutral-600">
                             <tr>
-                              <th
-                                className="px-2 py-2 text-left whitespace-nowrap"
-                                style={{ writingMode: "horizontal-tb" }}
-                              >
+                              <th className="px-2 py-2 text-left whitespace-nowrap">
                                 法人番号
                               </th>
-                              <th
-                                className="px-2 py-2 text-left whitespace-nowrap"
-                                style={{ writingMode: "horizontal-tb" }}
-                              >
+                              <th className="px-2 py-2 text-left whitespace-nowrap">
                                 商号又は名称
                               </th>
-                              <th
-                                className="px-2 py-2 text-left whitespace-nowrap"
-                                style={{ writingMode: "horizontal-tb" }}
-                              >
+                              <th className="px-2 py-2 text-left whitespace-nowrap">
                                 所在地
                               </th>
-                              <th
-                                className="px-2 py-2 text-left whitespace-nowrap"
-                                style={{ writingMode: "horizontal-tb" }}
-                              >
+                              <th className="px-2 py-2 text-left whitespace-nowrap">
                                 履歴等
                               </th>
                             </tr>
@@ -998,13 +890,16 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
           )}
         </section>
 
-        {/* 今回追加テーブル */}
+        {/* 今回追加（= DB: form_prospects since runStart） */}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden">
           <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 bg-neutral-50">
             <div className="text-sm font-medium text-neutral-800">
-              今回追加（直近12時間・新しい順）
+              今回追加（run開始以降 / 新しい順 / DB表示）
             </div>
             <div className="flex items-center gap-2">
+              <span className="text-xs text-neutral-600">
+                件数: {recentCount}
+              </span>
               <button
                 onClick={cancelAdditions}
                 disabled={added.length === 0}
@@ -1038,7 +933,6 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                     <th
                       key={h}
                       className="px-3 py-3 text-left whitespace-nowrap"
-                      style={{ writingMode: "horizontal-tb" }}
                     >
                       {h}
                     </th>
@@ -1085,7 +979,7 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                     </td>
                     <td className="px-3 py-2">{c.industry || "-"}</td>
                     <td className="px-3 py-2">
-                      {c.capital != null ? formatJPY(c.capital) : "-"}
+                      {c.capital != null ? formatJPY(Number(c.capital)) : "-"}
                     </td>
                     <td className="px-3 py-2">{c.established_on || "-"}</td>
                     <td className="px-3 py-2">{c.corporate_number || "-"}</td>
@@ -1125,7 +1019,7 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
           </div>
         </section>
 
-        {/* 不適合一覧 */}
+        {/* 不適合一覧（form_prospects_rejected 反映） */}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden mt-6">
           <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 bg-neutral-50">
             <div className="text-sm font-medium text-neutral-800">
@@ -1160,7 +1054,6 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                     <th
                       key={h}
                       className="px-3 py-3 text-left whitespace-nowrap"
-                      style={{ writingMode: "horizontal-tb" }}
                     >
                       {h}
                     </th>
@@ -1382,7 +1275,7 @@ function CountModal({
           </div>
           <p className="text-[11px] text-neutral-500">
             ※ 取得件数は実際に「サイト到達 → 抽出 → 保存」で
-            <strong>新規作成</strong>できた件数でカウントします。
+            <strong>新規作成</strong>できた件数でカウントします（DB基準）。
           </p>
         </div>
         <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-neutral-200">
