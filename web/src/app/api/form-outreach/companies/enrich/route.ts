@@ -24,11 +24,7 @@ const GOOGLE_CSE_CX = process.env.GOOGLE_CSE_CX || "";
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || "";
 
 /** ========= Types ========= */
-type EnrichBody = {
-  since?: string;
-  want?: number;
-  try_llm?: boolean;
-};
+type EnrichBody = { since?: string; want?: number; try_llm?: boolean };
 
 type CacheRow = {
   tenant_id: string;
@@ -50,7 +46,7 @@ type AddedRow = {
   industry?: string | null;
   company_size?: string | null;
   prefectures?: string[] | null;
-  job_site_source?: string | null; // "google" | "map"
+  job_site_source?: string | null;
   corporate_number?: string | null;
   hq_address?: string | null;
   capital?: number | null;
@@ -299,7 +295,6 @@ function isLikelyOfficial(link: string, company?: string | null): boolean {
   const c = normalizeCompanyName(company);
   return c ? link.toLowerCase().includes(c) : true;
 }
-
 async function findWebsiteByGoogleCSE(
   company: string,
   address?: string | null
@@ -322,7 +317,7 @@ async function findWebsiteByGoogleCSE(
   return null;
 }
 
-/** ========= Google Maps（厳密照合） ========= */
+/** ========= Google Maps（社名＋番地まで照合） ========= */
 function fuzzyEq(a: string, b: string) {
   return normalizeCompanyName(a) === normalizeCompanyName(b);
 }
@@ -422,7 +417,7 @@ async function loadRecentCache(
   return (data || []) as CacheRow[];
 }
 
-/** ========= Prospect selectors（重複吸収） ========= */
+/** ========= 既存参照 ========= */
 async function selectByCorpnum(
   sb: SupabaseClient,
   tenant_id: string,
@@ -435,14 +430,13 @@ async function selectByCorpnum(
     .eq("corporate_number", corporate_number)
     .limit(1)
     .maybeSingle();
-  return data as AddedRow | null;
+  return (data as AddedRow) || null;
 }
 async function selectByWebsiteLoose(
   sb: SupabaseClient,
   tenant_id: string,
   website: string
 ) {
-  // 1) 完全一致（推奨・常態）
   let { data } = await sb
     .from("form_prospects")
     .select("*")
@@ -450,8 +444,6 @@ async function selectByWebsiteLoose(
     .eq("website", website)
     .limit(1)
     .maybeSingle();
-
-  // 2) 既存に /contact 等が保存されていた場合の救済（前方一致）
   if (!data) {
     const { data: d2 } = await sb
       .from("form_prospects")
@@ -463,9 +455,10 @@ async function selectByWebsiteLoose(
       .maybeSingle();
     data = d2 || null;
   }
-  return data as AddedRow | null;
+  return (data as AddedRow) || null;
 }
 
+/** ========= 競合安全 UPSERT（重複でも500を出さない） ========= */
 type SaveInput = {
   tenant_id: string;
   company_name: string;
@@ -483,124 +476,69 @@ type SaveInput = {
   established_on?: string | null;
 };
 
-async function mergeOrUpsertProspect(
+async function upsertProspectSafe(
   sb: SupabaseClient,
   row: SaveInput
 ): Promise<{ saved: AddedRow; createdNew: boolean }> {
-  const { tenant_id } = row;
-  const corp = (row.corporate_number || "").trim();
-  const hasCorp = !!corp;
   const site = normalizeUrl(row.website)!;
+  const corpRaw = (row.corporate_number || "").trim();
+  const corp = corpRaw.length ? corpRaw : null;
 
-  const byCorp = hasCorp ? await selectByCorpnum(sb, tenant_id, corp) : null;
-  const bySite = await selectByWebsiteLoose(sb, tenant_id, site);
-
-  if (byCorp && bySite && byCorp.id !== bySite.id) {
-    const merged: Partial<AddedRow> = {
-      website: site,
-      company_name: prefer(row.company_name, byCorp.company_name),
-      contact_email: prefer(row.contact_email, byCorp.contact_email),
-      contact_form_url: prefer(row.contact_form_url, byCorp.contact_form_url),
-      phone: prefer(row.phone, byCorp.phone),
-      industry: prefer(row.industry, byCorp.industry),
-      company_size: prefer(row.company_size, byCorp.company_size),
-      prefectures: prefer(row.prefectures, byCorp.prefectures),
-      capital: prefer(row.capital, byCorp.capital),
-      established_on: prefer(row.established_on, byCorp.established_on),
-      hq_address: prefer(row.hq_address, byCorp.hq_address),
-      job_site_source:
-        row.job_site_source || byCorp.job_site_source || "google",
-    };
-    await sb.from("form_prospects").update(merged).eq("id", byCorp.id);
-    await sb.from("form_prospects").delete().eq("id", bySite.id);
-    const { data: saved } = await sb
-      .from("form_prospects")
-      .select("*")
-      .eq("id", byCorp.id)
-      .limit(1)
-      .maybeSingle();
-    return { saved: saved as AddedRow, createdNew: false };
-  }
-
-  if (byCorp) {
-    const patch: Partial<AddedRow> = {
-      website: site,
-      company_name: prefer(row.company_name, byCorp.company_name),
-      contact_email: prefer(row.contact_email, byCorp.contact_email),
-      contact_form_url: prefer(row.contact_form_url, byCorp.contact_form_url),
-      phone: prefer(row.phone, byCorp.phone),
-      industry: prefer(row.industry, byCorp.industry),
-      company_size: prefer(row.company_size, byCorp.company_size),
-      prefectures: prefer(row.prefectures, byCorp.prefectures),
-      capital: prefer(row.capital, byCorp.capital),
-      established_on: prefer(row.established_on, byCorp.established_on),
-      hq_address: prefer(row.hq_address, byCorp.hq_address),
-      job_site_source:
-        row.job_site_source || byCorp.job_site_source || "google",
-    };
-    if (bySite && bySite.id !== byCorp.id) {
-      await sb.from("form_prospects").delete().eq("id", bySite.id);
-    }
-    await sb.from("form_prospects").update(patch).eq("id", byCorp.id);
-    const { data: saved } = await sb
-      .from("form_prospects")
-      .select("*")
-      .eq("id", byCorp.id)
-      .limit(1)
-      .maybeSingle();
-    return { saved: saved as AddedRow, createdNew: false };
-  }
-
-  if (bySite) {
-    const patch: Partial<AddedRow> = {
-      corporate_number: hasCorp ? corp : bySite.corporate_number,
-      company_name: prefer(row.company_name, bySite.company_name),
-      contact_email: prefer(row.contact_email, bySite.contact_email),
-      contact_form_url: prefer(row.contact_form_url, bySite.contact_form_url),
-      phone: prefer(row.phone, bySite.phone),
-      industry: prefer(row.industry, bySite.industry),
-      company_size: prefer(row.company_size, bySite.company_size),
-      prefectures: prefer(row.prefectures, bySite.prefectures),
-      capital: prefer(row.capital, bySite.capital),
-      established_on: prefer(row.established_on, bySite.established_on),
-      hq_address: prefer(row.hq_address, bySite.hq_address),
-      job_site_source:
-        row.job_site_source || bySite.job_site_source || "google",
-    };
-    await sb.from("form_prospects").update(patch).eq("id", bySite.id);
-    const { data: saved } = await sb
-      .from("form_prospects")
-      .select("*")
-      .eq("id", bySite.id)
-      .limit(1)
-      .maybeSingle();
-    return { saved: saved as AddedRow, createdNew: false };
-  }
+  // 既存を読んで NULL潰しマージ
+  let base: AddedRow | null = null;
+  if (corp) base = await selectByCorpnum(sb, row.tenant_id, corp);
+  if (!base) base = await selectByWebsiteLoose(sb, row.tenant_id, site);
 
   const payload = {
     tenant_id: row.tenant_id,
-    company_name: row.company_name,
+    company_name: prefer(row.company_name, base?.company_name),
     website: site,
-    contact_email: row.contact_email ?? null,
-    contact_form_url: row.contact_form_url ?? null,
-    phone: row.phone ?? null,
-    industry: row.industry ?? null,
-    company_size: row.company_size ?? null,
-    prefectures: row.prefectures ?? null,
-    job_site_source: row.job_site_source,
-    corporate_number: hasCorp ? corp : null,
-    hq_address: row.hq_address ?? null,
-    capital: row.capital ?? null,
-    established_on: row.established_on ?? null,
+    contact_email: prefer(row.contact_email ?? null, base?.contact_email),
+    contact_form_url: prefer(
+      row.contact_form_url ?? null,
+      base?.contact_form_url
+    ),
+    phone: prefer(row.phone ?? null, base?.phone),
+    industry: prefer(row.industry ?? null, base?.industry),
+    company_size: prefer(row.company_size ?? null, base?.company_size),
+    prefectures: prefer(row.prefectures ?? null, base?.prefectures),
+    job_site_source:
+      prefer(row.job_site_source, base?.job_site_source) || "google",
+    corporate_number: corp ?? base?.corporate_number ?? null,
+    hq_address: prefer(row.hq_address ?? null, base?.hq_address),
+    capital: prefer(row.capital ?? null, base?.capital),
+    established_on: prefer(row.established_on ?? null, base?.established_on),
   };
+
+  // corp あり： (tenant_id, corporate_number) で UPSERT
+  if (payload.corporate_number) {
+    const { data, error } = await sb
+      .from("form_prospects")
+      .upsert(payload, { onConflict: "tenant_id,corporate_number" })
+      .select("*")
+      .limit(1)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    const saved = data as AddedRow;
+    const createdNew = saved?.created_at
+      ? Date.parse(saved.created_at) > Date.now() - 120000
+      : false;
+    return { saved, createdNew };
+  }
+
+  // corp なし： (tenant_id, website) で UPSERT（ユニークあり）
   const { data, error } = await sb
     .from("form_prospects")
-    .insert(payload)
+    .upsert(payload, { onConflict: "tenant_id,website" })
     .select("*")
     .limit(1)
     .maybeSingle();
   if (error) throw new Error(error.message);
-  return { saved: data as AddedRow, createdNew: true };
+  const saved = data as AddedRow;
+  const createdNew = saved?.created_at
+    ? Date.parse(saved.created_at) > Date.now() - 120000
+    : false;
+  return { saved, createdNew };
 }
 
 /** ========= rejected へ INSERT ========= */
@@ -614,7 +552,7 @@ async function insertRejected(
   if (error) throw new Error(error.message);
 }
 
-/** ========= 会社概要抽出（トップ/会社概要/お問い合わせ） ========= */
+/** ========= 会社概要抽出 ========= */
 async function profileScrape(website: string) {
   const res: {
     contact_form_url?: string | null;
@@ -622,7 +560,7 @@ async function profileScrape(website: string) {
     capital?: number | null;
     established_on?: string | null;
     company_size?: string | null;
-    industry?: string | null; // LLM前の暫定
+    industry?: string | null;
     hq_address?: string | null;
     htmlTop?: string | null;
     htmlAbout?: string | null;
@@ -637,8 +575,7 @@ async function profileScrape(website: string) {
     if (m) {
       const href = m[1];
       try {
-        const u = new URL(href, website);
-        res.contact_form_url = u.toString();
+        res.contact_form_url = new URL(href, website).toString();
       } catch {}
     }
   }
@@ -694,7 +631,6 @@ async function classifyIndustryWithLLM(params: {
 }): Promise<{ large: IndustryLarge; small: string }> {
   const FALL_LARGE: IndustryLarge = "その他サービス";
   const FALL_SMALL = "その他サービス";
-
   if (!OPENAI_API_KEY) return { large: FALL_LARGE, small: FALL_SMALL };
 
   const text = [params.htmlAbout, params.htmlTop]
@@ -708,13 +644,10 @@ async function classifyIndustryWithLLM(params: {
     "必ず与えられた候補リストの中からのみ、【大分類】と【小分類】を1つずつ選びます。",
     "候補に無い語は絶対に返さないでください。迷う場合は「その他サービス / その他サービス」を選んでください。",
   ].join("\n");
-
   const catJson = JSON.stringify(INDUSTRY_CATEGORIES);
-
   const user = [
     `会社名: ${params.companyName}`,
-    "以下は会社の公式サイトから抽出したテキストの一部です。",
-    "これを読み、最も適切な業種（大分類・小分類）を候補リストから厳密に1つずつ選んでください。",
+    "以下は会社の公式サイトから抽出したテキストの一部です。候補リストに厳密一致で選択してください。",
     "",
     "【候補リスト(JSON)】",
     catJson,
@@ -743,7 +676,6 @@ async function classifyIndustryWithLLM(params: {
         ],
       }),
     });
-
     if (!resp.ok) throw new Error(`OpenAI ${resp.status}`);
     const j = await resp.json();
     const content: string =
@@ -764,9 +696,7 @@ async function classifyIndustryWithLLM(params: {
       ).find((L) => INDUSTRY_CATEGORIES[L].includes(parsed.small as string));
       if (foundLarge) return { large: foundLarge, small: parsed.small };
     }
-  } catch {
-    // ignore -> fallback
-  }
+  } catch {}
   return { large: FALL_LARGE, small: FALL_SMALL };
 }
 
@@ -819,7 +749,7 @@ export async function POST(req: Request) {
       );
       let source: "google" | "map" | null = website ? "google" : null;
 
-      // 2) Maps（社名+番地まで照合）
+      // 2) Maps（社名 + 番地照合）
       if (!website) {
         const viaMap = await findWebsiteByGoogleMaps(name, c.address);
         if (viaMap.website && viaMap.addrMatched) {
@@ -842,7 +772,7 @@ export async function POST(req: Request) {
         continue;
       }
 
-      // 3) トップページに社名文字列が無ければ除外
+      // 3) トップHTMLに社名必須
       const htmlTop = await getHtml(website);
       if (!htmlTop || !htmlContainsCompany(htmlTop, name)) {
         rejected.push({
@@ -855,13 +785,13 @@ export async function POST(req: Request) {
         continue;
       }
 
-      // 4) 抽出
+      // 4) 会社概要抽出
       const prof = await profileScrape(website);
       const prefFromAddr =
         pickPrefectureFromAddress(prof.hq_address || c.address) ||
         pickPrefectureFromAddress(c.address);
 
-      // 5) ChatGPTで業種判定（候補厳守）
+      // 5) 業種（候補厳守）
       const { large, small } = await classifyIndustryWithLLM({
         companyName: name,
         htmlTop: prof.htmlTop || htmlTop,
@@ -869,14 +799,14 @@ export async function POST(req: Request) {
       });
       const industryValue = `${large} / ${small}`;
 
-      // 6) 競合安全保存（事前マージ）
+      // 6) 競合安全 UPSERT（onConflict で排他制御）
       try {
-        const { saved, createdNew } = await mergeOrUpsertProspect(sb, {
+        const { saved, createdNew } = await upsertProspectSafe(sb, {
           tenant_id: tenantId,
           company_name: name,
           website,
           job_site_source: (source || "google") as "google" | "map",
-          corporate_number: c.corporate_number || null,
+          corporate_number: (c.corporate_number || "").trim() || null,
           hq_address: prof.hq_address || c.address || null,
           contact_email: null,
           contact_form_url: prof.contact_form_url || null,
@@ -889,8 +819,12 @@ export async function POST(req: Request) {
         });
 
         rows.push(saved);
-        if (createdNew) inserted += 1;
+        // 新規作成だけカウント（upsert でも created_at は新規でのみ近い時刻）
+        const createdAt = saved.created_at ? Date.parse(saved.created_at) : NaN;
+        const sinceAt = Date.parse(since);
+        if (Number.isFinite(createdAt) && createdAt >= sinceAt) inserted += 1;
       } catch (e: any) {
+        // 競合やその他は reject に回して継続（500を出さない）
         rejected.push({
           company_name: name,
           website,
