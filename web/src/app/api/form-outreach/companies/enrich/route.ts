@@ -27,7 +27,7 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 
 /** ========= Types ========= */
 type EnrichBody = {
-  since?: string;
+  since?: string; // ← フロントの「開始する」を押した瞬間のISO（秒単位まで）
   want?: number;
   try_llm?: boolean;
 };
@@ -119,7 +119,7 @@ function normalizeUrl(u?: string | null): string | null {
   try {
     const url = new URL(/^https?:\/\//i.test(u) ? u : `https://${u}`);
     const ext = (url.pathname || "").toLowerCase();
-    if (/\.(pdf|docx?|xlsx?|pptx?)$/.test(ext)) return null;
+    if (/\.(pdf|docx?|xlsx?|pptx?)$/.test(ext)) return null; // PDF等はサイトURLにしない
     url.hash = "";
     url.pathname = "/";
     url.search = "";
@@ -200,7 +200,7 @@ function addressBlocksMatch(a?: string | null, b?: string | null): boolean {
     if (ta[i] === tb[i]) match++;
     else break;
   }
-  return match >= 3;
+  return match >= 3; // 1丁目-2番-3号 まで一致
 }
 
 function nameVariants(n: string) {
@@ -233,6 +233,7 @@ function rootDomainOf(host?: string | null): string | null {
   if (!host) return null;
   const parts = host.split(".").filter(Boolean);
   if (parts.length <= 2) return host;
+  // co.jp 等のセカンドレベルTLD対応（簡易）
   const sld2 = ["co.jp", "or.jp", "ne.jp", "ac.jp", "ed.jp", "go.jp", "lg.jp"];
   const last2 = parts.slice(-2).join(".");
   const last3 = parts.slice(-3).join(".");
@@ -290,7 +291,7 @@ async function findWebsiteByGoogleMaps(
       const placeId: string | undefined = c?.place_id;
       if (!placeId) continue;
       const details = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${encodeURIComponent(
-        placeId
+        placeId!
       )}&fields=website,url,name,formatted_address&language=ja&key=${GOOGLE_MAPS_API_KEY}`;
       const d = await fetchWithTimeout(details, {}, 8000);
       if (!d.ok) continue;
@@ -308,12 +309,13 @@ async function findWebsiteByGoogleMaps(
   return null;
 }
 
-/** ========= HTML & Profile Scrape (強化) ========= */
+/** ========= HTML ========= */
 async function getHtml(url: string): Promise<string | null> {
   try {
     const r = await fetchWithTimeout(url, {}, 10000);
     if (!r.ok) return null;
     const t = await r.text();
+    // script/style 除去（電話/メールの誤検出を抑止）
     return t
       .replace(/<script[\s\S]*?<\/script>/gi, " ")
       .replace(/<style[\s\S]*?<\/style>/gi, " ")
@@ -324,6 +326,7 @@ async function getHtml(url: string): Promise<string | null> {
 }
 
 const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+// 国内向け・緩め（のちに厳格フィルタ）
 const PHONE_CANDIDATE_RE = /0\d{1,3}[-–(（]?\d{1,4}[)-）]?\d{3,4}/g;
 
 function digitsOnly(s: string) {
@@ -334,6 +337,7 @@ function isValidJPPhone(s: string): boolean {
   if (!(d.length === 10 || d.length === 11)) return false;
   if (/^0{5,}$/.test(d)) return false;
   if (/^0{2,}/.test(d)) return false;
+  // 固定/携帯・ありえない市外局番を簡易で弾く（03,06,04x,05x,07x,08x,09x, 070/080/090 等）
   if (!/^0(3|6|4\d|5\d|7\d|8\d|9\d)/.test(d)) return false;
   return true;
 }
@@ -421,10 +425,95 @@ function extractPrefecture(addr?: string | null): string[] | null {
   return hit ? [hit] : null;
 }
 
-/** 会社概要/情報/紹介/ABOUT/ABOUT US/company〜 を拾う（電話は footer にもありえる） */
+/** ========= 会社概要リンク検出（拡張） =========
+ * 会社概要/会社情報/会社紹介/会社案内/沿革/ABOUT/ABOUT US/corporate/profile/company〜
+ */
 const ABOUT_RX =
-  /(会社概要|企業情報|会社情報|会社紹介|会社案内|沿革|about\s*us|about|corporate|company(?!\.)|profile)/i;
+  /(会社概要|企業情報|会社情報|会社紹介|会社案内|沿革|about\s*us|about|corporate|profile|company(?!\.))/i;
 
+/** ========= 表・定義リストから値抽出 ========= */
+function stripTags(s: string) {
+  return (s || "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+function extractTableLikeInfo(html: string): {
+  capital?: number | null;
+  established_on?: string | null;
+  company_size?: string | null;
+  phone?: string | null;
+  hq_address?: string | null;
+} {
+  const res: any = {};
+  const capLabels = [/資本金/, /capital/i];
+  const estLabels = [/設立/, /創業/];
+  const sizeLabels = [/従業員|社員数/];
+  const phoneLabels = [/電話|TEL|Tel|tel/];
+  const addrLabels = [/所在地|住所/];
+
+  // <tr><th>ラベル</th><td>値</td></tr> / <tr><td>ラベル</td><td>値</td></tr>
+  const trs = html.match(/<tr[\s\S]*?<\/tr>/gi) || [];
+  for (const tr of trs) {
+    const cells = tr.match(/<(th|td)[^>]*>([\s\S]*?)<\/\1>/gi) || [];
+    if (cells.length < 2) continue;
+    // ★ 最小修正：ガード後の非 null 断言で string に収束
+    const label = stripTags(cells[0]!);
+    const value = stripTags(cells[1]!);
+
+    if (!res.capital && capLabels.some((rx) => rx.test(label))) {
+      const m = value.match(/[0-9,，]+/);
+      if (m) res.capital = parseYenNumber(m[0]);
+    }
+    if (!res.established_on && estLabels.some((rx) => rx.test(label))) {
+      const p = parseDate(zen2han(value));
+      if (p) res.established_on = p;
+    }
+    if (!res.company_size && sizeLabels.some((rx) => rx.test(label))) {
+      const m = value.match(/[0-9,，]+/);
+      if (m) res.company_size = `${m[0].replace(/[,，]/g, "")}名`;
+    }
+    if (!res.phone && phoneLabels.some((rx) => rx.test(label))) {
+      const cand = (value.match(PHONE_CANDIDATE_RE) || []).find(isValidJPPhone);
+      if (cand) res.phone = cand;
+    }
+    if (!res.hq_address && addrLabels.some((rx) => rx.test(label))) {
+      res.hq_address = value || null;
+    }
+  }
+
+  // <dt>ラベル</dt><dd>値</dd>
+  const dts = html.match(/<dt[\s\S]*?<\/dt>\s*<dd[\s\S]*?<\/dd>/gi) || [];
+  for (const pair of dts) {
+    const label = stripTags(pair.match(/<dt[\s\S]*?<\/dt>/i)?.[0] || "");
+    const value = stripTags(pair.match(/<dd[\s\S]*?<\/dd>/i)?.[0] || "");
+    if (!label || !value) continue;
+
+    if (!res.capital && capLabels.some((rx) => rx.test(label))) {
+      const m = value.match(/[0-9,，]+/);
+      if (m) res.capital = parseYenNumber(m[0]);
+    }
+    if (!res.established_on && estLabels.some((rx) => rx.test(label))) {
+      const p = parseDate(zen2han(value));
+      if (p) res.established_on = p;
+    }
+    if (!res.company_size && sizeLabels.some((rx) => rx.test(label))) {
+      const m = value.match(/[0-9,，]+/);
+      if (m) res.company_size = `${m[0].replace(/[,，]/g, "")}名`;
+    }
+    if (!res.phone && phoneLabels.some((rx) => rx.test(label))) {
+      const cand = (value.match(PHONE_CANDIDATE_RE) || []).find(isValidJPPhone);
+      if (cand) res.phone = cand;
+    }
+    if (!res.hq_address && addrLabels.some((rx) => rx.test(label))) {
+      res.hq_address = value || null;
+    }
+  }
+
+  return res;
+}
+
+/** ========= プロフィール抽出（強化） ========= */
 async function profileScrape(baseUrl: string): Promise<{
   htmlTop?: string | null;
   htmlAbout?: string | null;
@@ -441,10 +530,10 @@ async function profileScrape(baseUrl: string): Promise<{
   const html = await getHtml(baseUrl);
   res.htmlTop = html;
 
-  // aタグ探索
+  // aタグ探索（会社概要・ABOUTなどを広く拾う）
   const linkMatch =
     html?.match(
-      /<a\s+[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]{0,80}?)<\/a>/gi
+      /<a\s+[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]{0,100}?)<\/a>/gi
     ) || [];
   const links = linkMatch
     .map((a) => {
@@ -466,16 +555,20 @@ async function profileScrape(baseUrl: string): Promise<{
     ) || null;
   const aboutLink = findLink(ABOUT_RX) || null;
 
-  if (contactLink?.href) {
+  // href を string に確定させてから URL を生成
+  const contactHref = contactLink?.href ?? "";
+  if (contactHref) {
     try {
-      const u = new URL(contactLink.href, baseUrl).toString();
+      const u = new URL(contactHref, baseUrl).toString();
       res.contact_form_url = u;
       res.htmlContact = await getHtml(u);
     } catch {}
   }
-  if (aboutLink?.href) {
+
+  const aboutHref = aboutLink?.href ?? "";
+  if (aboutHref) {
     try {
-      const u = new URL(aboutLink.href, baseUrl).toString();
+      const u = new URL(aboutHref, baseUrl).toString();
       res.htmlAbout = await getHtml(u);
     } catch {}
   }
@@ -499,28 +592,43 @@ async function profileScrape(baseUrl: string): Promise<{
     if (good) res.phone = good;
   }
 
+  // 会社概要HTML要素（表/定義リスト）を優先して解析
+  if (res.htmlAbout) {
+    const info = extractTableLikeInfo(res.htmlAbout as string);
+    if (info.capital != null && res.capital == null) res.capital = info.capital;
+    if (info.established_on && !res.established_on)
+      res.established_on = info.established_on;
+    if (info.company_size && !res.company_size)
+      res.company_size = info.company_size;
+    if (info.phone && !res.phone) res.phone = info.phone;
+    if (info.hq_address && !res.hq_address) res.hq_address = info.hq_address;
+  }
+
+  // 追加でテキスト正規表現（既存ロジック）
   const infoPool = [res.htmlAbout, res.htmlTop].filter(Boolean).join("\n");
   if (infoPool) {
     const capBlock =
       infoPool.match(/資本金[^0-9]{0,20}([0-9,，]+)万?円/) ||
       infoPool.match(/capital[^0-9]{0,10}([0-9,，]+)/i);
-    if (capBlock?.[1]) res.capital = parseYenNumber(capBlock[1]);
+    if (capBlock?.[1] && res.capital == null)
+      res.capital = parseYenNumber(capBlock[1]);
 
     const estBlock =
       infoPool.match(/設立[^0-9]{0,10}([0-9０-９年\/\-月日\s]+)/) ||
       infoPool.match(/創業[^0-9]{0,10}([0-9０-９年\/\-月日\s]+)/);
-    if (estBlock?.[1]) res.established_on = parseDate(zen2han(estBlock[1]));
+    if (estBlock?.[1] && !res.established_on)
+      res.established_on = parseDate(zen2han(estBlock[1]));
 
     const addrBlock =
       infoPool.match(/所在地[^<]{0,80}(〒?\s?\d{3}-\d{4}[^<\n]{3,120})/) ||
       infoPool.match(/住所[^<]{0,80}(〒?\s?\d{3}-\d{4}[^<\n]{3,120})/);
-    if (addrBlock?.[1])
+    if (addrBlock?.[1] && !res.hq_address)
       res.hq_address = addrBlock[1].replace(/<[^>]+>/g, "").trim();
 
     const sizeBlock =
       infoPool.match(/従業員[^0-9]{0,10}([0-9,，]+)名/) ||
       infoPool.match(/社員数[^0-9]{0,10}([0-9,，]+)名/);
-    if (sizeBlock?.[1])
+    if (sizeBlock?.[1] && !res.company_size)
       res.company_size = `${sizeBlock[1].replace(/[,，]/g, "")}名`;
   }
 
@@ -674,11 +782,9 @@ async function upsertSimilarSite(
     updated_at: now,
   };
 
-  // まず INSERT（新規のみ created_at をセット）
   const { error: insErr } = await sb.from("form_similar_sites").insert(payload);
   if (!insErr) return { inserted: true };
 
-  // 重複（23505）の場合のみ UPDATE（created_at は保持）
   if ((insErr as any)?.code === "23505") {
     const { error: updErr } = await sb
       .from("form_similar_sites")
@@ -892,11 +998,12 @@ export async function POST(req: Request) {
       );
     }
 
+    // since はフロントの「開始する」押下時刻（修正2）
     const body = (await req.json().catch(() => ({}))) as EnrichBody;
     const since =
       typeof body?.since === "string"
         ? body.since
-        : new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+        : new Date(Date.now() - 1 * 60 * 1000).toISOString(); // fallbackは直近1分
     const want = Math.max(1, Math.min(2000, Number(body?.want ?? 30)));
     const tryLLM = !!body?.try_llm;
 
@@ -908,7 +1015,7 @@ export async function POST(req: Request) {
     const rows: AddedRow[] = [];
     const rejected: RejectedRow[] = [];
     let inserted = 0;
-    let nearMissSaved = 0; // 実行中合計（参考）
+    let nearMissSaved = 0;
 
     for (const c of candidates) {
       if (rows.length >= want) break;
@@ -995,7 +1102,7 @@ export async function POST(req: Request) {
         continue;
       }
 
-      /// 4) 連絡先メールはサイトドメイン or gmail のみ
+      // 4) 連絡先メールはサイトドメイン or gmail のみ
       let contact_email: string | null = null;
       if (
         prof.contact_email &&
@@ -1012,7 +1119,7 @@ export async function POST(req: Request) {
           .join("\n");
         const found = pool.match(EMAIL_RE) || [];
         const uniq = Array.from(new Set(found.map((x) => x.toLowerCase())));
-        const site = website as string; // narrow
+        const site = website as string;
         contact_email = uniq.find((e) => emailDomainOK(e, site)) || null;
       }
 
@@ -1030,7 +1137,7 @@ export async function POST(req: Request) {
         industryValue = `${cls.large} / ${cls.small}`;
       }
 
-      // 6) UPSERT
+      // 6) UPSERT（ユニーク整合に耐性）
       try {
         const { saved } = await upsertProspectSafe(sb, {
           tenant_id: tenantId,
@@ -1076,7 +1183,7 @@ export async function POST(req: Request) {
       } catch {}
     }
 
-    // ✅ フロントが採用する最新“今回追加” & 近似サイト新規数
+    // ✅ フロントが採用する最新“今回追加”（since 以降） & 近似サイト新規数
     const recent = await loadRecentProspects(sb, tenantId, since);
     const recentSimilarCount = await loadRecentSimilarCount(
       sb,
@@ -1088,13 +1195,11 @@ export async function POST(req: Request) {
       {
         rows, // 参考
         rejected,
-        inserted, // 参考（このリクエスト内）
-        near_miss_saved: nearMissSaved, // 参考（このリクエスト内）
-        // ▼ フロントは以下を採用
+        inserted, // このAPI内での新規保存件数
+        // ▼ フロント採用
         recent_rows: recent.rows,
         recent_count: recent.count,
         recent_similar_count: recentSimilarCount,
-        trace,
         used: {
           google_cse: Boolean(GOOGLE_CSE_KEY && GOOGLE_CSE_CX),
           maps_places: Boolean(GOOGLE_MAPS_API_KEY),
