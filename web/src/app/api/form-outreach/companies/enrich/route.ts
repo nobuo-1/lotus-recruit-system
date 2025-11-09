@@ -42,8 +42,7 @@ type AddedRow = {
   industry?: string | null;
   company_size?: string | null;
   prefectures?: string[] | null;
-  job_site_source?: string | null; // "google" | "map" など
-  source_site?: string | null;
+  job_site_source?: string | null; // "google" | "map" 等（form_prospects 側の正式カラム）
   corporate_number?: string | null;
   hq_address?: string | null;
   capital?: number | null;
@@ -66,6 +65,7 @@ type RejectedRow = {
   hq_address?: string | null;
   capital?: number | null;
   established_on?: string | null;
+  source_site?: string | null; // ← form_prospects_rejected には存在
   reject_reasons: string[];
   created_at?: string | null;
 };
@@ -109,7 +109,7 @@ function normalizeUrl(u?: string | null): string | null {
   try {
     const url = new URL(/^https?:\/\//i.test(u) ? u : `https://${u}`);
     url.hash = "";
-    if (url.pathname === "") url.pathname = "/";
+    if (!url.pathname) url.pathname = "/";
     return url.toString();
   } catch {
     return null;
@@ -249,7 +249,7 @@ async function loadRecentCache(
   return (data || []) as CacheRow[];
 }
 
-/** ========= 競合安全なUPSERT ========= */
+/** ========= 競合安全なUPSERT（form_prospects） ========= */
 async function upsertProspect(
   sb: any,
   row: Omit<AddedRow, "id" | "created_at"> & { created_at?: string | null }
@@ -257,11 +257,15 @@ async function upsertProspect(
   const now = new Date().toISOString();
   const payload = { ...row, created_at: row.created_at ?? now };
 
-  // corporate_number がある場合はユニークキーに合わせて onConflict を指定
+  // ※ form_prospects に source_site カラムは無いので絶対に含めない
+
   if (row.corporate_number) {
     const { data, error } = await sb
       .from("form_prospects")
-      .upsert(payload, { onConflict: "tenant_id,corporate_number" })
+      .upsert(payload, {
+        onConflict: "tenant_id,corporate_number",
+        defaultToNull: true,
+      })
       .select("*")
       .limit(1)
       .maybeSingle();
@@ -269,10 +273,9 @@ async function upsertProspect(
     return data as AddedRow;
   }
 
-  // 無い場合は通常INSERT（ここでは重複ユニークは想定しない）
   const { data, error } = await sb
     .from("form_prospects")
-    .insert(payload)
+    .insert(payload, { defaultToNull: true })
     .select("*")
     .limit(1)
     .maybeSingle();
@@ -283,7 +286,7 @@ async function upsertProspect(
 /** ========= rejected へ INSERT ========= */
 async function insertRejected(sb: any, r: RejectedRow & { tenant_id: string }) {
   const now = new Date().toISOString();
-  const payload = { ...r, created_at: now };
+  const payload = { ...r, created_at: r.created_at ?? now };
   const { error } = await sb.from("form_prospects_rejected").insert(payload);
   if (error) throw new Error(error.message);
 }
@@ -319,11 +322,13 @@ export async function POST(req: Request) {
     for (const c of candidates) {
       if (rows.length >= want) break;
       const name = (c.company_name || "").trim();
+
       if (!name) {
         rejected.push({
           company_name: c.company_name || "(名称なし)",
           corporate_number: c.corporate_number || null,
           hq_address: c.address || null,
+          source_site: "none",
           reject_reasons: ["会社名が空のためスキップ"],
         });
         continue;
@@ -336,7 +341,7 @@ export async function POST(req: Request) {
       );
       let source: "google" | "map" | null = website ? "google" : null;
 
-      // 2) ダメなら Maps
+      // 2) 見つからなければ Google Maps（地点の website/url）
       if (!website) {
         const viaMap = await findWebsiteByGoogleMaps(name, c.address);
         if (viaMap) {
@@ -350,6 +355,13 @@ export async function POST(req: Request) {
           company_name: name,
           corporate_number: c.corporate_number || null,
           hq_address: c.address || null,
+          source_site: GOOGLE_MAPS_API_KEY
+            ? GOOGLE_CSE_KEY && GOOGLE_CSE_CX
+              ? "search+map_none"
+              : "map_only_none"
+            : GOOGLE_CSE_KEY && GOOGLE_CSE_CX
+            ? "search_only_none"
+            : "none",
           reject_reasons: [
             "公式サイトが検索/マップともに確定できず",
             GOOGLE_CSE_KEY && GOOGLE_CSE_CX ? "CSE利用済み" : "CSE未設定",
@@ -359,7 +371,7 @@ export async function POST(req: Request) {
         continue;
       }
 
-      // 競合安全 upsert（重複でも 500 を出さない）
+      // === prospects へ upsert（重複でも 500 を出さない） ===
       const saved = await upsertProspect(sb, {
         tenant_id: tenantId,
         company_name: name,
@@ -370,8 +382,7 @@ export async function POST(req: Request) {
         industry: null,
         company_size: null,
         prefectures: null,
-        job_site_source: source || "google",
-        source_site: null,
+        job_site_source: source || "google", // ← 取得元はここに保存
         corporate_number: c.corporate_number,
         hq_address: c.address,
         capital: null,
@@ -380,7 +391,7 @@ export async function POST(req: Request) {
 
       if (saved) {
         rows.push(saved);
-        // 直近の run で新規作成されたものだけカウント（既存アップサートはカウントしない）
+        // 作成時刻ベースで今回新規をカウント（既存更新はカウントしない）
         const createdAt = saved.created_at ? Date.parse(saved.created_at) : NaN;
         const sinceAt = Date.parse(since);
         if (Number.isFinite(createdAt) && createdAt >= sinceAt) {
@@ -392,12 +403,13 @@ export async function POST(req: Request) {
           website,
           corporate_number: c.corporate_number || null,
           hq_address: c.address || null,
+          source_site: source || "google",
           reject_reasons: ["prospectsへの保存に失敗（未知の要因）"],
         });
       }
     }
 
-    // 不適合を反映
+    // 不適合を反映（source_site を含めて保存）
     for (const r of rejected) {
       await insertRejected(sb, { ...r, tenant_id: tenantId });
     }

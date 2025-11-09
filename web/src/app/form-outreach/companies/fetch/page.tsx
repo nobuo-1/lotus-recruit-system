@@ -35,8 +35,7 @@ type AddedRow = {
   industry?: string | null;
   company_size?: string | null;
   prefectures?: string[] | null;
-  job_site_source?: string | null;
-  source_site?: string | null;
+  job_site_source?: string | null; // ← 取得元はここに統一
   corporate_number?: string | null;
   hq_address?: string | null;
   capital?: number | null;
@@ -59,6 +58,8 @@ type RejectedRow = {
   hq_address?: string | null;
   capital?: number | null;
   established_on?: string | null;
+  // rejected は DB に source_site カラムあり
+  source_site?: string | null;
   reject_reasons: string[];
   created_at?: string | null;
 };
@@ -103,7 +104,7 @@ type CrawlDebug = {
 };
 
 /** ===== Flow Titles ===== */
-// A: 1〜5
+// Phase A は 1〜5 まで（反復はここから除外）
 const FLOW_A_TITLES = [
   "1. 条件読み込み/表示",
   "2. 国税庁をクロール",
@@ -111,21 +112,19 @@ const FLOW_A_TITLES = [
   "4. 詳細補完（名称/住所）",
   "5. キャッシュ保存",
 ];
-// B: 6〜8
+// Phase B に 6〜9 を配置し、最後に「取得件数到達まで反復」を表記
 const FLOW_B_TITLES = [
   "6. 新規キャッシュ分のHP推定",
   "7. 到達性チェック/会社概要抽出",
   "8. form_prospects保存/反映 + 不適合保存",
+  "9. 取得件数到達まで反復",
 ];
-// Tail: 9
-const FLOW_TAIL_TITLES = ["9. 取得件数到達まで反復"];
 
 export default function ManualFetch() {
   /** ===== State ===== */
   const [tenantId, setTenantId] = useState<string | null>(null);
   const [msg, setMsg] = useState<string>("");
-  const totalSteps =
-    FLOW_A_TITLES.length + FLOW_B_TITLES.length + FLOW_TAIL_TITLES.length;
+  const totalSteps = FLOW_A_TITLES.length + FLOW_B_TITLES.length;
   const [s, setS] = useState<StepState[]>(Array(totalSteps).fill("idle"));
   const [activeIdx, setActiveIdx] = useState<number>(-1);
 
@@ -133,19 +132,9 @@ export default function ManualFetch() {
   const [rejected, setRejected] = useState<RejectedRow[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
 
-  // === 表示件数制御（10件は常時、Moreで追加読み込み） ===
-  const MORE_STEP = 20;
-  const [addedLimit, setAddedLimit] = useState<number>(10);
-  const [rejectedLimit, setRejectedLimit] = useState<number>(10);
-
-  const displayedAdded = useMemo(
-    () => added.slice(0, Math.max(10, addedLimit)),
-    [added, addedLimit]
-  );
-  const displayedRejected = useMemo(
-    () => rejected.slice(0, Math.max(10, rejectedLimit)),
-    [rejected, rejectedLimit]
-  );
+  // 「more」制御：常時10件、Moreで増やす
+  const [visibleAdded, setVisibleAdded] = useState<number>(10);
+  const [visibleRejected, setVisibleRejected] = useState<number>(10);
 
   const [filters, setFilters] = useState<Filters>({
     prefectures: [],
@@ -260,12 +249,12 @@ export default function ManualFetch() {
             const rows = Array.isArray(obj.rows)
               ? (obj.rows as AddedRow[])
               : [];
-            setAdded(
-              rows.filter((r: AddedRow) => {
-                const t = r?.created_at ? Date.parse(r.created_at) : ts;
-                return Number.isFinite(t) && now - t <= TWELVE_H_MS;
-              })
-            );
+            const filtered = rows.filter((r) => {
+              const t = r?.created_at ? Date.parse(r.created_at) : ts;
+              return Number.isFinite(t) && now - t <= TWELVE_H_MS;
+            });
+            setAdded(filtered);
+            setVisibleAdded(10);
           } else {
             localStorage.removeItem(LS_KEY);
           }
@@ -281,12 +270,12 @@ export default function ManualFetch() {
             const rows: RejectedRow[] = Array.isArray(obj.rows)
               ? (obj.rows as RejectedRow[])
               : [];
-            setRejected(
-              rows.filter((r: RejectedRow) => {
-                const t = r?.created_at ? Date.parse(r.created_at!) : ts;
-                return Number.isFinite(t) && now - t <= TWELVE_H_MS;
-              })
-            );
+            const filtered = rows.filter((r) => {
+              const t = r?.created_at ? Date.parse(r.created_at!) : ts;
+              return Number.isFinite(t) && now - t <= TWELVE_H_MS;
+            });
+            setRejected(filtered);
+            setVisibleRejected(10);
           } else {
             localStorage.removeItem(LS_REJECT_KEY);
           }
@@ -326,7 +315,7 @@ export default function ManualFetch() {
     await runLoop(fetchTotal);
   };
 
-  /** 実行ループ（取得件数ベースで A→B→Tail を反復） */
+  /** 実行ループ（取得件数ベースで A/B を反復） */
   const runLoop = async (total: number) => {
     if (!tenantId) return;
     setMsg("");
@@ -348,8 +337,8 @@ export default function ManualFetch() {
       setS((a) => a.map((v, i) => (i === 0 ? "done" : v)));
       setActiveIdx(-1);
 
-      // ---- 取得件数で制御：Phase A → Phase B → Tail を反復 ----
-      let obtained = 0;
+      // ---- 取得件数で制御：Phase A と B を反復 ----
+      let obtained = 0; // form_prospects に今回追加できた数
       let attempts = 0;
       const MAX_ATTEMPTS = Math.ceil(total / 5) + 30;
       const BATCH = Math.min(
@@ -364,8 +353,8 @@ export default function ManualFetch() {
         const want = Math.min(BATCH, Math.max(1, total - obtained));
         const seed = `${Date.now()}-${attempts}`;
 
-        // ===== Phase A (index: 1..4) =====
-        setActiveIdx(1); // 2.クロール
+        // A-2 ～ A-5（クロール＆キャッシュ）
+        setActiveIdx(1);
         setS((a) => a.map((v, i) => (i === 1 ? "running" : v)));
         await nextFrame();
 
@@ -387,12 +376,14 @@ export default function ManualFetch() {
         const toInsert = Number(j?.to_insert_count || 0);
         const usingSrv = !!j?.using_service_role;
 
+        // 追加：接続先 & プローブ
         const projectRef: string | null =
           j?.project_ref != null ? String(j.project_ref) : null;
         const dbUrlHost: string | null =
           j?.db_url_host != null ? String(j.db_url_host) : null;
         const probeFound: number = Number(j?.db_probe_found ?? 0);
 
+        // debug state
         setCrawlDebug({
           step: j?.step,
           new_cache: newCache,
@@ -412,28 +403,28 @@ export default function ManualFetch() {
         setS((a) =>
           a.map((v, idx) => (idx === 1 ? (a2 > 0 ? "done" : "error") : v))
         );
-        setActiveIdx(2); // 3.ランダム抽出
+        setActiveIdx(2);
         setS((a) =>
           a.map((v, idx) => (idx === 2 ? (a3 > 0 ? "done" : "error") : v))
         );
-        setActiveIdx(3); // 4.詳細補完
+        setActiveIdx(3);
         setS((a) => a.map((v, idx) => (idx === 3 ? "done" : v)));
-        setActiveIdx(4); // 5.キャッシュ保存
+        setActiveIdx(4);
         setS((a) => a.map((v, idx) => (idx === 4 ? "done" : v)));
-        setActiveIdx(-1);
 
         if (!rCrawl.ok)
           throw new Error(j?.error || `crawl failed (${rCrawl.status})`);
 
-        // ===== Phase B (index: 5..7) =====
-        setActiveIdx(5); // 6.HP推定
+        // ---- Phase B ----
+        // 6. HP推定（表示のみ）
+        setActiveIdx(5);
         setS((a) => a.map((v, idx) => (idx === 5 ? "running" : v)));
         await delay(80);
         setS((a) => a.map((v, idx) => (idx === 5 ? "done" : v)));
 
-        setActiveIdx(6); // 7.到達性/抽出
+        // 7. 抽出
+        setActiveIdx(6);
         setS((a) => a.map((v, idx) => (idx === 6 ? "running" : v)));
-
         const enrichRes = await fetch("/api/form-outreach/companies/enrich", {
           method: "POST",
           headers: {
@@ -450,15 +441,18 @@ export default function ManualFetch() {
         const ej = await safeJson(enrichRes);
         setS((a) => a.map((v, idx) => (idx === 6 ? "done" : v)));
 
-        setActiveIdx(7); // 8.保存/反映 + 不適合
-        setS((a) => a.map((v, idx) => (idx === 7 ? "running" : v)));
+        // 8. 保存/反映 + 不適合保存
+        const idxSave = FLOW_A_TITLES.length + 2; // (= 7 の次のインデックス)
+        setActiveIdx(idxSave);
+        setS((a) => a.map((v, idx) => (idx === idxSave ? "running" : v)));
         await delay(60);
 
         if (!enrichRes.ok) {
-          setS((a) => a.map((v, idx) => (idx === 7 ? "error" : v)));
+          setS((a) => a.map((v, idx) => (idx === idxSave ? "error" : v)));
           throw new Error(ej?.error || `enrich failed (${enrichRes.status})`);
         }
 
+        // 直近12時間のみ反映
         const now = Date.now();
 
         const rowsRaw: AddedRow[] = Array.isArray(ej?.rows)
@@ -479,7 +473,8 @@ export default function ManualFetch() {
               LS_KEY,
               JSON.stringify({ ts: new Date().toISOString(), rows: merged })
             );
-            setAddedLimit((lim) => Math.max(10, lim));
+            // 初期は10件再表示
+            setVisibleAdded((v) => Math.max(10, v));
             return merged;
           });
         }
@@ -503,27 +498,23 @@ export default function ManualFetch() {
               LS_REJECT_KEY,
               JSON.stringify({ ts: new Date().toISOString(), rows: next })
             );
-            setRejectedLimit((lim) => Math.max(10, lim));
+            // 初期は10件再表示
+            setVisibleRejected((v) => Math.max(10, v));
             return next;
           });
         }
 
         const insertedNow = Number.isFinite(ej?.inserted as number)
           ? Number(ej?.inserted as number)
-          : rows.length;
+          : rows.length; // inserted が無い場合は rows.length を採用
         obtained += Math.max(0, insertedNow);
 
-        setS((a) => a.map((v, idx) => (idx === 7 ? "done" : v)));
-        setActiveIdx(-1);
+        setS((a) => a.map((v, idx) => (idx === idxSave ? "done" : v)));
 
-        // ===== Tail (index: 8) ・・・Phase B の後に「反復」表示 =====
-        const tailIdx = FLOW_A_TITLES.length + FLOW_B_TITLES.length; // = 8
-        setActiveIdx(tailIdx);
-        setS((a) => a.map((v, idx) => (idx === tailIdx ? "running" : v)));
-        await delay(40);
-        setS((a) => a.map((v, idx) => (idx === tailIdx ? "done" : v)));
-        setActiveIdx(-1);
-
+        // 9. 取得件数到達まで反復（進行表示だけ担う）
+        const idxLoop = FLOW_A_TITLES.length + FLOW_B_TITLES.length - 1; // 最後のノード
+        setActiveIdx(idxLoop);
+        setS((a) => a.map((v, idx) => (idx === idxLoop ? "running" : v)));
         setMsg(
           [
             `取得進行（prospects）：${obtained}/${total} 件  (+${insertedNow})`,
@@ -536,6 +527,9 @@ export default function ManualFetch() {
             }, db_probe_found=${probeFound}`,
           ].join("\n")
         );
+        await delay(40);
+        setS((a) => a.map((v, idx) => (idx === idxLoop ? "done" : v)));
+        setActiveIdx(-1);
 
         if (insertedNow === 0 && newCache === 0) await delay(300);
       }
@@ -571,8 +565,8 @@ export default function ManualFetch() {
       if (!r.ok) throw new Error(j?.error || "cancel failed");
       setMsg(`取消しました：削除 ${j.deleted ?? 0} 件`);
       setAdded([]);
-      setAddedLimit(10);
       localStorage.removeItem(LS_KEY);
+      setVisibleAdded(10);
     } catch (e: any) {
       setMsg(String(e?.message || e));
     }
@@ -599,7 +593,7 @@ export default function ManualFetch() {
             LS_KEY,
             JSON.stringify({ ts: new Date().toISOString(), rows: next })
           );
-          setAddedLimit((lim) => Math.max(10, lim));
+          setVisibleAdded((v) => Math.max(10, v));
           return next;
         });
       }
@@ -609,7 +603,7 @@ export default function ManualFetch() {
           LS_REJECT_KEY,
           JSON.stringify({ ts: new Date().toISOString(), rows: next })
         );
-        setRejectedLimit((lim) => Math.max(10, lim));
+        setVisibleRejected((v) => Math.max(10, v));
         return next;
       });
       setMsg("不適合から採用に追加しました。");
@@ -625,7 +619,7 @@ export default function ManualFetch() {
         LS_REJECT_KEY,
         JSON.stringify({ ts: new Date().toISOString(), rows: next })
       );
-      setRejectedLimit((lim) => Math.max(10, lim));
+      setVisibleRejected((v) => Math.max(10, v));
       return next;
     });
   };
@@ -750,28 +744,12 @@ export default function ManualFetch() {
         {/* Phase B */}
         <section className="rounded-2xl border border-neutral-200 p-4 mb-4">
           <div className="mb-3 text-sm font-medium text-neutral-800">
-            Phase B: HP解決 → 会社概要抽出 → form_prospects保存 + 不適合保存
+            Phase B: HP解決 → 会社概要抽出 → form_prospects保存 + 不適合保存 →
+            取得件数到達まで反復
           </div>
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-4">
             {FLOW_B_TITLES.map((title, bIdx) => {
               const idx = FLOW_A_TITLES.length + bIdx;
-              return (
-                <FlowNode
-                  key={title}
-                  title={title}
-                  state={s[idx]}
-                  active={activeIdx === idx}
-                />
-              );
-            })}
-          </div>
-        </section>
-
-        {/* Tail (Phase B の後) */}
-        <section className="rounded-2xl border border-neutral-200 p-4 mb-4">
-          <div className="grid grid-cols-1 md:grid-cols-1 gap-3">
-            {FLOW_TAIL_TITLES.map((title, tIdx) => {
-              const idx = FLOW_A_TITLES.length + FLOW_B_TITLES.length + tIdx;
               return (
                 <FlowNode
                   key={title}
@@ -1010,7 +988,7 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-200">
-                {displayedAdded.map((c: AddedRow) => (
+                {added.slice(0, visibleAdded).map((c: AddedRow) => (
                   <tr key={c.id}>
                     <td className="px-3 py-2">{c.company_name || "-"}</td>
                     <td className="px-3 py-2">
@@ -1056,9 +1034,7 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                     <td className="px-3 py-2 break-all">
                       {c.hq_address || "-"}
                     </td>
-                    <td className="px-3 py-2">
-                      {c.job_site_source || c.source_site || "-"}
-                    </td>
+                    <td className="px-3 py-2">{c.job_site_source || "-"}</td>
                     <td className="px-3 py-2">
                       {c.created_at
                         ? c.created_at.replace("T", " ").replace("Z", "")
@@ -1078,23 +1054,17 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                 )}
               </tbody>
             </table>
+            {added.length > visibleAdded && (
+              <div className="p-3 text-center">
+                <button
+                  className="rounded border border-neutral-300 px-3 py-1 text-sm hover:bg-neutral-50"
+                  onClick={() => setVisibleAdded((v) => v + 20)}
+                >
+                  more（さらに表示）
+                </button>
+              </div>
+            )}
           </div>
-
-          {/* More ボタン */}
-          {added.length > displayedAdded.length && (
-            <div className="flex justify-center py-3 border-t border-neutral-200">
-              <button
-                onClick={() =>
-                  setAddedLimit((n) =>
-                    Math.min(added.length, Math.max(10, n + MORE_STEP))
-                  )
-                }
-                className="rounded-lg border border-neutral-300 px-4 py-1.5 text-sm hover:bg-neutral-50"
-              >
-                More（{displayedAdded.length} / {added.length}）
-              </button>
-            </div>
-          )}
         </section>
 
         {/* 不適合一覧（form_prospects_rejected 反映） */}
@@ -1139,88 +1109,90 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-200">
-                {displayedRejected.map((r: RejectedRow, idx: number) => (
-                  <tr key={idx}>
-                    <td className="px-3 py-2">{r.company_name}</td>
-                    <td className="px-3 py-2">
-                      {r.website ? (
-                        <a
-                          href={r.website}
-                          target="_blank"
-                          className="text-indigo-700 hover:underline break-all"
-                        >
-                          {r.website}
-                        </a>
-                      ) : (
-                        "-"
-                      )}
-                    </td>
-                    <td className="px-3 py-2">
-                      {Array.isArray(r.prefectures) && r.prefectures?.length
-                        ? r.prefectures.join(" / ")
-                        : "-"}
-                    </td>
-                    <td className="px-3 py-2">
-                      {r.capital != null ? formatJPY(r.capital) : "-"}
-                    </td>
-                    <td className="px-3 py-2">{r.established_on || "-"}</td>
-                    <td className="px-3 py-2">{r.corporate_number || "-"}</td>
-                    <td className="px-3 py-2 break-all">
-                      {r.hq_address || "-"}
-                    </td>
-                    <td className="px-3 py-2">{r.contact_email || "-"}</td>
-                    <td className="px-3 py-2">{r.phone || "-"}</td>
-                    <td className="px-3 py-2">
-                      {r.contact_form_url ? (
-                        <a
-                          href={r.contact_form_url}
-                          target="_blank"
-                          className="text-indigo-700 hover:underline"
-                        >
-                          あり
-                        </a>
-                      ) : (
-                        "なし"
-                      )}
-                    </td>
-                    <td className="px-3 py-2">
-                      {r.company_size_extracted || r.company_size || "-"}
-                    </td>
-                    <td className="px-3 py-2">
-                      {[r.industry_large, r.industry_small]
-                        .filter(Boolean)
-                        .join(" / ") || "-"}
-                    </td>
-                    <td className="px-3 py-2">
-                      <ul className="list-disc list-inside space-y-0.5">
-                        {Array.from(new Set(r.reject_reasons || [])).map(
-                          (rr: string, i: number) => (
-                            <li key={i} className="text-xs text-neutral-700">
-                              {rr}
-                            </li>
-                          )
+                {rejected
+                  .slice(0, visibleRejected)
+                  .map((r: RejectedRow, idx: number) => (
+                    <tr key={`${r.corporate_number ?? ""}-${idx}`}>
+                      <td className="px-3 py-2">{r.company_name}</td>
+                      <td className="px-3 py-2">
+                        {r.website ? (
+                          <a
+                            href={r.website}
+                            target="_blank"
+                            className="text-indigo-700 hover:underline break-all"
+                          >
+                            {r.website}
+                          </a>
+                        ) : (
+                          "-"
                         )}
-                      </ul>
-                    </td>
-                    <td className="px-3 py-2">
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => addFromRejected(r)}
-                          className="rounded border border-neutral-300 px-2 py-1 text-xs hover:bg-neutral-50"
-                        >
-                          採用に追加
-                        </button>
-                        <button
-                          onClick={() => hideRejected(r)}
-                          className="rounded border border-neutral-300 px-2 py-1 text-xs hover:bg-neutral-50"
-                          title="この行を非表示にします"
-                        >
-                          非表示
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                      </td>
+                      <td className="px-3 py-2">
+                        {Array.isArray(r.prefectures) && r.prefectures?.length
+                          ? r.prefectures.join(" / ")
+                          : "-"}
+                      </td>
+                      <td className="px-3 py-2">
+                        {r.capital != null ? formatJPY(Number(r.capital)) : "-"}
+                      </td>
+                      <td className="px-3 py-2">{r.established_on || "-"}</td>
+                      <td className="px-3 py-2">{r.corporate_number || "-"}</td>
+                      <td className="px-3 py-2 break-all">
+                        {r.hq_address || "-"}
+                      </td>
+                      <td className="px-3 py-2">{r.contact_email || "-"}</td>
+                      <td className="px-3 py-2">{r.phone || "-"}</td>
+                      <td className="px-3 py-2">
+                        {r.contact_form_url ? (
+                          <a
+                            href={r.contact_form_url}
+                            target="_blank"
+                            className="text-indigo-700 hover:underline"
+                          >
+                            あり
+                          </a>
+                        ) : (
+                          "なし"
+                        )}
+                      </td>
+                      <td className="px-3 py-2">
+                        {r.company_size_extracted || r.company_size || "-"}
+                      </td>
+                      <td className="px-3 py-2">
+                        {[r.industry_large, r.industry_small]
+                          .filter(Boolean)
+                          .join(" / ") || "-"}
+                      </td>
+                      <td className="px-3 py-2">
+                        <ul className="list-disc list-inside space-y-0.5">
+                          {Array.from(new Set(r.reject_reasons || [])).map(
+                            (rr: string, i: number) => (
+                              <li key={i} className="text-xs text-neutral-700">
+                                {rr}
+                              </li>
+                            )
+                          )}
+                        </ul>
+                      </td>
+                      <td className="px-3 py-2">
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => addFromRejected(r)}
+                            className="rounded border border-neutral-300 px-2 py-1 text-xs hover:bg-neutral-50"
+                          >
+                            採用に追加
+                          </button>
+                          <button
+                            onClick={() => hideRejected(r)}
+                            className="rounded border border-neutral-300 px-2 py-1 text-xs hover:bg-neutral-50"
+                            title="この行を非表示にします"
+                          >
+                            非表示
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
                 {rejected.length === 0 && (
                   <tr>
                     <td
@@ -1233,23 +1205,17 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                 )}
               </tbody>
             </table>
+            {rejected.length > visibleRejected && (
+              <div className="p-3 text-center">
+                <button
+                  className="rounded border border-neutral-300 px-3 py-1 text-sm hover:bg-neutral-50"
+                  onClick={() => setVisibleRejected((v) => v + 20)}
+                >
+                  more（さらに表示）
+                </button>
+              </div>
+            )}
           </div>
-
-          {/* More ボタン */}
-          {rejected.length > displayedRejected.length && (
-            <div className="flex justify-center py-3 border-t border-neutral-200">
-              <button
-                onClick={() =>
-                  setRejectedLimit((n) =>
-                    Math.min(rejected.length, Math.max(10, n + MORE_STEP))
-                  )
-                }
-                className="rounded-lg border border-neutral-300 px-4 py-1.5 text-sm hover:bg-neutral-50"
-              >
-                More（{displayedRejected.length} / {rejected.length}）
-              </button>
-            </div>
-          )}
         </section>
 
         {msg && (
