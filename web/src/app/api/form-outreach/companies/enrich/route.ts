@@ -342,14 +342,53 @@ function isValidJPPhone(s: string): boolean {
   return true;
 }
 
-function parseYenNumber(s: string) {
+/** ====== 追加: 資本金（円）を万/千/億表記から正規化 ====== */
+function parseCapitalYen(s: string): number | null {
   try {
-    const m = s.replace(/[,，]/g, "").match(/\d{2,}/);
-    if (!m) return null;
-    return Number(m[0]);
+    const z = zen2han((s || "").replace(/[,，]/g, ""));
+    let found = false;
+    let yen = 0;
+
+    const mOk = z.match(/(\d+(?:\.\d+)?)\s*億/);
+    if (mOk) {
+      yen += Math.round(parseFloat(mOk[1]) * 1e8);
+      found = true;
+    }
+    const mMan = z.match(/(\d+(?:\.\d+)?)\s*万(?!円?未満)/);
+    if (mMan) {
+      yen += Math.round(parseFloat(mMan[1]) * 1e4);
+      found = true;
+    }
+    const mSen = z.match(/(\d+(?:\.\d+)?)\s*千(?!円?未満)/);
+    if (mSen) {
+      yen += Math.round(parseFloat(mSen[1]) * 1e3);
+      found = true;
+    }
+
+    // 末尾が「円」か単純数値だけの場合
+    if (!found) {
+      const m = z.match(/(\d+(?:\.\d+)?)(?=\s*円|$)/);
+      if (m) {
+        yen = Math.round(parseFloat(m[1]));
+        found = true;
+      }
+    }
+    return found ? yen : null;
   } catch {
     return null;
   }
+}
+
+/** ====== 追加: 従業員数を名/人優先で抽出 ====== */
+function parseHeadcount(s: string): string | null {
+  const z = zen2han((s || "").replace(/[,，]/g, ""));
+  const withUnit =
+    z.match(/(\d{1,6})\s*(?:名|人)(?:[^0-9]|$)/) ||
+    z.match(/約\s*(\d{1,6})\s*(?:名|人)/);
+  if (withUnit) return `${withUnit[1]}名`;
+  const plain = z.match(/(?:従業員|社員|職員)[^0-9]{0,8}(\d{1,6})/);
+  if (plain) return `${plain[1]}名`;
+  return null;
 }
 
 function parseDate(s: string): string | null {
@@ -425,9 +464,7 @@ function extractPrefecture(addr?: string | null): string[] | null {
   return hit ? [hit] : null;
 }
 
-/** ========= 会社概要リンク検出（拡張） =========
- * 会社概要/会社情報/会社紹介/会社案内/沿革/ABOUT/ABOUT US/corporate/profile/company〜
- */
+/** ========= 会社概要リンク検出（拡張） ========= */
 const ABOUT_RX =
   /(会社概要|企業情報|会社情報|会社紹介|会社案内|沿革|about\s*us|about|corporate|profile|company(?!\.))/i;
 
@@ -448,7 +485,7 @@ function extractTableLikeInfo(html: string): {
   const res: any = {};
   const capLabels = [/資本金/, /capital/i];
   const estLabels = [/設立/, /創業/];
-  const sizeLabels = [/従業員|社員数/];
+  const sizeLabels = [/従業員|社員数|職員/];
   const phoneLabels = [/電話|TEL|Tel|tel/];
   const addrLabels = [/所在地|住所/];
 
@@ -457,21 +494,20 @@ function extractTableLikeInfo(html: string): {
   for (const tr of trs) {
     const cells = tr.match(/<(th|td)[^>]*>([\s\S]*?)<\/\1>/gi) || [];
     if (cells.length < 2) continue;
-    // ★ 最小修正：ガード後の非 null 断言で string に収束
     const label = stripTags(cells[0]!);
     const value = stripTags(cells[1]!);
 
     if (!res.capital && capLabels.some((rx) => rx.test(label))) {
-      const m = value.match(/[0-9,，]+/);
-      if (m) res.capital = parseYenNumber(m[0]);
+      const v = parseCapitalYen(value);
+      if (v != null) res.capital = v;
     }
     if (!res.established_on && estLabels.some((rx) => rx.test(label))) {
       const p = parseDate(zen2han(value));
       if (p) res.established_on = p;
     }
     if (!res.company_size && sizeLabels.some((rx) => rx.test(label))) {
-      const m = value.match(/[0-9,，]+/);
-      if (m) res.company_size = `${m[0].replace(/[,，]/g, "")}名`;
+      const sz = parseHeadcount(value);
+      if (sz) res.company_size = sz;
     }
     if (!res.phone && phoneLabels.some((rx) => rx.test(label))) {
       const cand = (value.match(PHONE_CANDIDATE_RE) || []).find(isValidJPPhone);
@@ -490,16 +526,16 @@ function extractTableLikeInfo(html: string): {
     if (!label || !value) continue;
 
     if (!res.capital && capLabels.some((rx) => rx.test(label))) {
-      const m = value.match(/[0-9,，]+/);
-      if (m) res.capital = parseYenNumber(m[0]);
+      const v = parseCapitalYen(value);
+      if (v != null) res.capital = v;
     }
     if (!res.established_on && estLabels.some((rx) => rx.test(label))) {
       const p = parseDate(zen2han(value));
       if (p) res.established_on = p;
     }
     if (!res.company_size && sizeLabels.some((rx) => rx.test(label))) {
-      const m = value.match(/[0-9,，]+/);
-      if (m) res.company_size = `${m[0].replace(/[,，]/g, "")}名`;
+      const sz = parseHeadcount(value);
+      if (sz) res.company_size = sz;
     }
     if (!res.phone && phoneLabels.some((rx) => rx.test(label))) {
       const cand = (value.match(PHONE_CANDIDATE_RE) || []).find(isValidJPPhone);
@@ -604,32 +640,48 @@ async function profileScrape(baseUrl: string): Promise<{
     if (info.hq_address && !res.hq_address) res.hq_address = info.hq_address;
   }
 
-  // 追加でテキスト正規表現（既存ロジック）
+  // 追加でテキスト正規表現（資本金/従業員数の拾い強化）
   const infoPool = [res.htmlAbout, res.htmlTop].filter(Boolean).join("\n");
   if (infoPool) {
-    const capBlock =
-      infoPool.match(/資本金[^0-9]{0,20}([0-9,，]+)万?円/) ||
-      infoPool.match(/capital[^0-9]{0,10}([0-9,，]+)/i);
-    if (capBlock?.[1] && res.capital == null)
-      res.capital = parseYenNumber(capBlock[1]);
+    // 資本金：出現位置から近傍を切り出して解釈（億/万/千対応）
+    if (res.capital == null) {
+      const idx = infoPool.search(/資本金/);
+      if (idx >= 0) {
+        const snip = infoPool.slice(idx, idx + 100);
+        const val = parseCapitalYen(snip);
+        if (val != null) res.capital = val;
+      }
+    }
 
-    const estBlock =
-      infoPool.match(/設立[^0-9]{0,10}([0-9０-９年\/\-月日\s]+)/) ||
-      infoPool.match(/創業[^0-9]{0,10}([0-9０-９年\/\-月日\s]+)/);
-    if (estBlock?.[1] && !res.established_on)
-      res.established_on = parseDate(zen2han(estBlock[1]));
+    // 設立
+    if (!res.established_on) {
+      const estBlock =
+        infoPool.match(/設立[^0-9]{0,10}([0-9０-９年\/\-月日\s]+)/) ||
+        infoPool.match(/創業[^0-9]{0,10}([0-9０-９年\/\-月日\s]+)/);
+      if (estBlock?.[1]) res.established_on = parseDate(zen2han(estBlock[1]));
+    }
 
-    const addrBlock =
-      infoPool.match(/所在地[^<]{0,80}(〒?\s?\d{3}-\d{4}[^<\n]{3,120})/) ||
-      infoPool.match(/住所[^<]{0,80}(〒?\s?\d{3}-\d{4}[^<\n]{3,120})/);
-    if (addrBlock?.[1] && !res.hq_address)
-      res.hq_address = addrBlock[1].replace(/<[^>]+>/g, "").trim();
+    // 住所候補（参考抽出・保存時は NTA を採用）
+    if (!res.hq_address) {
+      const addrBlock =
+        infoPool.match(/所在地[^<]{0,80}(〒?\s?\d{3}-\d{4}[^<\n]{3,120})/) ||
+        infoPool.match(/住所[^<]{0,80}(〒?\s?\d{3}-\d{4}[^<\n]{3,120})/);
+      if (addrBlock?.[1])
+        res.hq_address = addrBlock[1].replace(/<[^>]+>/g, "").trim();
+    }
 
-    const sizeBlock =
-      infoPool.match(/従業員[^0-9]{0,10}([0-9,，]+)名/) ||
-      infoPool.match(/社員数[^0-9]{0,10}([0-9,，]+)名/);
-    if (sizeBlock?.[1] && !res.company_size)
-      res.company_size = `${sizeBlock[1].replace(/[,，]/g, "")}名`;
+    // 従業員数（名/人対応）
+    if (!res.company_size) {
+      const k1 = infoPool.search(/従業員/);
+      const k2 = infoPool.search(/社員数/);
+      const k3 = infoPool.search(/職員/);
+      const i = [k1, k2, k3].filter((x) => x >= 0).sort((a, b) => a - b)[0];
+      if (Number.isFinite(i)) {
+        const snip = infoPool.slice(i!, i! + 80);
+        const sz = parseHeadcount(snip);
+        if (sz) res.company_size = sz;
+      }
+    }
   }
 
   return res;
@@ -1124,9 +1176,7 @@ export async function POST(req: Request) {
       }
 
       // 5) 都道府県・業種
-      const pref =
-        extractPrefecture(prof.hq_address || c.address) ||
-        extractPrefecture(c.address);
+      const pref = extractPrefecture(c.address); // ← 本店所在地は NTA のまま
       let industryValue: string | null = null;
       if (tryLLM) {
         const cls = await classifyIndustryWithLLM({
@@ -1137,7 +1187,7 @@ export async function POST(req: Request) {
         industryValue = `${cls.large} / ${cls.small}`;
       }
 
-      // 6) UPSERT（ユニーク整合に耐性）
+      // 6) UPSERT（ユニーク整合に耐性）※ 本店所在地は NTA の住所を採用
       try {
         const { saved } = await upsertProspectSafe(sb, {
           tenant_id: tenantId,
@@ -1145,7 +1195,7 @@ export async function POST(req: Request) {
           website,
           job_site_source: (source || "google") as "google" | "map",
           corporate_number: (c.corporate_number || "").trim() || null,
-          hq_address: prof.hq_address || c.address || null,
+          hq_address: c.address || null, // ← 固定：NTA
           contact_email,
           contact_form_url: prof.contact_form_url || null,
           phone: prof.phone || null,

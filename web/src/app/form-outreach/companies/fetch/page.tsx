@@ -227,6 +227,43 @@ export default function ManualFetch() {
 
   const anyRunning = loading;
 
+  /** ===== Filters summary（修正3） ===== */
+  const filterSummary = useMemo(() => {
+    const parts: string[] = [];
+    if (filters.prefectures?.length)
+      parts.push(`都道府県: ${filters.prefectures.join(" / ")}`);
+    if (filters.industries_large?.length)
+      parts.push(`業種(大): ${filters.industries_large.join(" / ")}`);
+    if (filters.industries_small?.length)
+      parts.push(`業種(小): ${filters.industries_small.join(" / ")}`);
+    if (filters.employee_size_ranges?.length)
+      parts.push(`従業員: ${filters.employee_size_ranges.join(" / ")}`);
+    if (filters.keywords?.length)
+      parts.push(`キーワード: ${filters.keywords.join(" / ")}`);
+    if (
+      typeof filters.capital_min === "number" ||
+      typeof filters.capital_max === "number"
+    ) {
+      const lo =
+        typeof filters.capital_min === "number"
+          ? formatJPY(filters.capital_min!)
+          : "指定なし";
+      const hi =
+        typeof filters.capital_max === "number"
+          ? formatJPY(filters.capital_max!)
+          : "指定なし";
+      parts.push(`資本金: ${lo} 〜 ${hi}`);
+    }
+    if (filters.established_from || filters.established_to) {
+      parts.push(
+        `設立: ${filters.established_from || "指定なし"} 〜 ${
+          filters.established_to || "指定なし"
+        }`
+      );
+    }
+    return parts.join("　/　");
+  }, [filters]);
+
   /** ===== Actions ===== */
   const handleRunButton = () => {
     if (anyRunning) {
@@ -388,9 +425,16 @@ export default function ManualFetch() {
         setS((a) => a.map((v, idx) => (idx === 7 ? "done" : v)));
       }
 
-      setMsg(
-        `完了：新規追加が目標件数に達しました（${rtProspectCount}/${targetNew} 件）`
-      );
+      // 修正2: 終了メッセージはローカル変数で確定表示（未達考慮）
+      if (recentProspectsCount >= targetNew) {
+        setMsg(
+          `完了：新規追加が目標件数に達しました（${recentProspectsCount}/${targetNew} 件）`
+        );
+      } else {
+        setMsg(
+          `終了：新規追加は ${recentProspectsCount}/${targetNew} 件（未達）`
+        );
+      }
     } catch (e: any) {
       setActiveIdx(-1);
       setS((arr) => arr.map((v) => (v === "running" ? "error" : v)));
@@ -448,6 +492,13 @@ export default function ManualFetch() {
             >
               企業一覧へ
             </Link>
+            {/* 修正3: メッセージ手動送信ページへの遷移ボタンを追加 */}
+            <Link
+              href="/form-outreach/runs/manual"
+              className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
+            >
+              メッセージ手動送信へ
+            </Link>
             <button
               onClick={handleRunButton}
               className={`inline-flex items-center gap-2 rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50 ${
@@ -467,6 +518,11 @@ export default function ManualFetch() {
               )}
             </button>
           </div>
+        </div>
+
+        {/* 修正3: フィルタ内容の薄字表示（今回新規追加カードの上あたり） */}
+        <div className="mb-1 text-[12px] text-neutral-500">
+          {filterSummary || "フィルタ：指定なし"}
         </div>
 
         {/* 修正3: リアルタイムカウンタ（上部に常時表示） */}
@@ -553,7 +609,7 @@ export default function ManualFetch() {
           </div>
         </section>
 
-        {/* 今回追加テーブル（form_prospects のみ / 修正3: 業種カラムの位置変更 / 本店所在地折返し18ch〜） */}
+        {/* 今回追加テーブル */}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden">
           <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 bg-neutral-50">
             <div className="text-sm font-medium text-neutral-800">
@@ -582,11 +638,11 @@ export default function ManualFetch() {
                     "フォーム",
                     "規模",
                     "都道府県",
-                    "業種", // ← 修正3: 都道府県の右隣へ移動
+                    "業種",
                     "資本金",
                     "設立",
                     "法人番号",
-                    "本社所在地", // ← 文言を「本店所在地」に（実体はHQ）
+                    "本店所在地", // ← 文言を本店所在地に統一
                     "取得元",
                     "取得日時",
                   ].map((h) => (
@@ -641,7 +697,6 @@ export default function ManualFetch() {
                         ? c.prefectures.join(" / ")
                         : "-"}
                     </td>
-                    {/* ← 都道府県の右隣に業種 */}
                     <td className="px-3 py-2 whitespace-normal break-words min-w-[16ch] max-w-[24ch]">
                       {c.industry || "-"}
                     </td>
@@ -650,7 +705,6 @@ export default function ManualFetch() {
                     </td>
                     <td className="px-3 py-2">{c.established_on || "-"}</td>
                     <td className="px-3 py-2">{c.corporate_number || "-"}</td>
-                    {/* 修正3: 18文字以上で折返し（住所は長いので min-w も確保） */}
                     <td className="px-3 py-2 whitespace-normal break-words min-w-[18ch]">
                       {c.hq_address || "-"}
                     </td>
@@ -677,7 +731,7 @@ export default function ManualFetch() {
           </div>
         </section>
 
-        {/* 不適合一覧（維持 / デバッグセクションは削除：修正3） */}
+        {/* 不適合一覧 */}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden mt-6">
           <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 bg-neutral-50">
             <div className="text-sm font-medium text-neutral-800">
