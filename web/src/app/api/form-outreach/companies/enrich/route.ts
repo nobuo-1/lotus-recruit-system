@@ -42,7 +42,7 @@ type AddedRow = {
   industry?: string | null;
   company_size?: string | null;
   prefectures?: string[] | null;
-  job_site_source?: string | null; // "google" | "map" 等（form_prospects 側の正式カラム）
+  job_site_source?: string | null; // "google" | "map" など
   corporate_number?: string | null;
   hq_address?: string | null;
   capital?: number | null;
@@ -65,7 +65,7 @@ type RejectedRow = {
   hq_address?: string | null;
   capital?: number | null;
   established_on?: string | null;
-  source_site?: string | null; // ← form_prospects_rejected には存在
+  source_site?: string | null; // ← rejected には存在
   reject_reasons: string[];
   created_at?: string | null;
 };
@@ -249,38 +249,100 @@ async function loadRecentCache(
   return (data || []) as CacheRow[];
 }
 
-/** ========= 競合安全なUPSERT（form_prospects） ========= */
-async function upsertProspect(
+/** ========= 競合安全 MERGE（onConflict 非使用） =========
+ *  - corporate_number がある: tenant_id+corporate_number をキーに select → update or insert
+ *  - corporate_number なし: tenant_id+website で緩い重複排除（存在すれば update / なければ insert）
+ */
+async function mergeProspect(
   sb: any,
   row: Omit<AddedRow, "id" | "created_at"> & { created_at?: string | null }
-): Promise<AddedRow> {
+): Promise<{ data: AddedRow; createdNew: boolean }> {
   const now = new Date().toISOString();
-  const payload = { ...row, created_at: row.created_at ?? now };
 
-  // ※ form_prospects に source_site カラムは無いので絶対に含めない
+  const baseUpdate = {
+    tenant_id: row.tenant_id,
+    company_name: row.company_name ?? null,
+    website: row.website ?? null,
+    contact_email: row.contact_email ?? null,
+    contact_form_url: row.contact_form_url ?? null,
+    phone: row.phone ?? null,
+    industry: row.industry ?? null,
+    company_size: row.company_size ?? null,
+    prefectures: row.prefectures ?? null,
+    job_site_source: row.job_site_source ?? null,
+    corporate_number: row.corporate_number ?? null,
+    hq_address: row.hq_address ?? null,
+    capital: row.capital ?? null,
+    established_on: row.established_on ?? null,
+    // 注意: form_prospects に source_site カラムは無い
+  };
 
+  // 1) corporate_number ベース
   if (row.corporate_number) {
-    const { data, error } = await sb
+    const { data: found, error: selErr } = await sb
       .from("form_prospects")
-      .upsert(payload, {
-        onConflict: "tenant_id,corporate_number",
-        defaultToNull: true,
-      })
-      .select("*")
+      .select("id, created_at")
+      .eq("tenant_id", row.tenant_id)
+      .eq("corporate_number", row.corporate_number)
       .limit(1)
       .maybeSingle();
-    if (error) throw new Error(error.message);
-    return data as AddedRow;
+    if (selErr) throw new Error(selErr.message);
+
+    if (found?.id) {
+      const { data, error } = await sb
+        .from("form_prospects")
+        .update(baseUpdate)
+        .eq("id", found.id)
+        .select("*")
+        .maybeSingle();
+      if (error) throw new Error(error.message);
+      return { data: data as AddedRow, createdNew: false };
+    } else {
+      const payload = { ...baseUpdate, created_at: row.created_at ?? now };
+      const { data, error } = await sb
+        .from("form_prospects")
+        .insert(payload)
+        .select("*")
+        .maybeSingle();
+      if (error) throw new Error(error.message);
+      return { data: data as AddedRow, createdNew: true };
+    }
   }
 
-  const { data, error } = await sb
-    .from("form_prospects")
-    .insert(payload, { defaultToNull: true })
-    .select("*")
-    .limit(1)
-    .maybeSingle();
-  if (error) throw new Error(error.message);
-  return data as AddedRow;
+  // 2) corporate_number が無い場合は tenant_id + website で緩く同一判定
+  if (row.website) {
+    const { data: found, error: selErr } = await sb
+      .from("form_prospects")
+      .select("id, created_at")
+      .eq("tenant_id", row.tenant_id)
+      .eq("website", row.website)
+      .limit(1)
+      .maybeSingle();
+    if (selErr) throw new Error(selErr.message);
+
+    if (found?.id) {
+      const { data, error } = await sb
+        .from("form_prospects")
+        .update(baseUpdate)
+        .eq("id", found.id)
+        .select("*")
+        .maybeSingle();
+      if (error) throw new Error(error.message);
+      return { data: data as AddedRow, createdNew: false };
+    }
+  }
+
+  // 3) それ以外は素直に INSERT
+  {
+    const payload = { ...baseUpdate, created_at: row.created_at ?? now };
+    const { data, error } = await sb
+      .from("form_prospects")
+      .insert(payload)
+      .select("*")
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return { data: data as AddedRow, createdNew: true };
+  }
 }
 
 /** ========= rejected へ INSERT ========= */
@@ -371,8 +433,8 @@ export async function POST(req: Request) {
         continue;
       }
 
-      // === prospects へ upsert（重複でも 500 を出さない） ===
-      const saved = await upsertProspect(sb, {
+      // === prospects へ MERGE（onConflict を使わない） ===
+      const { data: saved, createdNew } = await mergeProspect(sb, {
         tenant_id: tenantId,
         company_name: name,
         website,
@@ -382,31 +444,15 @@ export async function POST(req: Request) {
         industry: null,
         company_size: null,
         prefectures: null,
-        job_site_source: source || "google", // ← 取得元はここに保存
+        job_site_source: source || "google",
         corporate_number: c.corporate_number,
         hq_address: c.address,
         capital: null,
         established_on: null,
       });
 
-      if (saved) {
-        rows.push(saved);
-        // 作成時刻ベースで今回新規をカウント（既存更新はカウントしない）
-        const createdAt = saved.created_at ? Date.parse(saved.created_at) : NaN;
-        const sinceAt = Date.parse(since);
-        if (Number.isFinite(createdAt) && createdAt >= sinceAt) {
-          inserted += 1;
-        }
-      } else {
-        rejected.push({
-          company_name: name,
-          website,
-          corporate_number: c.corporate_number || null,
-          hq_address: c.address || null,
-          source_site: source || "google",
-          reject_reasons: ["prospectsへの保存に失敗（未知の要因）"],
-        });
-      }
+      rows.push(saved);
+      if (createdNew) inserted += 1;
     }
 
     // 不適合を反映（source_site を含めて保存）
