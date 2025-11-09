@@ -4,7 +4,7 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
 
 /** ========= ENV ========= */
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
@@ -42,7 +42,7 @@ type AddedRow = {
   industry?: string | null;
   company_size?: string | null;
   prefectures?: string[] | null;
-  job_site_source?: string | null; // "google" | "map" など
+  job_site_source?: string | null; // "google" | "map"
   corporate_number?: string | null;
   hq_address?: string | null;
   capital?: number | null;
@@ -65,7 +65,7 @@ type RejectedRow = {
   hq_address?: string | null;
   capital?: number | null;
   established_on?: string | null;
-  source_site?: string | null; // ← rejected には存在
+  source_site?: string | null; // どの経路で判定したか
   reject_reasons: string[];
   created_at?: string | null;
 };
@@ -98,54 +98,151 @@ async function fetchWithTimeout(
       },
       signal: ctl.signal,
       cache: "no-store",
+      redirect: "follow",
     });
   } finally {
     clearTimeout(id);
   }
 }
 
-function normalizeUrl(u?: string | null): string | null {
-  if (!u) return null;
+const BAD_HOST_PARTS = [
+  // SNS/求人/まとめ
+  "facebook.com",
+  "x.com",
+  "twitter.com",
+  "instagram.com",
+  "linkedin.com",
+  "indeed.com",
+  "jp.indeed.com",
+  "wantedly.com",
+  "en-gage.net",
+  "mynavi",
+  "doda",
+  "townwork",
+  "recruit",
+  "note.com",
+  "wikipedia.org",
+  // 公共/官公庁/ポータル
+  "e-stat.go.jp",
+  "soumu.go.jp",
+  "meti.go.jp",
+  "mlit.go.jp",
+  "houjin-bangou.nta.go.jp",
+  ".lg.jp",
+  // 検索/キャッシュ系
+  "webcache.googleusercontent.com",
+  "translate.googleusercontent.com",
+  "maps.app.goo.gl",
+  "goo.gl/maps",
+  "g.page",
+  "google.com/maps",
+  "maps.google",
+  "google.co.jp/maps",
+];
+
+const FILE_EXT_RE = /\.(pdf|docx?|xlsx?|pptx?|zip|rar|7z|csv|txt)$/i;
+
+function hasBadHost(u: URL) {
+  const h = u.host.toLowerCase();
+  return BAD_HOST_PARTS.some((b) => h.includes(b));
+}
+function isFileLikePath(u: URL) {
+  return FILE_EXT_RE.test(u.pathname);
+}
+function stripWww(host: string) {
+  return host.toLowerCase().startsWith("www.")
+    ? host.slice(4)
+    : host.toLowerCase();
+}
+
+/** URL → 公式トップページ候補へ正規化
+ *  - スキームは https 優先
+ *  - クエリ/ハッシュ除去
+ *  - ファイル拡張子/明らかな詳細ページ（/contact 等）は origin に切り上げ
+ *  - ルートにアクセスしてリダイレクトがあれば最終URLの「上位トップ（/ や /jp/ 等短い言語ルート）」に丸め
+ *  - 一意性のためトレーリングスラッシュ付きで保存（例: https://example.co.jp/）
+ */
+async function canonicalHomepage(input: string): Promise<string | null> {
+  let u: URL;
   try {
-    const url = new URL(/^https?:\/\//i.test(u) ? u : `https://${u}`);
-    url.hash = "";
-    if (!url.pathname) url.pathname = "/";
-    return url.toString();
+    u = new URL(/^https?:\/\//i.test(input) ? input : `https://${input}`);
   } catch {
     return null;
   }
+  // 除外パターン
+  if (!/^https?:$/i.test(u.protocol)) return null;
+  if (hasBadHost(u)) return null;
+  if (isFileLikePath(u)) return null;
+
+  // まずクエリ/ハッシュ削除
+  u.search = "";
+  u.hash = "";
+
+  // 明らかな詳細系は origin に持ち上げ
+  const lowerPath = u.pathname.toLowerCase();
+  const detailLike =
+    lowerPath.includes("/contact") ||
+    lowerPath.includes("/recruit") ||
+    lowerPath.includes("/company/") ||
+    lowerPath.includes("/about/") ||
+    lowerPath.includes("/privacy") ||
+    lowerPath.includes("/saiyo") ||
+    lowerPath.includes("/採用") ||
+    lowerPath.includes("/アクセス") ||
+    lowerPath.includes("/access") ||
+    lowerPath.includes("/wp-json") ||
+    lowerPath.includes("/feed");
+  if (detailLike) u.pathname = "/";
+
+  // www 正規化
+  u.host = stripWww(u.host);
+
+  // ルートへアクセスして最終URLを反映
+  const originRoot = `${u.protocol}//${u.host}/`;
+  try {
+    const r = await fetchWithTimeout(originRoot, { method: "GET" }, 7000);
+    if (r && r.url) {
+      const f = new URL(r.url);
+      // リダイレクト先のホストも www 除去
+      f.host = stripWww(f.host);
+      // 最終パス
+      const finalPath = f.pathname || "/";
+      // 言語トップ等の短いパスは許容、それ以外はルートに丸める
+      const allowShort = /^\/(ja|jp|en|zh|ko|index\.html)?\/?$/i.test(
+        finalPath
+      );
+      const normalized = `${f.protocol}//${f.host}${
+        allowShort
+          ? finalPath.endsWith("/")
+            ? finalPath
+            : finalPath + "/"
+          : "/"
+      }`;
+      const normalizedUrl = new URL(normalized);
+      if (hasBadHost(normalizedUrl) || isFileLikePath(normalizedUrl)) {
+        return `${f.protocol}//${f.host}/`;
+      }
+      return normalized;
+    }
+  } catch {
+    // 失敗しても origin を返す
+  }
+  return originRoot;
 }
 
 function isLikelyOfficial(url: string, company?: string | null): boolean {
-  const badHosts = [
-    "facebook.com",
-    "x.com",
-    "twitter.com",
-    "instagram.com",
-    "linkedin.com",
-    "indeed.com",
-    "jp.indeed.com",
-    "wantedly.com",
-    "en-gage.net",
-    "mynavi",
-    "doda",
-    "townwork",
-    "recruit",
-    "yahoo.co.jp",
-    "wikipedia.org",
-    "note.com",
-  ];
   try {
-    const h = new URL(url).host.toLowerCase();
-    if (badHosts.some((b) => h.includes(b))) return false;
+    const u = new URL(url);
+    if (hasBadHost(u) || isFileLikePath(u)) return false;
+    if (company) {
+      const lc = company.toLowerCase().replace(/\s+/g, "");
+      const host = u.host.toLowerCase().replace(/\W+/g, "");
+      if (host.includes(lc)) return true;
+    }
+    return true;
   } catch {
     return false;
   }
-  if (company) {
-    const lc = company.toLowerCase().replace(/\s+/g, "");
-    if (url.toLowerCase().includes(lc)) return true;
-  }
-  return true;
 }
 
 async function headOk(url: string): Promise<boolean> {
@@ -163,36 +260,38 @@ async function headOk(url: string): Promise<boolean> {
 async function findWebsiteByGoogleCSE(
   company: string,
   address?: string | null
-): Promise<string | null> {
-  if (!GOOGLE_CSE_KEY || !GOOGLE_CSE_CX) return null;
+): Promise<{ url: string | null; source: "google" | null }> {
+  if (!GOOGLE_CSE_KEY || !GOOGLE_CSE_CX) return { url: null, source: null };
   const q = encodeURIComponent(`${company} ${address || ""}`.trim());
   const url = `https://www.googleapis.com/customsearch/v1?key=${GOOGLE_CSE_KEY}&cx=${GOOGLE_CSE_CX}&num=5&q=${q}`;
   try {
     const r = await fetchWithTimeout(url, {}, 8000);
-    if (!r.ok) return null;
+    if (!r.ok) return { url: null, source: null };
     const j = (await r.json()) as any;
     const items: any[] = Array.isArray(j?.items) ? j.items : [];
     for (const it of items) {
-      const link = normalizeUrl(it?.link);
+      const raw = typeof it?.link === "string" ? it.link : null;
+      if (!raw) continue;
+      const link = await canonicalHomepage(raw);
       if (!link) continue;
       if (!isLikelyOfficial(link, company)) continue;
-      if (await headOk(link)) return link;
+      if (await headOk(link)) return { url: link, source: "google" };
     }
   } catch {}
-  return null;
+  return { url: null, source: null };
 }
 
 /** ========= Google Maps ========= */
 async function findWebsiteByGoogleMaps(
   company: string,
   address?: string | null
-): Promise<string | null> {
-  if (!GOOGLE_MAPS_API_KEY) return null;
+): Promise<{ url: string | null; source: "map" | null }> {
+  if (!GOOGLE_MAPS_API_KEY) return { url: null, source: null };
   const query = encodeURIComponent(`${company} ${address || ""}`.trim());
   const textSearch = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${query}&language=ja&key=${GOOGLE_MAPS_API_KEY}`;
   try {
     const r = await fetchWithTimeout(textSearch, {}, 8000);
-    if (!r.ok) return null;
+    if (!r.ok) return { url: null, source: null };
     const j = (await r.json()) as any;
     const cand: any[] = Array.isArray(j?.results) ? j.results : [];
     for (const c of cand) {
@@ -206,11 +305,16 @@ async function findWebsiteByGoogleMaps(
       const dj = (await d.json()) as any;
       const siteRaw: string | null =
         dj?.result?.website || dj?.result?.url || null;
-      const site = normalizeUrl(siteRaw);
-      if (site && (await headOk(site))) return site;
+      if (!siteRaw) continue;
+
+      // Google マップ自身のURLは除外して、外部サイト（website）を使う
+      const cleaned = await canonicalHomepage(siteRaw);
+      if (cleaned && (await headOk(cleaned))) {
+        return { url: cleaned, source: "map" };
+      }
     }
   } catch {}
-  return null;
+  return { url: null, source: null };
 }
 
 /** ========= Supabase ========= */
@@ -231,7 +335,7 @@ function getAdmin() {
 
 /** ========= 直近キャッシュ ========= */
 async function loadRecentCache(
-  sb: any,
+  sb: SupabaseClient,
   tenantId: string,
   sinceISO: string,
   limit: number
@@ -249,104 +353,109 @@ async function loadRecentCache(
   return (data || []) as CacheRow[];
 }
 
+function isUniqueViolation(msg: string) {
+  return /duplicate key value violates unique constraint/i.test(msg);
+}
+
 /** ========= 競合安全 MERGE（onConflict 非使用） =========
- *  - corporate_number がある: tenant_id+corporate_number をキーに select → update or insert
- *  - corporate_number なし: tenant_id+website で緩い重複排除（存在すれば update / なければ insert）
+ *  - まず website(正規化済) で (tenant_id, website) をキーに SELECT
+ *  - あれば UPDATE、なければ INSERT（重複競合時はリトライして SELECT→UPDATE）
+ *  - corporate_number は任意（存在すれば上書き）
  */
-async function mergeProspect(
-  sb: any,
-  row: Omit<AddedRow, "id" | "created_at"> & { created_at?: string | null }
+async function mergeByWebsite(
+  sb: SupabaseClient,
+  tenantId: string,
+  website: string,
+  updateFields: Omit<
+    AddedRow,
+    "id" | "tenant_id" | "website" | "created_at"
+  > & {
+    created_at?: string | null;
+  }
 ): Promise<{ data: AddedRow; createdNew: boolean }> {
   const now = new Date().toISOString();
 
+  // 既存検索
+  const { data: found, error: selErr } = await sb
+    .from("form_prospects")
+    .select("id, created_at")
+    .eq("tenant_id", tenantId)
+    .eq("website", website)
+    .limit(1)
+    .maybeSingle();
+  if (selErr) throw new Error(selErr.message);
+
   const baseUpdate = {
-    tenant_id: row.tenant_id,
-    company_name: row.company_name ?? null,
-    website: row.website ?? null,
-    contact_email: row.contact_email ?? null,
-    contact_form_url: row.contact_form_url ?? null,
-    phone: row.phone ?? null,
-    industry: row.industry ?? null,
-    company_size: row.company_size ?? null,
-    prefectures: row.prefectures ?? null,
-    job_site_source: row.job_site_source ?? null,
-    corporate_number: row.corporate_number ?? null,
-    hq_address: row.hq_address ?? null,
-    capital: row.capital ?? null,
-    established_on: row.established_on ?? null,
-    // 注意: form_prospects に source_site カラムは無い
+    tenant_id: tenantId,
+    website,
+    company_name: updateFields.company_name ?? null,
+    contact_email: updateFields.contact_email ?? null,
+    contact_form_url: updateFields.contact_form_url ?? null,
+    phone: updateFields.phone ?? null,
+    industry: updateFields.industry ?? null,
+    company_size: updateFields.company_size ?? null,
+    prefectures: updateFields.prefectures ?? null,
+    job_site_source: updateFields.job_site_source ?? null,
+    corporate_number: updateFields.corporate_number ?? null,
+    hq_address: updateFields.hq_address ?? null,
+    capital: updateFields.capital ?? null,
+    established_on: updateFields.established_on ?? null,
   };
 
-  // 1) corporate_number ベース
-  if (row.corporate_number) {
-    const { data: found, error: selErr } = await sb
+  if (found?.id) {
+    const { data, error } = await sb
       .from("form_prospects")
-      .select("id, created_at")
-      .eq("tenant_id", row.tenant_id)
-      .eq("corporate_number", row.corporate_number)
-      .limit(1)
+      .update(baseUpdate)
+      .eq("id", found.id)
+      .select("*")
       .maybeSingle();
-    if (selErr) throw new Error(selErr.message);
-
-    if (found?.id) {
-      const { data, error } = await sb
-        .from("form_prospects")
-        .update(baseUpdate)
-        .eq("id", found.id)
-        .select("*")
-        .maybeSingle();
-      if (error) throw new Error(error.message);
-      return { data: data as AddedRow, createdNew: false };
-    } else {
-      const payload = { ...baseUpdate, created_at: row.created_at ?? now };
+    if (error) throw new Error(error.message);
+    return { data: data as AddedRow, createdNew: false };
+  } else {
+    try {
+      const payload = {
+        ...baseUpdate,
+        created_at: updateFields.created_at ?? now,
+      };
       const { data, error } = await sb
         .from("form_prospects")
         .insert(payload)
         .select("*")
         .maybeSingle();
-      if (error) throw new Error(error.message);
+      if (error) throw error;
       return { data: data as AddedRow, createdNew: true };
+    } catch (e: any) {
+      if (isUniqueViolation(String(e?.message || e))) {
+        // 他トランザクションで先に入った → 取り直して UPDATE
+        const { data: refetched, error: reSelErr } = await sb
+          .from("form_prospects")
+          .select("id, created_at")
+          .eq("tenant_id", tenantId)
+          .eq("website", website)
+          .limit(1)
+          .maybeSingle();
+        if (reSelErr) throw new Error(reSelErr.message);
+        if (refetched?.id) {
+          const { data, error } = await sb
+            .from("form_prospects")
+            .update(baseUpdate)
+            .eq("id", refetched.id)
+            .select("*")
+            .maybeSingle();
+          if (error) throw new Error(error.message);
+          return { data: data as AddedRow, createdNew: false };
+        }
+      }
+      throw e;
     }
-  }
-
-  // 2) corporate_number が無い場合は tenant_id + website で緩く同一判定
-  if (row.website) {
-    const { data: found, error: selErr } = await sb
-      .from("form_prospects")
-      .select("id, created_at")
-      .eq("tenant_id", row.tenant_id)
-      .eq("website", row.website)
-      .limit(1)
-      .maybeSingle();
-    if (selErr) throw new Error(selErr.message);
-
-    if (found?.id) {
-      const { data, error } = await sb
-        .from("form_prospects")
-        .update(baseUpdate)
-        .eq("id", found.id)
-        .select("*")
-        .maybeSingle();
-      if (error) throw new Error(error.message);
-      return { data: data as AddedRow, createdNew: false };
-    }
-  }
-
-  // 3) それ以外は素直に INSERT
-  {
-    const payload = { ...baseUpdate, created_at: row.created_at ?? now };
-    const { data, error } = await sb
-      .from("form_prospects")
-      .insert(payload)
-      .select("*")
-      .maybeSingle();
-    if (error) throw new Error(error.message);
-    return { data: data as AddedRow, createdNew: true };
   }
 }
 
 /** ========= rejected へ INSERT ========= */
-async function insertRejected(sb: any, r: RejectedRow & { tenant_id: string }) {
+async function insertRejected(
+  sb: SupabaseClient,
+  r: RejectedRow & { tenant_id: string }
+) {
   const now = new Date().toISOString();
   const payload = { ...r, created_at: r.created_at ?? now };
   const { error } = await sb.from("form_prospects_rejected").insert(payload);
@@ -396,20 +505,16 @@ export async function POST(req: Request) {
         continue;
       }
 
-      // 1) Google 検索
-      let website: string | null = await findWebsiteByGoogleCSE(
-        name,
-        c.address
-      );
-      let source: "google" | "map" | null = website ? "google" : null;
+      // --- まず Google 検索 ---
+      const fromCse = await findWebsiteByGoogleCSE(name, c.address);
+      let website: string | null = fromCse.url;
+      let source: "google" | "map" | null = fromCse.source;
 
-      // 2) 見つからなければ Google Maps（地点の website/url）
+      // --- ダメなら Google Maps ---
       if (!website) {
-        const viaMap = await findWebsiteByGoogleMaps(name, c.address);
-        if (viaMap) {
-          website = viaMap;
-          source = "map";
-        }
+        const fromMap = await findWebsiteByGoogleMaps(name, c.address);
+        website = fromMap.url;
+        source = fromMap.source || source;
       }
 
       if (!website) {
@@ -433,29 +538,46 @@ export async function POST(req: Request) {
         continue;
       }
 
-      // === prospects へ MERGE（onConflict を使わない） ===
-      const { data: saved, createdNew } = await mergeProspect(sb, {
-        tenant_id: tenantId,
-        company_name: name,
-        website,
-        contact_email: null,
-        contact_form_url: null,
-        phone: null,
-        industry: null,
-        company_size: null,
-        prefectures: null,
-        job_site_source: source || "google",
-        corporate_number: c.corporate_number,
-        hq_address: c.address,
-        capital: null,
-        established_on: null,
-      });
+      // 念のためもう一度トップページへ正規化（/contact 等だった場合の丸め）
+      const homepage = await canonicalHomepage(website);
+      if (!homepage || !(await headOk(homepage))) {
+        rejected.push({
+          company_name: name,
+          website,
+          corporate_number: c.corporate_number || null,
+          hq_address: c.address || null,
+          source_site: source || "unknown",
+          reject_reasons: ["トップページ正規化/到達に失敗"],
+        });
+        continue;
+      }
+
+      // === (tenant_id, website) 一意制約に合わせて競合安全に MERGE ===
+      const { data: saved, createdNew } = await mergeByWebsite(
+        sb,
+        tenantId,
+        homepage,
+        {
+          company_name: name,
+          contact_email: null,
+          contact_form_url: null,
+          phone: null,
+          industry: null,
+          company_size: null,
+          prefectures: null,
+          job_site_source: source || "google",
+          corporate_number: c.corporate_number,
+          hq_address: c.address,
+          capital: null,
+          established_on: null,
+        }
+      );
 
       rows.push(saved);
       if (createdNew) inserted += 1;
     }
 
-    // 不適合を反映（source_site を含めて保存）
+    // 不適合の保存
     for (const r of rejected) {
       await insertRejected(sb, { ...r, tenant_id: tenantId });
     }
