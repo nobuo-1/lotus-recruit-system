@@ -35,7 +35,7 @@ type AddedRow = {
   industry?: string | null;
   company_size?: string | null;
   prefectures?: string[] | null;
-  job_site_source?: string | null; // ← 取得元はここに統一
+  job_site_source?: string | null; // 取得元はここに統一 ("google" | "map")
   corporate_number?: string | null;
   hq_address?: string | null;
   capital?: number | null;
@@ -115,7 +115,7 @@ const FLOW_A_TITLES = [
 // Phase B に 6〜9 を配置し、最後に「取得件数到達まで反復」を表記
 const FLOW_B_TITLES = [
   "6. 新規キャッシュ分のHP推定",
-  "7. 到達性チェック/会社概要抽出",
+  "7. 到達性チェック/会社概要抽出（AI可）",
   "8. form_prospects保存/反映 + 不適合保存",
   "9. 取得件数到達まで反復",
 ];
@@ -315,8 +315,8 @@ export default function ManualFetch() {
     await runLoop(fetchTotal);
   };
 
-  /** 実行ループ（取得件数ベースで A/B を反復） */
-  const runLoop = async (total: number) => {
+  /** 実行ループ（★新規追加件数ベースで A/B を反復） */
+  const runLoop = async (targetNew: number) => {
     if (!tenantId) return;
     setMsg("");
     setLoading(true);
@@ -337,20 +337,20 @@ export default function ManualFetch() {
       setS((a) => a.map((v, i) => (i === 0 ? "done" : v)));
       setActiveIdx(-1);
 
-      // ---- 取得件数で制御：Phase A と B を反復 ----
-      let obtained = 0; // form_prospects に今回追加できた数
+      // ---- 「新規追加」数で制御：Phase A と B を反復 ----
+      let obtainedNew = 0; // 今回 form_prospects に「新規作成」できた件数
       let attempts = 0;
-      const MAX_ATTEMPTS = Math.ceil(total / 5) + 30;
+      const MAX_ATTEMPTS = Math.ceil(targetNew / 5) + 30;
       const BATCH = Math.min(
         25,
-        Math.max(8, Math.floor(Math.max(10, total) / 4))
+        Math.max(8, Math.floor(Math.max(10, targetNew) / 4))
       );
       const sinceAtStart = new Date().toISOString();
 
-      while (obtained < total && attempts < MAX_ATTEMPTS) {
+      while (obtainedNew < targetNew && attempts < MAX_ATTEMPTS) {
         if (cancelledRef.current) throw new Error("ABORTED");
         attempts++;
-        const want = Math.min(BATCH, Math.max(1, total - obtained));
+        const wantNow = Math.min(BATCH, Math.max(1, targetNew - obtainedNew));
         const seed = `${Date.now()}-${attempts}`;
 
         // A-2 ～ A-5（クロール＆キャッシュ）
@@ -364,7 +364,7 @@ export default function ManualFetch() {
             "x-tenant-id": tenantId,
             "content-type": "application/json",
           },
-          body: JSON.stringify({ filters, want, seed }),
+          body: JSON.stringify({ filters, want: wantNow, seed }),
           signal: abortRef.current.signal,
         });
         const j = await safeJson(rCrawl);
@@ -422,7 +422,7 @@ export default function ManualFetch() {
         await delay(80);
         setS((a) => a.map((v, idx) => (idx === 5 ? "done" : v)));
 
-        // 7. 抽出
+        // 7. 抽出（AI可）
         setActiveIdx(6);
         setS((a) => a.map((v, idx) => (idx === 6 ? "running" : v)));
         const enrichRes = await fetch("/api/form-outreach/companies/enrich", {
@@ -433,8 +433,8 @@ export default function ManualFetch() {
           },
           body: JSON.stringify({
             since: sinceAtStart,
-            want: Math.max(1, total - obtained),
-            try_llm: false,
+            want: Math.max(1, targetNew - obtainedNew),
+            try_llm: true, // ★ AI補完を有効化（業種・規模・電話・資本金・設立など）
           }),
           signal: abortRef.current.signal,
         });
@@ -473,7 +473,6 @@ export default function ManualFetch() {
               LS_KEY,
               JSON.stringify({ ts: new Date().toISOString(), rows: merged })
             );
-            // 初期は10件再表示
             setVisibleAdded((v) => Math.max(10, v));
             return merged;
           });
@@ -498,27 +497,27 @@ export default function ManualFetch() {
               LS_REJECT_KEY,
               JSON.stringify({ ts: new Date().toISOString(), rows: next })
             );
-            // 初期は10件再表示
             setVisibleRejected((v) => Math.max(10, v));
             return next;
           });
         }
 
+        // ★ APIが返す「新規作成数」をそのまま採用（無ければ rows.length をフォールバック）
         const insertedNow = Number.isFinite(ej?.inserted as number)
-          ? Number(ej?.inserted as number)
-          : rows.length; // inserted が無い場合は rows.length を採用
-        obtained += Math.max(0, insertedNow);
+          ? Number(ej.inserted)
+          : rows.length;
+        obtainedNew += Math.max(0, insertedNow);
 
         setS((a) => a.map((v, idx) => (idx === idxSave ? "done" : v)));
 
-        // 9. 取得件数到達まで反復（進行表示だけ担う）
+        // 9. 取得件数到達まで反復（進行表示）
         const idxLoop = FLOW_A_TITLES.length + FLOW_B_TITLES.length - 1; // 最後のノード
         setActiveIdx(idxLoop);
         setS((a) => a.map((v, idx) => (idx === idxLoop ? "running" : v)));
         setMsg(
           [
-            `取得進行（prospects）：${obtained}/${total} 件  (+${insertedNow})`,
-            `NTA: raw=${a2}, pick=${a3}, ins(cache)=${newCache}, to_insert(cache)=${toInsert}`,
+            `新規追加 進行：${obtainedNew}/${targetNew} 件 (+${insertedNow})`,
+            `NTA: raw=${a2}, pick=${a3}, fill=${a4}, ins(cache)=${newCache}, to_insert(cache)=${toInsert}`,
             `権限: ${usingSrv ? "service-role" : "anon"}${
               j?.warning ? " / 警告あり" : ""
             }`,
@@ -531,11 +530,15 @@ export default function ManualFetch() {
         setS((a) => a.map((v, idx) => (idx === idxLoop ? "done" : v)));
         setActiveIdx(-1);
 
+        // 取得が停滞している場合は少し待つ
         if (insertedNow === 0 && newCache === 0) await delay(300);
       }
 
       setMsg(
-        `完了：取得件数を満たしました（${Math.max(0, obtained)}/${total} 件）`
+        `完了：新規追加が目標件数に達しました（${Math.max(
+          0,
+          obtainedNew
+        )}/${targetNew} 件）`
       );
     } catch (e: any) {
       setActiveIdx(-1);
@@ -744,8 +747,8 @@ export default function ManualFetch() {
         {/* Phase B */}
         <section className="rounded-2xl border border-neutral-200 p-4 mb-4">
           <div className="mb-3 text-sm font-medium text-neutral-800">
-            Phase B: HP解決 → 会社概要抽出 → form_prospects保存 + 不適合保存 →
-            取得件数到達まで反復
+            Phase B: HP解決 → 会社概要抽出（AI） → form_prospects保存 +
+            不適合保存 → 取得件数到達まで反復
           </div>
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-4">
             {FLOW_B_TITLES.map((title, bIdx) => {
@@ -1074,7 +1077,8 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
               フィルタ不適合（直近12時間・重複除去済み / 直近取得が上）
             </div>
             <div className="flex items-center gap-2 text-xs text-neutral-500">
-              表示件数: {rejected.length}
+              表示件数: {Math.min(visibleRejected, rejected.length)} /{" "}
+              {rejected.length}
             </div>
           </div>
 
@@ -1298,7 +1302,8 @@ function CountModal({
         </div>
         <div className="p-4 space-y-3">
           <p className="text-sm text-neutral-700">
-            今回「form_prospects」に追加する目標件数を指定してください（1〜2000件）。
+            今回<strong>新規追加</strong>
+            する目標件数を指定してください（1〜2000件）。
           </p>
           <div className="flex items-center gap-3">
             <input
@@ -1321,8 +1326,8 @@ function CountModal({
             />
           </div>
           <p className="text-[11px] text-neutral-500">
-            ※
-            取得件数は実際に「サイト到達→抽出→保存」できた件数でカウントします。
+            ※ 取得件数は実際に「サイト到達 → 抽出 → 保存」で
+            <strong>新規作成</strong>できた件数でカウントします。
           </p>
         </div>
         <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-neutral-200">
