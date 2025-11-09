@@ -6,7 +6,7 @@ export const maxDuration = 60;
 import { NextResponse } from "next/server";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 
-// ✅ 業種カタログは共通モジュールを参照（厳守）
+// ✅ 業種カタログ（厳守）
 import {
   INDUSTRY_LARGE,
   INDUSTRY_CATEGORIES,
@@ -52,7 +52,7 @@ type AddedRow = {
   industry?: string | null;
   company_size?: string | null;
   prefectures?: string[] | null;
-  job_site_source?: string | null; // "google" | "map"
+  job_site_source?: "google" | "map" | null;
   corporate_number?: string | null;
   hq_address?: string | null;
   capital?: number | null;
@@ -119,9 +119,8 @@ function normalizeUrl(u?: string | null): string | null {
   try {
     const url = new URL(/^https?:\/\//i.test(u) ? u : `https://${u}`);
     const ext = (url.pathname || "").toLowerCase();
-    if (/\.(pdf|docx?|xlsx?|pptx?)$/.test(ext)) return null; // PDF等はサイトURLにしない
+    if (/\.(pdf|docx?|xlsx?|pptx?)$/.test(ext)) return null;
     url.hash = "";
-    // トップへ正規化
     url.pathname = "/";
     url.search = "";
     return url.toString();
@@ -201,7 +200,7 @@ function addressBlocksMatch(a?: string | null, b?: string | null): boolean {
     if (ta[i] === tb[i]) match++;
     else break;
   }
-  return match >= 3; // 1丁目-2番-3号 まで一致
+  return match >= 3;
 }
 
 function nameVariants(n: string) {
@@ -230,19 +229,16 @@ function hostnameOf(site: string): string | null {
     return null;
   }
 }
-
 function rootDomainOf(host?: string | null): string | null {
   if (!host) return null;
   const parts = host.split(".").filter(Boolean);
   if (parts.length <= 2) return host;
-  // co.jp 等のセカンドレベルTLD対応（簡易）
   const sld2 = ["co.jp", "or.jp", "ne.jp", "ac.jp", "ed.jp", "go.jp", "lg.jp"];
   const last2 = parts.slice(-2).join(".");
   const last3 = parts.slice(-3).join(".");
   if (sld2.includes(last2)) return last3;
   return last2;
 }
-
 function emailDomainOK(email: string, site: string): boolean {
   const m = email.toLowerCase().match(/@([^@]+)$/);
   if (!m) return false;
@@ -318,7 +314,6 @@ async function getHtml(url: string): Promise<string | null> {
     const r = await fetchWithTimeout(url, {}, 10000);
     if (!r.ok) return null;
     const t = await r.text();
-    // script/style 除去（電話/メールの誤検出を抑止）
     return t
       .replace(/<script[\s\S]*?<\/script>/gi, " ")
       .replace(/<style[\s\S]*?<\/style>/gi, " ")
@@ -329,7 +324,6 @@ async function getHtml(url: string): Promise<string | null> {
 }
 
 const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
-// 国内向け・緩め（のちに厳格フィルタ）
 const PHONE_CANDIDATE_RE = /0\d{1,3}[-–(（]?\d{1,4}[)-）]?\d{3,4}/g;
 
 function digitsOnly(s: string) {
@@ -340,7 +334,6 @@ function isValidJPPhone(s: string): boolean {
   if (!(d.length === 10 || d.length === 11)) return false;
   if (/^0{5,}$/.test(d)) return false;
   if (/^0{2,}/.test(d)) return false;
-  // 固定/携帯・ありえない市外局番を簡易で弾く（03,06,04x,05x,07x,08x,09x, 070/080/090 等）
   if (!/^0(3|6|4\d|5\d|7\d|8\d|9\d)/.test(d)) return false;
   return true;
 }
@@ -428,6 +421,10 @@ function extractPrefecture(addr?: string | null): string[] | null {
   return hit ? [hit] : null;
 }
 
+/** 会社概要/情報/紹介/ABOUT/ABOUT US/company〜 を拾う（電話は footer にもありえる） */
+const ABOUT_RX =
+  /(会社概要|企業情報|会社情報|会社紹介|会社案内|沿革|about\s*us|about|corporate|company(?!\.)|profile)/i;
+
 async function profileScrape(baseUrl: string): Promise<{
   htmlTop?: string | null;
   htmlAbout?: string | null;
@@ -447,7 +444,7 @@ async function profileScrape(baseUrl: string): Promise<{
   // aタグ探索
   const linkMatch =
     html?.match(
-      /<a\s+[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]{0,60}?)<\/a>/gi
+      /<a\s+[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]{0,80}?)<\/a>/gi
     ) || [];
   const links = linkMatch
     .map((a) => {
@@ -467,9 +464,7 @@ async function profileScrape(baseUrl: string): Promise<{
     findLink(
       /contact|お問い合わせ|問合せ|問合わせ|お問合せ|inquiry|inquiries/
     ) || null;
-  const aboutLink =
-    findLink(/会社概要|企業情報|会社情報|corporate|about|会社案内|沿革/) ||
-    null;
+  const aboutLink = findLink(ABOUT_RX) || null;
 
   if (contactLink?.href) {
     try {
@@ -485,7 +480,7 @@ async function profileScrape(baseUrl: string): Promise<{
     } catch {}
   }
 
-  // 連絡先（メールはドメイン制限は後段で実施）
+  // 連絡先（メールは後段でドメインフィルタ）
   const emailPool = [res.htmlContact, res.htmlAbout, res.htmlTop]
     .filter(Boolean)
     .join("\n");
@@ -495,7 +490,7 @@ async function profileScrape(baseUrl: string): Promise<{
 
   if (emailPool) {
     const m = emailPool.match(EMAIL_RE);
-    if (m && m.length) res.contact_email = m[0]; // 一旦最初（後段でフィルタ）
+    if (m && m.length) res.contact_email = m[0];
   }
 
   if (phonePool) {
@@ -517,8 +512,8 @@ async function profileScrape(baseUrl: string): Promise<{
     if (estBlock?.[1]) res.established_on = parseDate(zen2han(estBlock[1]));
 
     const addrBlock =
-      infoPool.match(/所在地[^<]{0,60}(〒?\s?\d{3}-\d{4}[^<\n]{3,80})/) ||
-      infoPool.match(/住所[^<]{0,60}(〒?\s?\d{3}-\d{4}[^<\n]{3,80})/);
+      infoPool.match(/所在地[^<]{0,80}(〒?\s?\d{3}-\d{4}[^<\n]{3,120})/) ||
+      infoPool.match(/住所[^<]{0,80}(〒?\s?\d{3}-\d{4}[^<\n]{3,120})/);
     if (addrBlock?.[1])
       res.hq_address = addrBlock[1].replace(/<[^>]+>/g, "").trim();
 
@@ -532,7 +527,7 @@ async function profileScrape(baseUrl: string): Promise<{
   return res;
 }
 
-/** ========= LLM業種判定（industryCatalog を厳守） ========= */
+/** ========= LLM業種判定 ========= */
 async function classifyIndustryWithLLM(input: {
   companyName: string;
   htmlTop?: string | null;
@@ -632,7 +627,7 @@ function getAdmin() {
 
 /** ========= 直近キャッシュ ========= */
 async function loadRecentCache(
-  sb: any,
+  sb: SupabaseClient,
   tenantId: string,
   sinceISO: string,
   limit: number
@@ -650,7 +645,7 @@ async function loadRecentCache(
   return (data || []) as CacheRow[];
 }
 
-/** ========= 近似企業保存 ========= */
+/** ========= 近似企業 保存（新規かどうか返す） ========= */
 async function upsertSimilarSite(
   sb: SupabaseClient,
   p: {
@@ -668,22 +663,49 @@ async function upsertSimilarSite(
     phone?: string | null;
     reasons?: string[] | null;
   }
-) {
+): Promise<{ inserted: boolean }> {
   const now = new Date().toISOString();
   const payload = {
     ...p,
     found_website: normalizeUrl(p.found_website)!,
     matched_addr: !!p.matched_addr,
     reasons: p.reasons ?? ["社名不一致だがコンタクト手段あり"],
+    created_at: now,
     updated_at: now,
   };
-  const { error } = await sb
-    .from("form_similar_sites")
-    .upsert(payload, { onConflict: "tenant_id,found_website" });
-  if (error) throw new Error(error.message);
+
+  // まず INSERT（新規のみ created_at をセット）
+  const { error: insErr } = await sb.from("form_similar_sites").insert(payload);
+  if (!insErr) return { inserted: true };
+
+  // 重複（23505）の場合のみ UPDATE（created_at は保持）
+  if ((insErr as any)?.code === "23505") {
+    const { error: updErr } = await sb
+      .from("form_similar_sites")
+      .update({
+        target_corporate_number: payload.target_corporate_number ?? null,
+        target_company_name: payload.target_company_name ?? null,
+        target_hq_address: payload.target_hq_address ?? null,
+        found_company_name: payload.found_company_name ?? null,
+        source_site: payload.source_site ?? null,
+        matched_addr: payload.matched_addr,
+        matched_company_ratio: payload.matched_company_ratio ?? null,
+        contact_form_url: payload.contact_form_url ?? null,
+        contact_email: payload.contact_email ?? null,
+        phone: payload.phone ?? null,
+        reasons: payload.reasons,
+        updated_at: now,
+      })
+      .eq("tenant_id", payload.tenant_id)
+      .eq("found_website", payload.found_website);
+    if (updErr) throw new Error(updErr.message);
+    return { inserted: false };
+  }
+
+  throw new Error(insErr.message);
 }
 
-/** ========= form_prospects UPSERT（エラー耐性） ========= */
+/** ========= prospects 既存確認 & upsert（重複耐性） ========= */
 async function selectExistingProspect(
   sb: SupabaseClient,
   tenant_id: string,
@@ -817,7 +839,7 @@ async function insertRejected(
   if (error) throw new Error(error.message);
 }
 
-/** ========= 直近の form_prospects を取得（テーブル表示＆カウント用） ========= */
+/** ========= “今回追加”の form_prospects（表＆カウント用） ========= */
 async function loadRecentProspects(
   sb: SupabaseClient,
   tenant_id: string,
@@ -841,6 +863,21 @@ async function loadRecentProspects(
     .gte("created_at", sinceISO);
   if (e2) throw new Error(e2.message);
   return { rows: (data || []) as AddedRow[], count: cnt || 0 };
+}
+
+/** ========= “今回追加”の近似サイト数（DBの新規件数） ========= */
+async function loadRecentSimilarCount(
+  sb: SupabaseClient,
+  tenant_id: string,
+  sinceISO: string
+): Promise<number> {
+  const { count, error } = await sb
+    .from("form_similar_sites")
+    .select("*", { count: "exact", head: true })
+    .eq("tenant_id", tenant_id)
+    .gte("created_at", sinceISO);
+  if (error) throw new Error(error.message);
+  return count || 0;
 }
 
 /** ========= メイン ========= */
@@ -871,7 +908,7 @@ export async function POST(req: Request) {
     const rows: AddedRow[] = [];
     const rejected: RejectedRow[] = [];
     let inserted = 0;
-    let nearMissSaved = 0;
+    let nearMissSaved = 0; // 実行中合計（参考）
 
     for (const c of candidates) {
       if (rows.length >= want) break;
@@ -925,7 +962,7 @@ export async function POST(req: Request) {
         const hasContact = !!(prof.contact_form_url || prof.contact_email);
         if (hasContact) {
           try {
-            await upsertSimilarSite(sb, {
+            const r = await upsertSimilarSite(sb, {
               tenant_id: tenantId,
               target_corporate_number: c.corporate_number || null,
               target_company_name: name,
@@ -940,7 +977,7 @@ export async function POST(req: Request) {
               phone: prof.phone || null,
               reasons: ["トップHTML社名不一致／近似サイト保存"],
             });
-            nearMissSaved += 1;
+            if (r.inserted) nearMissSaved += 1;
           } catch {}
         }
 
@@ -960,15 +997,14 @@ export async function POST(req: Request) {
 
       /// 4) 連絡先メールはサイトドメイン or gmail のみ
       let contact_email: string | null = null;
-
       if (
         prof.contact_email &&
         website &&
-        emailDomainOK(prof.contact_email, website) // ここはコールバック外なので narrow OK
+        emailDomainOK(prof.contact_email, website)
       ) {
         contact_email = prof.contact_email.toLowerCase();
       } else if (
-        website && // narrow
+        website &&
         (prof.htmlContact || prof.htmlAbout || prof.htmlTop)
       ) {
         const pool = [prof.htmlContact, prof.htmlAbout, prof.htmlTop]
@@ -976,7 +1012,7 @@ export async function POST(req: Request) {
           .join("\n");
         const found = pool.match(EMAIL_RE) || [];
         const uniq = Array.from(new Set(found.map((x) => x.toLowerCase())));
-        const site = website as string; // ✅ FIX: コールバック内 narrow を維持するために局所変数へ
+        const site = website as string; // narrow
         contact_email = uniq.find((e) => emailDomainOK(e, site)) || null;
       }
 
@@ -994,7 +1030,7 @@ export async function POST(req: Request) {
         industryValue = `${cls.large} / ${cls.small}`;
       }
 
-      // 6) UPSERT（ユニーク整合に耐性）
+      // 6) UPSERT
       try {
         const { saved } = await upsertProspectSafe(sb, {
           tenant_id: tenantId,
@@ -1033,25 +1069,31 @@ export async function POST(req: Request) {
       }
     }
 
-    // 不適合を反映（失敗しても全体は継続）
+    // 不適合の保存（失敗しても継続）
     for (const r of rejected) {
       try {
         await insertRejected(sb, { ...r, tenant_id: tenantId });
       } catch {}
     }
 
-    // ✅ ここが重要：DBの“今回追加”を返す（フロントは表もカウントもこの値を使用）
+    // ✅ フロントが採用する最新“今回追加” & 近似サイト新規数
     const recent = await loadRecentProspects(sb, tenantId, since);
+    const recentSimilarCount = await loadRecentSimilarCount(
+      sb,
+      tenantId,
+      since
+    );
 
     return NextResponse.json(
       {
-        rows, // 今回処理の成功レコード（参考）
+        rows, // 参考
         rejected,
-        inserted,
-        near_miss_saved: nearMissSaved,
-        // ▼ 以降をフロントが採用
+        inserted, // 参考（このリクエスト内）
+        near_miss_saved: nearMissSaved, // 参考（このリクエスト内）
+        // ▼ フロントは以下を採用
         recent_rows: recent.rows,
         recent_count: recent.count,
+        recent_similar_count: recentSimilarCount,
         trace,
         used: {
           google_cse: Boolean(GOOGLE_CSE_KEY && GOOGLE_CSE_CX),

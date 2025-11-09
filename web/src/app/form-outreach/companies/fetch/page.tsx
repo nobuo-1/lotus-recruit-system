@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 
 /** ===== LocalStorage Keys ===== */
+const LS_KEY = "fo_manual_fetch_latest";
 const LS_FETCH_COUNT = "fo_manual_fetch_count";
 const LS_REJECT_KEY = "fo_manual_fetch_rejected";
 const TWELVE_H_MS = 12 * 60 * 60 * 1000;
@@ -34,7 +35,7 @@ type AddedRow = {
   industry?: string | null;
   company_size?: string | null;
   prefectures?: string[] | null;
-  job_site_source?: string | null; // 取得元はここに統一
+  job_site_source?: "google" | "map" | null;
   corporate_number?: string | null;
   hq_address?: string | null;
   capital?: number | null;
@@ -124,13 +125,11 @@ export default function ManualFetch() {
   const [s, setS] = useState<StepState[]>(Array(totalSteps).fill("idle"));
   const [activeIdx, setActiveIdx] = useState<number>(-1);
 
-  // ✅ 今回追加＝DBの form_prospects（created_at >= runStart）
   const [added, setAdded] = useState<AddedRow[]>([]);
-  const [recentCount, setRecentCount] = useState<number>(0);
-
   const [rejected, setRejected] = useState<RejectedRow[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
 
+  // 「more」制御：常時10件、Moreで増やす
   const [visibleAdded, setVisibleAdded] = useState<number>(10);
   const [visibleRejected, setVisibleRejected] = useState<number>(10);
 
@@ -165,9 +164,7 @@ export default function ManualFetch() {
     () => (crawlDebug?.rows_preview ?? []) as CrawlPreviewRow[],
     [crawlDebug?.rows_preview]
   );
-
   const pageCount = Math.max(1, Math.ceil(previewRows.length / ROWS_PER_PAGE));
-
   const pagedPreview = useMemo<CrawlPreviewRow[]>(() => {
     const start = (rowsPage - 1) * ROWS_PER_PAGE;
     return previewRows.slice(start, start + ROWS_PER_PAGE);
@@ -176,11 +173,6 @@ export default function ManualFetch() {
   useEffect(() => {
     setRowsPage(1);
   }, [previewRows.length]);
-
-  const goFirst = () => setRowsPage(1);
-  const goPrev = () => setRowsPage((p) => Math.max(1, p - 1));
-  const goNext = () => setRowsPage((p) => Math.min(pageCount, p + 1));
-  const goLast = () => setRowsPage(pageCount);
 
   /** ===== Effects: tenant & filters & restore local ===== */
   useEffect(() => {
@@ -237,12 +229,28 @@ export default function ManualFetch() {
           updated_at: incoming.updated_at ?? null,
         });
 
-        // last fetch count
-        const last = Number(localStorage.getItem(LS_FETCH_COUNT));
-        if (Number.isFinite(last) && last > 0)
-          setFetchTotal(Math.max(1, Math.min(2000, last)));
+        // keep "added"（直近12時間のみ）
+        const raw = localStorage.getItem(LS_KEY);
+        if (raw) {
+          const obj = JSON.parse(raw);
+          const ts = obj?.ts ? new Date(obj.ts).getTime() : 0;
+          if (Date.now() - ts < TWELVE_H_MS) {
+            const now = Date.now();
+            const rows = Array.isArray(obj.rows)
+              ? (obj.rows as AddedRow[])
+              : [];
+            const filtered = rows.filter((r) => {
+              const t = r?.created_at ? Date.parse(r.created_at) : ts;
+              return Number.isFinite(t) && now - t <= TWELVE_H_MS;
+            });
+            setAdded(filtered);
+            setVisibleAdded(10);
+          } else {
+            localStorage.removeItem(LS_KEY);
+          }
+        }
 
-        // rejected は最近だけ復元（任意）
+        // keep "rejected"（直近12時間のみ）
         const rejRaw = localStorage.getItem(LS_REJECT_KEY);
         if (rejRaw) {
           const obj = JSON.parse(rejRaw);
@@ -262,6 +270,11 @@ export default function ManualFetch() {
             localStorage.removeItem(LS_REJECT_KEY);
           }
         }
+
+        // last fetch count
+        const last = Number(localStorage.getItem(LS_FETCH_COUNT));
+        if (Number.isFinite(last) && last > 0)
+          setFetchTotal(Math.max(1, Math.min(2000, last)));
       } catch (e: any) {
         setMsg(String(e?.message || e));
       }
@@ -292,24 +305,18 @@ export default function ManualFetch() {
     await runLoop(fetchTotal);
   };
 
-  /** 実行ループ（run開始以降の「新規追加数」をDB基準で反復） */
+  /** 実行ループ（★“DBの新規件数差分”で進捗を加算） */
   const runLoop = async (targetNew: number) => {
     if (!tenantId) return;
     setMsg("");
     setLoading(true);
     cancelledRef.current = false;
     setCrawlDebug(null);
-    setAdded([]);
-    setRecentCount(0);
-    setVisibleAdded(10);
 
-    // Steps init
     setS(Array(totalSteps).fill("idle"));
     setActiveIdx(-1);
     abortRef.current?.abort();
     abortRef.current = new AbortController();
-
-    const runStartISO = new Date().toISOString(); // ★ この時刻以降の form_prospects を「今回追加」とする
 
     try {
       // A-1
@@ -319,18 +326,23 @@ export default function ManualFetch() {
       setS((a) => a.map((v, i) => (i === 0 ? "done" : v)));
       setActiveIdx(-1);
 
-      // ---- RUN ----
+      let obtainedNew = 0; // form_prospects の “今回新規”
       let attempts = 0;
       const MAX_ATTEMPTS = Math.ceil(targetNew / 5) + 30;
       const BATCH = Math.min(
-        40,
-        Math.max(10, Math.floor(Math.max(10, targetNew) / 3))
+        25,
+        Math.max(8, Math.floor(Math.max(10, targetNew) / 4))
       );
+      const sinceAtStart = new Date().toISOString();
 
-      while (recentCount < targetNew && attempts < MAX_ATTEMPTS) {
+      // 直近の“DB件数”を基準に差分加算（← 5件で止まる問題を解決）
+      let recentProspectsCount = 0;
+      let recentSimilarCount = 0;
+
+      while (obtainedNew < targetNew && attempts < MAX_ATTEMPTS) {
         if (cancelledRef.current) throw new Error("ABORTED");
         attempts++;
-        const wantNow = Math.min(BATCH, Math.max(1, targetNew - recentCount));
+        const wantNow = Math.min(BATCH, Math.max(1, targetNew - obtainedNew));
         const seed = `${Date.now()}-${attempts}`;
 
         // A-2 ～ A-5（クロール＆キャッシュ）
@@ -356,7 +368,6 @@ export default function ManualFetch() {
         const toInsert = Number(j?.to_insert_count || 0);
         const usingSrv = !!j?.using_service_role;
 
-        // debug state
         setCrawlDebug({
           step: j?.step,
           new_cache: newCache,
@@ -392,7 +403,7 @@ export default function ManualFetch() {
         // 6. HP推定（表示のみ）
         setActiveIdx(5);
         setS((a) => a.map((v, idx) => (idx === 5 ? "running" : v)));
-        await delay(60);
+        await delay(80);
         setS((a) => a.map((v, idx) => (idx === 5 ? "done" : v)));
 
         // 7. 抽出（AI可）
@@ -405,8 +416,8 @@ export default function ManualFetch() {
             "content-type": "application/json",
           },
           body: JSON.stringify({
-            since: runStartISO,
-            want: Math.max(1, targetNew - recentCount),
+            since: sinceAtStart,
+            want: Math.max(1, targetNew - obtainedNew),
             try_llm: true,
           }),
           signal: abortRef.current.signal,
@@ -425,31 +436,26 @@ export default function ManualFetch() {
           throw new Error(ej?.error || `enrich failed (${enrichRes.status})`);
         }
 
-        // ✅ “今回追加”は DBの recent_rows / recent_count を採用
-        const recentRows: AddedRow[] = Array.isArray(ej?.recent_rows)
+        // ★ 表示は DB の “recent_rows” を採用（form_prospects のみ表示）
+        const recvRows: AddedRow[] = Array.isArray(ej?.recent_rows)
           ? (ej.recent_rows as AddedRow[])
           : [];
-        setAdded(recentRows);
-        const cnt = Number(ej?.recent_count ?? 0);
-        setRecentCount(cnt);
+        if (recvRows.length) {
+          setAdded(recvRows);
+          localStorage.setItem(
+            LS_KEY,
+            JSON.stringify({ ts: new Date().toISOString(), rows: recvRows })
+          );
+          setVisibleAdded((v) => Math.max(10, v));
+        }
 
-        // rejected は蓄積（12hのみローカル保持）
+        // 不適合は従来どおり保持
         const rejAll: RejectedRow[] = Array.isArray(ej?.rejected)
           ? (ej.rejected as RejectedRow[])
           : [];
         if (rejAll.length) {
           setRejected((prev) => {
-            const now = Date.now();
-            const next = dedupeRejected([
-              ...rejAll.map((r) => ({
-                ...r,
-                created_at: new Date().toISOString(),
-              })),
-              ...prev.filter((r) => {
-                const t = r?.created_at ? Date.parse(r.created_at!) : now;
-                return Number.isFinite(t) && now - t <= TWELVE_H_MS;
-              }),
-            ]);
+            const next = dedupeRejected([...rejAll, ...prev]);
             localStorage.setItem(
               LS_REJECT_KEY,
               JSON.stringify({ ts: new Date().toISOString(), rows: next })
@@ -459,6 +465,19 @@ export default function ManualFetch() {
           });
         }
 
+        // ✅ 進捗は “recent_count” の差分で加算（5件で止まる問題を修正）
+        const newRecentProspectsCount = Number(ej?.recent_count || 0);
+        const delta = Math.max(
+          0,
+          newRecentProspectsCount - recentProspectsCount
+        );
+        recentProspectsCount = newRecentProspectsCount;
+        obtainedNew += delta;
+
+        // 近似サイトの新規件数も DB 値で表示用に取得
+        const newRecentSimilarCount = Number(ej?.recent_similar_count || 0);
+        recentSimilarCount = newRecentSimilarCount;
+
         setS((a) => a.map((v, idx) => (idx === idxSave ? "done" : v)));
 
         // 9. 反復（進行表示）
@@ -467,7 +486,8 @@ export default function ManualFetch() {
         setS((a) => a.map((v, idx) => (idx === idxLoop ? "running" : v)));
         setMsg(
           [
-            `新規追加 進行：${cnt}/${targetNew} 件`,
+            `新規追加 進行：${obtainedNew}/${targetNew} 件 (+${delta})`,
+            `近似サイト（新規）：${recentSimilarCount} 件`,
             `NTA: raw=${a2}, pick=${a3}, fill=${a4}, ins(cache)=${newCache}, to_insert(cache)=${toInsert}`,
             `権限: ${usingSrv ? "service-role" : "anon"}${
               j?.warning ? " / 警告あり" : ""
@@ -478,12 +498,15 @@ export default function ManualFetch() {
         setS((a) => a.map((v, idx) => (idx === idxLoop ? "done" : v)));
         setActiveIdx(-1);
 
-        if (cnt >= targetNew) break;
-        if (newCache === 0) await delay(300);
+        // 取得が停滞している場合は少し待つ
+        if (delta === 0 && newCache === 0) await delay(300);
       }
 
       setMsg(
-        `完了：新規追加が目標件数に達しました（${recentCount}/${targetNew} 件）`
+        `完了：新規追加が目標件数に達しました（${Math.max(
+          0,
+          obtainedNew
+        )}/${targetNew} 件）`
       );
     } catch (e: any) {
       setActiveIdx(-1);
@@ -513,8 +536,8 @@ export default function ManualFetch() {
       if (!r.ok) throw new Error(j?.error || "cancel failed");
       setMsg(`取消しました：削除 ${j.deleted ?? 0} 件`);
       setAdded([]);
+      localStorage.removeItem(LS_KEY);
       setVisibleAdded(10);
-      setRecentCount(0);
     } catch (e: any) {
       setMsg(String(e?.message || e));
     }
@@ -534,8 +557,27 @@ export default function ManualFetch() {
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j?.error || "manual add failed");
 
-      // 再読込は enrich 経由で集約しているのでここでは通知のみ
-      setMsg("不適合から採用に追加しました（表は次回の実行で反映）。");
+      if (j?.row) {
+        setAdded((prev) => {
+          const next = [j.row as AddedRow, ...prev];
+          localStorage.setItem(
+            LS_KEY,
+            JSON.stringify({ ts: new Date().toISOString(), rows: next })
+          );
+          setVisibleAdded((v) => Math.max(10, v));
+          return next;
+        });
+      }
+      setRejected((prev) => {
+        const next = prev.filter((x) => !sameRejected(x, row));
+        localStorage.setItem(
+          LS_REJECT_KEY,
+          JSON.stringify({ ts: new Date().toISOString(), rows: next })
+        );
+        setVisibleRejected((v) => Math.max(10, v));
+        return next;
+      });
+      setMsg("不適合から採用に追加しました。");
     } catch (e: any) {
       setMsg(String(e?.message || e));
     }
@@ -589,41 +631,6 @@ export default function ManualFetch() {
   return (
     <>
       <AppHeader showBack />
-
-      {/* ✅ 進捗HUD */}
-      <div className="sticky top-0 z-40 w-full bg-white/90 backdrop-blur border-b border-neutral-200">
-        <div className="mx-auto max-w-6xl px-6 py-2 flex items-center justify-between">
-          <div className="text-sm text-neutral-700">
-            {tenantId ? (
-              <>
-                テナント: <span className="font-mono">{tenantId}</span>
-              </>
-            ) : (
-              "テナント未解決"
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="rounded-full bg-neutral-100 px-3 py-1 text-sm">
-              進捗: <span className="font-semibold">{recentCount}</span>
-              <span className="opacity-60"> / </span>
-              <span className="font-semibold">{fetchTotal}</span>
-              <span className="opacity-60"> 件</span>
-            </div>
-            <div className="w-40 h-2 bg-neutral-100 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-emerald-500 transition-all"
-                style={{
-                  width: `${Math.min(
-                    100,
-                    Math.round((recentCount / Math.max(1, fetchTotal)) * 100)
-                  )}%`,
-                }}
-              />
-            </div>
-          </div>
-        </div>
-      </div>
-
       <main className="mx-auto max-w-6xl p-6">
         {/* Header & Actions */}
         <div className="mb-4 flex items-start justify-between gap-3">
@@ -634,6 +641,7 @@ export default function ManualFetch() {
             <p className="text-sm text-neutral-500">
               二段フローで保存を逐次反映。アイコンの動きは実処理に同期します。
             </p>
+            {/* 🔧 修正1: テナント詳細表示を削除（他の説明は維持） */}
             <p className="text-xs text-neutral-500 mt-1 break-words">
               現在のフィルタ:{" "}
               <span className="opacity-80">都道府県={summaryParts.pref}</span>
@@ -757,19 +765,19 @@ export default function ManualFetch() {
                       </div>
                       <div className="rounded border border-neutral-200 p-2">
                         <div className="font-semibold mb-1">Meta</div>
-                        <pre className="whitespace-pre-wrap">
-                          {`new_cache: ${crawlDebug.new_cache ?? 0}
+                        <pre className="whitespace-pre-wrap">{`new_cache: ${
+                          crawlDebug.new_cache ?? 0
+                        }
 to_insert: ${crawlDebug.to_insert_count ?? 0}
-using_service_role: ${crawlDebug.using_service_role ? "true" : "false"}`}
-                        </pre>
+using_service_role: ${crawlDebug.using_service_role ? "true" : "false"}`}</pre>
                       </div>
                       <div className="rounded border border-neutral-200 p-2">
                         <div className="font-semibold mb-1">Probe</div>
-                        <pre className="whitespace-pre-wrap">
-                          {`project_ref: ${crawlDebug.project_ref ?? "-"}
+                        <pre className="whitespace-pre-wrap">{`project_ref: ${
+                          crawlDebug.project_ref ?? "-"
+                        }
 db_url_host: ${crawlDebug.db_url_host ?? "-"}
-db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
-                        </pre>
+db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}</pre>
                       </div>
                       <div className="rounded border border-neutral-200 p-2">
                         <div className="font-semibold mb-1">html_sig</div>
@@ -790,25 +798,30 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
 
                       <div className="flex items-center gap-1 px-3 py-2">
                         <PagerButton
-                          onClick={goFirst}
+                          onClick={() => setRowsPage(1)}
                           disabled={rowsPage === 1}
                         >
                           <ChevronsLeft className="h-4 w-4" />
                         </PagerButton>
-                        <PagerButton onClick={goPrev} disabled={rowsPage === 1}>
+                        <PagerButton
+                          onClick={() => setRowsPage((p) => Math.max(1, p - 1))}
+                          disabled={rowsPage === 1}
+                        >
                           <ChevronLeft className="h-4 w-4" />
                         </PagerButton>
                         <span className="mx-2 text-xs text-neutral-600">
                           {rowsPage} / {pageCount}
                         </span>
                         <PagerButton
-                          onClick={goNext}
+                          onClick={() =>
+                            setRowsPage((p) => Math.min(pageCount, p + 1))
+                          }
                           disabled={rowsPage === pageCount}
                         >
                           <ChevronRight className="h-4 w-4" />
                         </PagerButton>
                         <PagerButton
-                          onClick={goLast}
+                          onClick={() => setRowsPage(pageCount)}
                           disabled={rowsPage === pageCount}
                         >
                           <ChevronsRight className="h-4 w-4" />
@@ -890,16 +903,14 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
           )}
         </section>
 
-        {/* 今回追加（= DB: form_prospects since runStart） */}
+        {/* 今回追加テーブル（form_prospects のみ） */}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden">
           <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 bg-neutral-50">
             <div className="text-sm font-medium text-neutral-800">
-              今回追加（run開始以降 / 新しい順 / DB表示）
+              今回追加（直近12時間・新しい順）
             </div>
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-neutral-600">
-                件数: {recentCount}
-              </span>
+            <div className="flex items-center gap-3 text-xs text-neutral-600">
+              {/* 近似サイトの新規件数は上部メッセージでも表示。ここでは表は prospected のみ */}
               <button
                 onClick={cancelAdditions}
                 disabled={added.length === 0}
@@ -916,13 +927,13 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                 <tr>
                   {[
                     "企業名",
+                    "業種",
                     "サイトURL",
                     "メール",
                     "電話",
                     "フォーム",
                     "規模",
                     "都道府県",
-                    "業種",
                     "資本金",
                     "設立",
                     "法人番号",
@@ -933,6 +944,7 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                     <th
                       key={h}
                       className="px-3 py-3 text-left whitespace-nowrap"
+                      style={{ writingMode: "horizontal-tb" }}
                     >
                       {h}
                     </th>
@@ -942,7 +954,14 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
               <tbody className="divide-y divide-neutral-200">
                 {added.slice(0, visibleAdded).map((c: AddedRow) => (
                   <tr key={c.id}>
-                    <td className="px-3 py-2">{c.company_name || "-"}</td>
+                    {/* 🔧 修正5: 企業名と業種のカラム幅を広げ、15〜18文字程度で改行 */}
+                    <td className="px-3 py-2 whitespace-normal break-words min-w-[16ch] max-w-[24ch]">
+                      {c.company_name || "-"}
+                    </td>
+                    <td className="px-3 py-2 whitespace-normal break-words min-w-[16ch] max-w-[24ch]">
+                      {c.industry || "-"}
+                    </td>
+
                     <td className="px-3 py-2">
                       {c.website ? (
                         <a
@@ -977,7 +996,6 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                         ? c.prefectures.join(" / ")
                         : "-"}
                     </td>
-                    <td className="px-3 py-2">{c.industry || "-"}</td>
                     <td className="px-3 py-2">
                       {c.capital != null ? formatJPY(Number(c.capital)) : "-"}
                     </td>
@@ -1019,7 +1037,7 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
           </div>
         </section>
 
-        {/* 不適合一覧（form_prospects_rejected 反映） */}
+        {/* 不適合一覧（維持） */}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden mt-6">
           <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 bg-neutral-50">
             <div className="text-sm font-medium text-neutral-800">
@@ -1054,6 +1072,7 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
                     <th
                       key={h}
                       className="px-3 py-3 text-left whitespace-nowrap"
+                      style={{ writingMode: "horizontal-tb" }}
                     >
                       {h}
                     </th>
@@ -1275,7 +1294,7 @@ function CountModal({
           </div>
           <p className="text-[11px] text-neutral-500">
             ※ 取得件数は実際に「サイト到達 → 抽出 → 保存」で
-            <strong>新規作成</strong>できた件数でカウントします（DB基準）。
+            <strong>新規作成</strong>できた件数でカウントします。
           </p>
         </div>
         <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-neutral-200">
