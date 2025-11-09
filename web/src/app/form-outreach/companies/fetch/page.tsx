@@ -35,7 +35,7 @@ type AddedRow = {
   industry?: string | null;
   company_size?: string | null;
   prefectures?: string[] | null;
-  job_site_source?: string | null; // 取得元はここに統一 ("google" | "map")
+  job_site_source?: string | null; // 取得元 ("google" | "map")
   corporate_number?: string | null;
   hq_address?: string | null;
   capital?: number | null;
@@ -58,7 +58,6 @@ type RejectedRow = {
   hq_address?: string | null;
   capital?: number | null;
   established_on?: string | null;
-  // rejected は DB に source_site カラムあり
   source_site?: string | null;
   reject_reasons: string[];
   created_at?: string | null;
@@ -104,7 +103,7 @@ type CrawlDebug = {
 };
 
 /** ===== Flow Titles ===== */
-// Phase A は 1〜5 まで（反復はここから除外）
+// Phase A は 1〜5
 const FLOW_A_TITLES = [
   "1. 条件読み込み/表示",
   "2. 国税庁をクロール",
@@ -112,7 +111,7 @@ const FLOW_A_TITLES = [
   "4. 詳細補完（名称/住所）",
   "5. キャッシュ保存",
 ];
-// Phase B に 6〜9 を配置し、最後に「取得件数到達まで反復」を表記
+// Phase B は 6〜9（反復のガイド表示を含む）
 const FLOW_B_TITLES = [
   "6. 新規キャッシュ分のHP推定",
   "7. 到達性チェック/会社概要抽出（AI可）",
@@ -132,7 +131,7 @@ export default function ManualFetch() {
   const [rejected, setRejected] = useState<RejectedRow[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
 
-  // 「more」制御：常時10件、Moreで増やす
+  // 表示件数
   const [visibleAdded, setVisibleAdded] = useState<number>(10);
   const [visibleRejected, setVisibleRejected] = useState<number>(10);
 
@@ -167,17 +166,20 @@ export default function ManualFetch() {
     () => (crawlDebug?.rows_preview ?? []) as CrawlPreviewRow[],
     [crawlDebug?.rows_preview]
   );
-
   const pageCount = Math.max(1, Math.ceil(previewRows.length / ROWS_PER_PAGE));
-
   const pagedPreview = useMemo<CrawlPreviewRow[]>(() => {
     const start = (rowsPage - 1) * ROWS_PER_PAGE;
     return previewRows.slice(start, start + ROWS_PER_PAGE);
   }, [previewRows, rowsPage]);
+  useEffect(() => setRowsPage(1), [previewRows.length]);
 
-  useEffect(() => {
-    setRowsPage(1);
-  }, [previewRows.length]);
+  // ★ 進捗HUD
+  const [hud, setHud] = useState<{
+    obtained: number;
+    target: number;
+    near: number;
+    running: boolean;
+  }>({ obtained: 0, target: 0, near: 0, running: false });
 
   const goFirst = () => setRowsPage(1);
   const goPrev = () => setRowsPage((p) => Math.max(1, p - 1));
@@ -323,6 +325,9 @@ export default function ManualFetch() {
     cancelledRef.current = false;
     setCrawlDebug(null);
 
+    // HUD開始
+    setHud({ obtained: 0, target: targetNew, near: 0, running: true });
+
     // Steps init
     setS(Array(totalSteps).fill("idle"));
     setActiveIdx(-1);
@@ -338,7 +343,7 @@ export default function ManualFetch() {
       setActiveIdx(-1);
 
       // ---- 「新規追加」数で制御：Phase A と B を反復 ----
-      let obtainedNew = 0; // 今回 form_prospects に「新規作成」できた件数
+      let obtainedNew = 0;
       let attempts = 0;
       const MAX_ATTEMPTS = Math.ceil(targetNew / 5) + 30;
       const BATCH = Math.min(
@@ -376,14 +381,12 @@ export default function ManualFetch() {
         const toInsert = Number(j?.to_insert_count || 0);
         const usingSrv = !!j?.using_service_role;
 
-        // 追加：接続先 & プローブ
         const projectRef: string | null =
           j?.project_ref != null ? String(j.project_ref) : null;
         const dbUrlHost: string | null =
           j?.db_url_host != null ? String(j.db_url_host) : null;
         const probeFound: number = Number(j?.db_probe_found ?? 0);
 
-        // debug state
         setCrawlDebug({
           step: j?.step,
           new_cache: newCache,
@@ -434,7 +437,7 @@ export default function ManualFetch() {
           body: JSON.stringify({
             since: sinceAtStart,
             want: Math.max(1, targetNew - obtainedNew),
-            try_llm: true, // ★ AI補完を有効化（業種・規模・電話・資本金・設立など）
+            try_llm: true,
           }),
           signal: abortRef.current.signal,
         });
@@ -442,7 +445,7 @@ export default function ManualFetch() {
         setS((a) => a.map((v, idx) => (idx === 6 ? "done" : v)));
 
         // 8. 保存/反映 + 不適合保存
-        const idxSave = FLOW_A_TITLES.length + 2; // (= 7 の次のインデックス)
+        const idxSave = FLOW_A_TITLES.length + 2;
         setActiveIdx(idxSave);
         setS((a) => a.map((v, idx) => (idx === idxSave ? "running" : v)));
         await delay(60);
@@ -454,7 +457,6 @@ export default function ManualFetch() {
 
         // 直近12時間のみ反映
         const now = Date.now();
-
         const rowsRaw: AddedRow[] = Array.isArray(ej?.rows)
           ? (ej.rows as AddedRow[])
           : [];
@@ -502,16 +504,27 @@ export default function ManualFetch() {
           });
         }
 
-        // ★ APIが返す「新規作成数」をそのまま採用（無ければ rows.length をフォールバック）
+        const nearNow = Number.isFinite(ej?.near_miss_saved as number)
+          ? Number(ej.near_miss_saved)
+          : 0;
+
         const insertedNow = Number.isFinite(ej?.inserted as number)
           ? Number(ej.inserted)
           : rows.length;
         obtainedNew += Math.max(0, insertedNow);
 
+        // HUD更新
+        setHud((prev) => ({
+          obtained: obtainedNew,
+          target: targetNew,
+          near: prev.near + Math.max(0, nearNow),
+          running: true,
+        }));
+
         setS((a) => a.map((v, idx) => (idx === idxSave ? "done" : v)));
 
         // 9. 取得件数到達まで反復（進行表示）
-        const idxLoop = FLOW_A_TITLES.length + FLOW_B_TITLES.length - 1; // 最後のノード
+        const idxLoop = FLOW_A_TITLES.length + FLOW_B_TITLES.length - 1;
         setActiveIdx(idxLoop);
         setS((a) => a.map((v, idx) => (idx === idxLoop ? "running" : v)));
         setMsg(
@@ -530,7 +543,6 @@ export default function ManualFetch() {
         setS((a) => a.map((v, idx) => (idx === idxLoop ? "done" : v)));
         setActiveIdx(-1);
 
-        // 取得が停滞している場合は少し待つ
         if (insertedNow === 0 && newCache === 0) await delay(300);
       }
 
@@ -547,6 +559,7 @@ export default function ManualFetch() {
       else setMsg(String(e?.message || e));
     } finally {
       setLoading(false);
+      setHud((prev) => ({ ...prev, running: false }));
     }
   };
 
@@ -663,6 +676,48 @@ export default function ManualFetch() {
   return (
     <>
       <AppHeader showBack />
+
+      {/* ★ Sticky HUD（実行中のみ） */}
+      {hud.running && (
+        <div className="sticky top-0 z-40">
+          <div className="mx-auto max-w-6xl px-6 py-3">
+            <div className="rounded-2xl border border-neutral-200 bg-white/95 backdrop-blur shadow-sm p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-sm font-medium text-neutral-900">
+                  新規追加 進行：
+                  <span className="text-base font-semibold">
+                    {hud.obtained}
+                  </span>
+                  <span className="text-neutral-500"> / {hud.target} 件</span>
+                </div>
+                <div className="text-xs">
+                  <span className="inline-flex items-center rounded-full border border-indigo-200 px-2.5 py-1 text-indigo-700 bg-indigo-50">
+                    近似保存: {hud.near}
+                  </span>
+                </div>
+              </div>
+              <div
+                className="mt-2 h-2 w-full rounded-full bg-neutral-100 overflow-hidden"
+                aria-hidden
+              >
+                <div
+                  className="h-full bg-indigo-500 transition-all"
+                  style={{
+                    width: `${Math.min(
+                      100,
+                      Math.floor((hud.obtained / Math.max(1, hud.target)) * 100)
+                    )}%`,
+                  }}
+                />
+              </div>
+              <div className="sr-only" aria-live="polite">
+                新規追加 {hud.obtained} / {hud.target}、近似保存 {hud.near}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       <main className="mx-auto max-w-6xl p-6">
         {/* Header & Actions */}
         <div className="mb-4 flex items-start justify-between gap-3">
@@ -1070,7 +1125,7 @@ db_probe_found: ${crawlDebug.db_probe_found ?? 0}`}
           </div>
         </section>
 
-        {/* 不適合一覧（form_prospects_rejected 反映） */}
+        {/* 不適合一覧 */}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden mt-6">
           <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 bg-neutral-50">
             <div className="text-sm font-medium text-neutral-800">

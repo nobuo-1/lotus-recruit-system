@@ -5,10 +5,11 @@ export const maxDuration = 60;
 
 import { NextResponse } from "next/server";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
+
+// ✅ 業種カタログは共通モジュールを参照
 import {
   INDUSTRY_LARGE,
   INDUSTRY_CATEGORIES,
-  INDUSTRY_SMALL_SET,
   isValidIndustryPair,
   type IndustryLarge,
 } from "@/lib/industryCatalog";
@@ -17,14 +18,19 @@ import {
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 const SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 
 const GOOGLE_CSE_KEY = process.env.GOOGLE_CSE_KEY || "";
 const GOOGLE_CSE_CX = process.env.GOOGLE_CSE_CX || "";
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || "";
 
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+
 /** ========= Types ========= */
-type EnrichBody = { since?: string; want?: number; try_llm?: boolean };
+type EnrichBody = {
+  since?: string;
+  want?: number;
+  try_llm?: boolean;
+};
 
 type CacheRow = {
   tenant_id: string;
@@ -46,7 +52,7 @@ type AddedRow = {
   industry?: string | null;
   company_size?: string | null;
   prefectures?: string[] | null;
-  job_site_source?: string | null;
+  job_site_source?: string | null; // "google" | "map"
   corporate_number?: string | null;
   hq_address?: string | null;
   capital?: number | null;
@@ -74,118 +80,22 @@ type RejectedRow = {
   created_at?: string | null;
 };
 
-/** ========= Consts / Regex ========= */
+/** ========= Utils ========= */
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36";
 const LANG = "ja,en;q=0.8";
-const PREFS = [
-  "北海道",
-  "青森県",
-  "岩手県",
-  "宮城県",
-  "秋田県",
-  "山形県",
-  "福島県",
-  "茨城県",
-  "栃木県",
-  "群馬県",
-  "埼玉県",
-  "千葉県",
-  "東京都",
-  "神奈川県",
-  "新潟県",
-  "富山県",
-  "石川県",
-  "福井県",
-  "山梨県",
-  "長野県",
-  "岐阜県",
-  "静岡県",
-  "愛知県",
-  "三重県",
-  "滋賀県",
-  "京都府",
-  "大阪府",
-  "兵庫県",
-  "奈良県",
-  "和歌山県",
-  "鳥取県",
-  "島根県",
-  "岡山県",
-  "広島県",
-  "山口県",
-  "徳島県",
-  "香川県",
-  "愛媛県",
-  "高知県",
-  "福岡県",
-  "佐賀県",
-  "長崎県",
-  "熊本県",
-  "大分県",
-  "宮崎県",
-  "鹿児島県",
-  "沖縄県",
-];
 
-const PHONE_RE = /0\d{1,4}-?\d{2,4}-?\d{3,4}/g;
-const CAPITAL_RE = /(資本金)\s*[:：]?\s*([0-9０-９,，\.．]+)\s*(億|万)?\s*円/;
-const ESTABLISHED_RE =
-  /(設立|創立|創業)\s*[:：]?\s*([0-9０-９]{2,4})[.\-/年](\s*[0-9０-９]{1,2})?(?:[.\-/月](\s*[0-9０-９]{1,2})?)?/;
-
-/** ========= Helpers ========= */
 function okUuid(s: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
     String(s || "").trim()
   );
 }
-function toHalf(s: string) {
-  return s.replace(/[Ａ-Ｚａ-ｚ０-９－ー．，：]/g, (c) =>
-    String.fromCharCode(c.charCodeAt(0) - 0xfee0)
-  );
-}
-function normalizeCompanyName(n?: string | null) {
-  if (!n) return "";
-  const s = toHalf(n)
-    .replace(/\s+/g, "")
-    .replace(/[()（）]/g, "")
-    .replace(/株式会社|有限会社|合同会社|（同）|（有）|（株）|㈱|㈲|㈼/g, "")
-    .toLowerCase();
-  return s;
-}
-function normalizeAddress(a?: string | null) {
-  if (!a) return "";
-  let s = toHalf(a)
-    .replace(/\s+/g, "")
-    .replace(/丁目/g, "-")
-    .replace(/番地?/g, "-")
-    .replace(/号/g, "")
-    .replace(/−|‐|ー|―/g, "-")
-    .toLowerCase();
-  s = s.replace(/([0-9]+)番([0-9]+)/g, "$1-$2");
-  return s;
-}
-function pickPrefectureFromAddress(addr?: string | null): string[] | null {
-  if (!addr) return null;
-  const hit = PREFS.find((p) => addr.includes(p));
-  return hit ? [hit] : null;
-}
-function normalizeUrl(u?: string | null): string | null {
-  if (!u) return null;
-  try {
-    const url = new URL(/^https?:\/\//i.test(u) ? u : `https://${u}`);
-    if (/\.(pdf|docx?|xlsx?|pptx?)$/i.test(url.pathname)) return null;
-    url.hash = "";
-    return `${url.origin}/`;
-  } catch {
-    return null;
-  }
-}
+
 async function fetchWithTimeout(
   url: string,
   init: RequestInit = {},
   ms = 10000
-) {
+): Promise<Response> {
   const ctl = new AbortController();
   const id = setTimeout(() => ctl.abort(), ms);
   try {
@@ -203,98 +113,116 @@ async function fetchWithTimeout(
     clearTimeout(id);
   }
 }
-async function getHtml(url: string): Promise<string | null> {
+
+function normalizeUrl(u?: string | null): string | null {
+  if (!u) return null;
   try {
-    const r = await fetchWithTimeout(url, { method: "GET" }, 12000);
-    if (!r.ok) return null;
-    const t = await r.text();
-    return t || null;
+    const url = new URL(/^https?:\/\//i.test(u) ? u : `https://${u}`);
+    const ext = (url.pathname || "").toLowerCase();
+    if (/\.(pdf|docx?|xlsx?|pptx?)$/.test(ext)) return null;
+    url.hash = "";
+    // ルート固定
+    url.pathname = "/";
+    url.search = "";
+    return url.toString();
   } catch {
     return null;
   }
 }
-function stripTags(html: string): string {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/<style[\s\S]*?<\/style>/gi, "")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-function htmlContainsCompany(html: string, company: string): boolean {
-  const normHtml = toHalf(html).toLowerCase();
-  const key = normalizeCompanyName(company);
-  return key ? normHtml.includes(key) : false;
-}
-function extractPhone(html?: string | null): string | null {
-  if (!html) return null;
-  const m = html.match(PHONE_RE);
-  return m?.[0] || null;
-}
-function extractCapital(html?: string | null): number | null {
-  if (!html) return null;
-  const m = html.match(CAPITAL_RE);
-  if (!m) return null;
-  const raw = toHalf(m[2]).replace(/[^\d.]/g, "");
-  const n = Number(raw || "0");
-  if (!Number.isFinite(n) || n <= 0) return null;
-  const unit = m[3] || "";
-  if (unit.includes("億")) return Math.round(n * 10000_0000);
-  if (unit.includes("万")) return Math.round(n * 10000);
-  return Math.round(n);
-}
-function pad2(n: number) {
-  return n < 10 ? `0${n}` : `${n}`;
-}
-function extractEstablished(html?: string | null): string | null {
-  if (!html) return null;
-  const m = html.match(ESTABLISHED_RE);
-  if (!m) return null;
-  const y = Number(toHalf(m[2]).replace(/[^\d]/g, ""));
-  if (!y) return null;
-  const mm = Number(toHalf(m[3] || "").replace(/[^\d]/g, "")) || 1;
-  const dd = Number(toHalf(m[4] || "").replace(/[^\d]/g, "")) || 1;
-  const yyyy = y < 100 ? 1900 + y : y;
-  return `${yyyy}-${pad2(mm)}-${pad2(dd)}`;
-}
-function prefer<T>(a: T | null | undefined, b: T | null | undefined) {
-  return a ?? b ?? null;
-}
 
-/** ========= Google CSE ========= */
-function isLikelyOfficial(link: string, company?: string | null): boolean {
+function isLikelyOfficial(url: string, company?: string | null): boolean {
+  const badHosts = [
+    "facebook.com",
+    "x.com",
+    "twitter.com",
+    "instagram.com",
+    "linkedin.com",
+    "indeed.com",
+    "jp.indeed.com",
+    "wantedly.com",
+    "en-gage.net",
+    "mynavi",
+    "doda",
+    "townwork",
+    "recruit",
+    "yahoo.co.jp",
+    "wikipedia.org",
+    "note.com",
+    "google.com",
+  ];
   try {
-    const h = new URL(link).host.toLowerCase();
-    const bad = [
-      "facebook.com",
-      "x.com",
-      "twitter.com",
-      "instagram.com",
-      "linkedin.com",
-      "indeed.com",
-      "jp.indeed.com",
-      "wantedly.com",
-      "en-gage.net",
-      "mynavi",
-      "doda",
-      "townwork",
-      "recruit",
-      "yahoo.co.jp",
-      "wikipedia.org",
-      "note.com",
-      "google.com",
-      "maps.google",
-      "goo.gl",
-      "bit.ly",
-    ];
-    if (bad.some((b) => h.includes(b))) return false;
+    const h = new URL(url).host.toLowerCase();
+    if (badHosts.some((b) => h.includes(b))) return false;
   } catch {
     return false;
   }
-  if (!company) return true;
-  const c = normalizeCompanyName(company);
-  return c ? link.toLowerCase().includes(c) : true;
+  if (company) {
+    const lc = company.toLowerCase().replace(/\s+/g, "");
+    if (url.toLowerCase().includes(lc)) return true;
+  }
+  return true;
 }
+
+async function headOk(url: string): Promise<boolean> {
+  try {
+    const r = await fetchWithTimeout(url, { method: "HEAD" }, 6000);
+    if (r.ok) return true;
+    const g = await fetchWithTimeout(url, { method: "GET" }, 8000);
+    return g.ok;
+  } catch {
+    return false;
+  }
+}
+
+function zen2han(s: string) {
+  return s
+    .replace(/[０-９]/g, (d) => String.fromCharCode(d.charCodeAt(0) - 65248))
+    .replace(/[−―ー]/g, "-")
+    .replace(/[丁目]/g, "-")
+    .replace(/[番地]/g, "-")
+    .replace(/[号]/g, "-")
+    .replace(/\s+/g, "");
+}
+
+function addressBlocksMatch(a?: string | null, b?: string | null): boolean {
+  if (!a || !b) return false;
+  const A = zen2han(a);
+  const B = zen2han(b);
+  const tok = (s: string) =>
+    s
+      .replace(/[^\d\-]/g, "")
+      .split("-")
+      .filter(Boolean);
+  const ta = tok(A);
+  const tb = tok(B);
+  if (ta.length === 0 || tb.length === 0) return false;
+  let match = 0;
+  for (let i = 0; i < Math.min(ta.length, tb.length, 4); i++) {
+    if (ta[i] === tb[i]) match++;
+    else break;
+  }
+  return match >= 3; // 1丁目-2番-3号 まで一致を要求
+}
+
+function nameVariants(n: string) {
+  const s = (n || "").trim();
+  return [
+    s,
+    s.replace(/株式会社/g, ""),
+    s.replace(/\(株\)/g, "株式会社"),
+    s.replace(/（株）/g, "株式会社"),
+    s.replace(/\s+/g, ""),
+  ].filter(Boolean);
+}
+
+function htmlContainsCompany(html?: string | null, company?: string | null) {
+  if (!html || !company) return false;
+  const h = html.replace(/\s+/g, "");
+  const variants = nameVariants(company).map((x) => x.replace(/\s+/g, ""));
+  return variants.some((v) => h.includes(v));
+}
+
+/** ========= Google 検索 ========= */
 async function findWebsiteByGoogleCSE(
   company: string,
   address?: string | null
@@ -311,42 +239,23 @@ async function findWebsiteByGoogleCSE(
       const link = normalizeUrl(it?.link);
       if (!link) continue;
       if (!isLikelyOfficial(link, company)) continue;
-      return link;
+      if (await headOk(link)) return link;
     }
   } catch {}
   return null;
 }
 
-/** ========= Google Maps（社名＋番地まで照合） ========= */
-function fuzzyEq(a: string, b: string) {
-  return normalizeCompanyName(a) === normalizeCompanyName(b);
-}
-function addressLooseMatch(a?: string | null, b?: string | null) {
-  if (!a || !b) return false;
-  const na = normalizeAddress(a);
-  const nb = normalizeAddress(b);
-  const sa = na.split("-");
-  const sb = nb.split("-");
-  const blocks = Math.min(sa.length, sb.length);
-  let eqBlocks = 0;
-  for (let i = 0; i < blocks; i++) if (sa[i] && sa[i] === sb[i]) eqBlocks++;
-  return eqBlocks >= 3 || na.slice(0, 30) === nb.slice(0, 30);
-}
+/** ========= Google Maps ========= */
 async function findWebsiteByGoogleMaps(
   company: string,
-  ntaAddr?: string | null
-): Promise<{
-  website: string | null;
-  addrMatched: boolean;
-  displayName?: string;
-  displayAddr?: string;
-}> {
-  if (!GOOGLE_MAPS_API_KEY) return { website: null, addrMatched: false };
-  const query = encodeURIComponent(`${company} ${ntaAddr || ""}`.trim());
+  address?: string | null
+): Promise<{ website: string; addrMatched: boolean } | null> {
+  if (!GOOGLE_MAPS_API_KEY) return null;
+  const query = encodeURIComponent(`${company} ${address || ""}`.trim());
   const textSearch = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${query}&language=ja&key=${GOOGLE_MAPS_API_KEY}`;
   try {
     const r = await fetchWithTimeout(textSearch, {}, 8000);
-    if (!r.ok) return { website: null, addrMatched: false };
+    if (!r.ok) return null;
     const j = (await r.json()) as any;
     const cand: any[] = Array.isArray(j?.results) ? j.results : [];
     for (const c of cand) {
@@ -358,27 +267,291 @@ async function findWebsiteByGoogleMaps(
       const d = await fetchWithTimeout(details, {}, 8000);
       if (!d.ok) continue;
       const dj = (await d.json()) as any;
-      const name = String(dj?.result?.name || "");
-      const addr = String(dj?.result?.formatted_address || "");
       const siteRaw: string | null =
         dj?.result?.website || dj?.result?.url || null;
       const site = normalizeUrl(siteRaw);
-
-      const nameOk =
-        fuzzyEq(name, company) ||
-        normalizeCompanyName(name).includes(normalizeCompanyName(company));
-      const addrOk = addressLooseMatch(addr, ntaAddr || "");
-      if (site && nameOk && addrOk) {
-        return {
-          website: site,
-          addrMatched: true,
-          displayName: name,
-          displayAddr: addr,
-        };
-      }
+      if (!site) continue;
+      if (!(await headOk(site))) continue;
+      const fAddr: string | null = dj?.result?.formatted_address || null;
+      const matched = addressBlocksMatch(address || "", fAddr || "");
+      return { website: site, addrMatched: !!matched };
     }
   } catch {}
-  return { website: null, addrMatched: false };
+  return null;
+}
+
+/** ========= HTML & Profile Scrape (軽量) ========= */
+async function getHtml(url: string): Promise<string | null> {
+  try {
+    const r = await fetchWithTimeout(url, {}, 10000);
+    if (!r.ok) return null;
+    const t = await r.text();
+    return t.slice(0, 2_000_000);
+  } catch {
+    return null;
+  }
+}
+
+const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+const PHONE_RE = /0\d{1,3}[-(（]?\d{1,4}[)-）]?\d{3,4}/g;
+
+function parseYenNumber(s: string) {
+  try {
+    const m = s.replace(/[,，]/g, "").match(/\d{2,}/);
+    if (!m) return null;
+    return Number(m[0]);
+  } catch {
+    return null;
+  }
+}
+
+function parseDate(s: string): string | null {
+  const z = s.replace(/\s+/g, "");
+  let m = z.match(/(\d{4})[\/\-年](\d{1,2})[\/\-月](\d{1,2})/);
+  if (m) {
+    const [_, y, mth, d] = m;
+    const mm = String(Number(mth)).padStart(2, "0");
+    const dd = String(Number(d)).padStart(2, "0");
+    return `${y}-${mm}-${dd}`;
+  }
+  m = z.match(/(\d{4})[\/\-年](\d{1,2})/);
+  if (m) {
+    const [_, y, mth] = m;
+    const mm = String(Number(mth)).padStart(2, "0");
+    return `${y}-${mm}-01`;
+  }
+  return null;
+}
+
+function extractPrefecture(addr?: string | null): string[] | null {
+  if (!addr) return null;
+  const prefs = [
+    "北海道",
+    "青森県",
+    "岩手県",
+    "宮城県",
+    "秋田県",
+    "山形県",
+    "福島県",
+    "茨城県",
+    "栃木県",
+    "群馬県",
+    "埼玉県",
+    "千葉県",
+    "東京都",
+    "神奈川県",
+    "新潟県",
+    "富山県",
+    "石川県",
+    "福井県",
+    "山梨県",
+    "長野県",
+    "岐阜県",
+    "静岡県",
+    "愛知県",
+    "三重県",
+    "滋賀県",
+    "京都府",
+    "大阪府",
+    "兵庫県",
+    "奈良県",
+    "和歌山県",
+    "鳥取県",
+    "島根県",
+    "岡山県",
+    "広島県",
+    "山口県",
+    "徳島県",
+    "香川県",
+    "愛媛県",
+    "高知県",
+    "福岡県",
+    "佐賀県",
+    "長崎県",
+    "熊本県",
+    "大分県",
+    "宮崎県",
+    "鹿児島県",
+    "沖縄県",
+  ];
+  const hit = prefs.find((p) => (addr || "").includes(p));
+  return hit ? [hit] : null;
+}
+
+async function profileScrape(baseUrl: string): Promise<{
+  htmlTop?: string | null;
+  htmlAbout?: string | null;
+  contact_form_url?: string | null;
+  contact_email?: string | null;
+  phone?: string | null;
+  capital?: number | null;
+  established_on?: string | null;
+  hq_address?: string | null;
+  company_size?: string | null;
+}> {
+  const res: any = {};
+  const html = await getHtml(baseUrl);
+  res.htmlTop = html;
+
+  const linkMatch =
+    html?.match(/href\s*=\s*["']([^"']+)["'][^>]*>([^<]{0,40})<\/a>/gi) || [];
+  const links = linkMatch
+    .map((a) => {
+      const href = a.match(/href\s*=\s*["']([^"']+)["']/i)?.[1] ?? "";
+      const text = a.replace(/<[^>]+>/g, "");
+      return { href, text };
+    })
+    .filter(Boolean);
+
+  const findLink = (kw: RegExp) =>
+    links.find(
+      (l) =>
+        kw.test((l.text || "").toLowerCase()) ||
+        kw.test((l.href || "").toLowerCase())
+    );
+
+  const contactCandidate =
+    findLink(/contact|お問い合わせ|問合せ|問合わせ|お問合せ/) ||
+    findLink(/inquiry|inquiries/);
+  if (contactCandidate?.href) {
+    try {
+      const u = new URL(contactCandidate.href, baseUrl).toString();
+      res.contact_form_url = u;
+    } catch {}
+  }
+
+  if (html) {
+    const mail = html.match(EMAIL_RE)?.[0];
+    if (mail) res.contact_email = mail;
+    const ph = html.match(PHONE_RE)?.[0];
+    if (ph) res.phone = ph;
+  }
+
+  const aboutCandidate =
+    findLink(/会社概要|企業情報|会社情報|corporate|about|会社案内|沿革/) ||
+    null;
+  if (aboutCandidate?.href) {
+    try {
+      const aboutUrl = new URL(aboutCandidate.href, baseUrl).toString();
+      res.htmlAbout = await getHtml(aboutUrl);
+    } catch {}
+  }
+
+  const pool = [res.htmlTop, res.htmlAbout].filter(Boolean).join("\n");
+  if (pool) {
+    const capBlock =
+      pool.match(/資本金[^0-9]{0,10}([0-9,，]+)万?円/) ||
+      pool.match(/capital[^0-9]{0,10}([0-9,，]+)/i);
+    if (capBlock?.[1]) res.capital = parseYenNumber(capBlock[1]);
+
+    const estBlock =
+      pool.match(/設立[^0-9]{0,10}([0-9０-９年\/\-月日\s]+)/) ||
+      pool.match(/創業[^0-9]{0,10}([0-9０-９年\/\-月日\s]+)/);
+    if (estBlock?.[1]) res.established_on = parseDate(zen2han(estBlock[1]));
+
+    const addrBlock =
+      pool.match(/所在地[^<]{0,40}(〒?\s?\d{3}-\d{4}[^<\n]{4,60})/) ||
+      pool.match(/住所[^<]{0,40}(〒?\s?\d{3}-\d{4}[^<\n]{4,60})/);
+    if (addrBlock?.[1])
+      res.hq_address = addrBlock[1].replace(/<[^>]+>/g, "").trim();
+
+    const sizeBlock =
+      pool.match(/従業員[^0-9]{0,10}([0-9,，]+)名/) ||
+      pool.match(/社員数[^0-9]{0,10}([0-9,，]+)名/);
+    if (sizeBlock?.[1])
+      res.company_size = `${sizeBlock[1].replace(/[,，]/g, "")}名`;
+  }
+
+  return res;
+}
+
+/** ========= LLM業種判定（industryCatalog を厳守） ========= */
+async function classifyIndustryWithLLM(input: {
+  companyName: string;
+  htmlTop?: string | null;
+  htmlAbout?: string | null;
+}): Promise<{ large: IndustryLarge; small: string }> {
+  // フォールバック: カタログから妥当な組み合わせを合成
+  const fallback = (): { large: IndustryLarge; small: string } => {
+    const txt = [input.htmlTop || "", input.htmlAbout || ""]
+      .join(" ")
+      .toLowerCase();
+    const choose = <T extends string>(arr: readonly T[], def: T): T =>
+      (arr.find((x) => txt.includes(x as any)) as T) || def;
+
+    // 簡易ヒューリスティック
+    if (/(病院|クリニック|介護|福祉|訪問看護)/.test(txt))
+      return { large: "医療・福祉", small: "医療系サービス" };
+    if (/(システム開発|ソフトウェア|saas|受託開発|クラウド)/.test(txt))
+      return { large: "情報通信・メディア", small: "受託開発・SI" };
+    if (/(物流|倉庫|運送|トラック)/.test(txt))
+      return { large: "運輸・物流・郵便", small: "物流・3PL" };
+    if (/(建設|土木|設備工事|電気工事|解体)/.test(txt))
+      return { large: "建設", small: "総合工事" };
+    if (/(ホテル|旅館|レストラン|カフェ|飲食)/.test(txt))
+      return {
+        large: "宿泊・飲食",
+        small: "飲食店（レストラン・カフェ・バー）",
+      };
+
+    // デフォルト
+    return {
+      large: "その他サービス",
+      small: INDUSTRY_CATEGORIES["その他サービス"][0] || "その他サービス",
+    };
+  };
+
+  try {
+    if (!OPENAI_API_KEY) return fallback();
+
+    const sys = [
+      "あなたは企業の業種を分類するアシスタントです。",
+      "必ず INDUSTRY_LARGE と INDUSTRY_CATEGORIES の候補からのみ選びます。",
+      '出力は JSON 1行のみ: {"large":"<大分類>","small":"<小分類>"}',
+    ].join("\n");
+
+    const content = [
+      `会社名: ${input.companyName}`,
+      `トップHTML(冒頭2k): ${(input.htmlTop || "").slice(0, 2000)}`,
+      `会社概要HTML(冒頭2k): ${(input.htmlAbout || "").slice(0, 2000)}`,
+      `候補（厳守）:`,
+      `LARGE=${JSON.stringify(INDUSTRY_LARGE)}`,
+      `CATS=${JSON.stringify(INDUSTRY_CATEGORIES)}`,
+      `ルール: 候補に無い語は出力しない / 小分類は1つのみ`,
+    ].join("\n");
+
+    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        temperature: 0,
+        messages: [
+          { role: "system", content: sys },
+          { role: "user", content },
+        ],
+        response_format: { type: "json_object" },
+      }),
+    });
+    if (!resp.ok) return fallback();
+
+    const j = await resp.json();
+    const txt: string =
+      j?.choices?.[0]?.message?.content || j?.choices?.[0]?.message?.role || "";
+    const parsed = JSON.parse(txt || "{}");
+    const large = parsed.large as string | undefined;
+    const small = parsed.small as string | undefined;
+
+    if (isValidIndustryPair(large, small)) {
+      return { large: large as IndustryLarge, small: small as string };
+    }
+    return fallback();
+  } catch {
+    return fallback();
+  }
 }
 
 /** ========= Supabase ========= */
@@ -397,9 +570,9 @@ function getAdmin() {
   return { sb: createClient(SUPABASE_URL, ANON_KEY), usingServiceRole: false };
 }
 
-/** ========= DB: load recent NTA cache ========= */
+/** ========= 直近キャッシュ ========= */
 async function loadRecentCache(
-  sb: SupabaseClient,
+  sb: any,
   tenantId: string,
   sinceISO: string,
   limit: number
@@ -417,128 +590,161 @@ async function loadRecentCache(
   return (data || []) as CacheRow[];
 }
 
-/** ========= 既存参照 ========= */
-async function selectByCorpnum(
+/** ========= 近似企業保存 ========= */
+async function upsertSimilarSite(
   sb: SupabaseClient,
-  tenant_id: string,
-  corporate_number: string
-) {
-  const { data } = await sb
-    .from("form_prospects")
-    .select("*")
-    .eq("tenant_id", tenant_id)
-    .eq("corporate_number", corporate_number)
-    .limit(1)
-    .maybeSingle();
-  return (data as AddedRow) || null;
-}
-async function selectByWebsiteLoose(
-  sb: SupabaseClient,
-  tenant_id: string,
-  website: string
-) {
-  let { data } = await sb
-    .from("form_prospects")
-    .select("*")
-    .eq("tenant_id", tenant_id)
-    .eq("website", website)
-    .limit(1)
-    .maybeSingle();
-  if (!data) {
-    const { data: d2 } = await sb
-      .from("form_prospects")
-      .select("*")
-      .eq("tenant_id", tenant_id)
-      .ilike("website", `${website}%`)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    data = d2 || null;
+  p: {
+    tenant_id: string;
+    target_corporate_number?: string | null;
+    target_company_name?: string | null;
+    target_hq_address?: string | null;
+    found_company_name?: string | null;
+    found_website: string;
+    source_site?: string | null;
+    matched_addr?: boolean;
+    matched_company_ratio?: number | null;
+    contact_form_url?: string | null;
+    contact_email?: string | null;
+    phone?: string | null;
+    reasons?: string[] | null;
   }
+) {
+  const now = new Date().toISOString();
+  const payload = {
+    ...p,
+    found_website: normalizeUrl(p.found_website)!,
+    matched_addr: !!p.matched_addr,
+    reasons: p.reasons ?? ["社名不一致だがコンタクト手段あり"],
+    updated_at: now,
+  };
+  const { error } = await sb
+    .from("form_similar_sites")
+    .upsert(payload, { onConflict: "tenant_id,found_website" });
+  if (error) throw new Error(error.message);
+}
+
+/** ========= form_prospects UPSERT（エラー耐性） ========= */
+async function selectExistingProspect(
+  sb: SupabaseClient,
+  tenant_id: string,
+  corporate_number?: string | null,
+  website?: string | null
+): Promise<AddedRow | null> {
+  const w = website ? normalizeUrl(website) : null;
+  let q = sb.from("form_prospects").select("*").eq("tenant_id", tenant_id);
+  if (corporate_number) {
+    q = q.or(
+      `corporate_number.eq.${corporate_number},website.eq.${w ?? "null"}`
+    );
+  } else if (w) {
+    q = q.eq("website", w);
+  }
+  const { data, error } = await q
+    .order("updated_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) return null;
   return (data as AddedRow) || null;
 }
 
-/** ========= 競合安全 UPSERT（重複でも500を出さない） ========= */
-type SaveInput = {
-  tenant_id: string;
-  company_name: string;
-  website: string;
-  job_site_source: "google" | "map";
-  corporate_number?: string | null;
-  hq_address?: string | null;
-  contact_email?: string | null;
-  contact_form_url?: string | null;
-  phone?: string | null;
-  industry?: string | null;
-  company_size?: string | null;
-  prefectures?: string[] | null;
-  capital?: number | null;
-  established_on?: string | null;
-};
+function mergeProspect(existing: any, incoming: any) {
+  const pick = (a: any, b: any) => (a == null || a === "" ? b ?? a : a);
+  const merged = { ...existing };
+  const keys = [
+    "company_name",
+    "website",
+    "contact_email",
+    "contact_form_url",
+    "phone",
+    "industry",
+    "company_size",
+    "prefectures",
+    "job_site_source",
+    "corporate_number",
+    "hq_address",
+    "capital",
+    "established_on",
+  ];
+  for (const k of keys) merged[k] = pick(existing[k], incoming[k]);
+  return merged;
+}
 
 async function upsertProspectSafe(
   sb: SupabaseClient,
-  row: SaveInput
-): Promise<{ saved: AddedRow; createdNew: boolean }> {
-  const site = normalizeUrl(row.website)!;
-  const corpRaw = (row.corporate_number || "").trim();
-  const corp = corpRaw.length ? corpRaw : null;
+  row: Omit<AddedRow, "id" | "created_at"> & { created_at?: string | null }
+): Promise<{ saved: AddedRow }> {
+  const now = new Date().toISOString();
+  const payload: any = { ...row, created_at: row.created_at ?? now };
+  const corp = (row.corporate_number || "").trim() || null;
 
-  // 既存を読んで NULL潰しマージ
-  let base: AddedRow | null = null;
-  if (corp) base = await selectByCorpnum(sb, row.tenant_id, corp);
-  if (!base) base = await selectByWebsiteLoose(sb, row.tenant_id, site);
+  if (corp) {
+    try {
+      const { data, error } = await sb
+        .from("form_prospects")
+        .upsert(payload, { onConflict: "tenant_id,corporate_number" })
+        .select("*")
+        .limit(1)
+        .maybeSingle();
+      if (error) throw error;
+      return { saved: data as AddedRow };
+    } catch (e: any) {
+      // 23505等は下でマージ対応
+      const existed = await selectExistingProspect(
+        sb,
+        row.tenant_id,
+        corp,
+        row.website || null
+      );
+      if (existed) {
+        const merged = mergeProspect(existed, payload);
+        const { data: upd, error: ue } = await sb
+          .from("form_prospects")
+          .update(merged)
+          .eq("id", existed.id)
+          .select("*")
+          .maybeSingle();
+        if (ue) throw ue;
+        return { saved: upd as AddedRow };
+      }
+    }
+  }
 
-  const payload = {
-    tenant_id: row.tenant_id,
-    company_name: prefer(row.company_name, base?.company_name),
-    website: site,
-    contact_email: prefer(row.contact_email ?? null, base?.contact_email),
-    contact_form_url: prefer(
-      row.contact_form_url ?? null,
-      base?.contact_form_url
-    ),
-    phone: prefer(row.phone ?? null, base?.phone),
-    industry: prefer(row.industry ?? null, base?.industry),
-    company_size: prefer(row.company_size ?? null, base?.company_size),
-    prefectures: prefer(row.prefectures ?? null, base?.prefectures),
-    job_site_source:
-      prefer(row.job_site_source, base?.job_site_source) || "google",
-    corporate_number: corp ?? base?.corporate_number ?? null,
-    hq_address: prefer(row.hq_address ?? null, base?.hq_address),
-    capital: prefer(row.capital ?? null, base?.capital),
-    established_on: prefer(row.established_on ?? null, base?.established_on),
-  };
-
-  // corp あり： (tenant_id, corporate_number) で UPSERT
-  if (payload.corporate_number) {
+  try {
     const { data, error } = await sb
       .from("form_prospects")
-      .upsert(payload, { onConflict: "tenant_id,corporate_number" })
+      .upsert(payload, { onConflict: "tenant_id,website" })
       .select("*")
       .limit(1)
       .maybeSingle();
-    if (error) throw new Error(error.message);
-    const saved = data as AddedRow;
-    const createdNew = saved?.created_at
-      ? Date.parse(saved.created_at) > Date.now() - 120000
-      : false;
-    return { saved, createdNew };
+    if (error) throw error;
+    return { saved: data as AddedRow };
+  } catch {
+    const existed = await selectExistingProspect(
+      sb,
+      row.tenant_id,
+      corp,
+      row.website || null
+    );
+    if (existed) {
+      const merged = mergeProspect(existed, payload);
+      const { data: upd, error: ue } = await sb
+        .from("form_prospects")
+        .update(merged)
+        .eq("id", existed.id)
+        .select("*")
+        .maybeSingle();
+      if (ue) throw ue;
+      return { saved: upd as AddedRow };
+    } else {
+      const { data: ins, error: ie } = await sb
+        .from("form_prospects")
+        .insert(payload)
+        .select("*")
+        .maybeSingle();
+      if (ie) throw ie;
+      return { saved: ins as AddedRow };
+    }
   }
-
-  // corp なし： (tenant_id, website) で UPSERT（ユニークあり）
-  const { data, error } = await sb
-    .from("form_prospects")
-    .upsert(payload, { onConflict: "tenant_id,website" })
-    .select("*")
-    .limit(1)
-    .maybeSingle();
-  if (error) throw new Error(error.message);
-  const saved = data as AddedRow;
-  const createdNew = saved?.created_at
-    ? Date.parse(saved.created_at) > Date.now() - 120000
-    : false;
-  return { saved, createdNew };
 }
 
 /** ========= rejected へ INSERT ========= */
@@ -550,154 +756,6 @@ async function insertRejected(
   const payload = { ...r, created_at: now };
   const { error } = await sb.from("form_prospects_rejected").insert(payload);
   if (error) throw new Error(error.message);
-}
-
-/** ========= 会社概要抽出 ========= */
-async function profileScrape(website: string) {
-  const res: {
-    contact_form_url?: string | null;
-    phone?: string | null;
-    capital?: number | null;
-    established_on?: string | null;
-    company_size?: string | null;
-    industry?: string | null;
-    hq_address?: string | null;
-    htmlTop?: string | null;
-    htmlAbout?: string | null;
-  } = {};
-  const top = await getHtml(website);
-  res.htmlTop = top || null;
-  if (top) {
-    res.phone = extractPhone(top) ?? null;
-    const m = top.match(
-      /href=["']([^"']{1,200})["'][^>]*>([^<]{0,40}お問い合わせ|CONTACT|Contact|お問合せ)/i
-    );
-    if (m) {
-      const href = m[1];
-      try {
-        res.contact_form_url = new URL(href, website).toString();
-      } catch {}
-    }
-  }
-
-  const cand = [
-    "company/",
-    "corporate/",
-    "about/",
-    "about-us/",
-    "profile/",
-    "company.html",
-    "corporate.html",
-    "about.html",
-    "会社概要",
-    "企業情報",
-  ];
-  for (const p of cand) {
-    try {
-      const u = new URL(p, website).toString();
-      const h = await getHtml(u);
-      if (!h) continue;
-      res.htmlAbout = res.htmlAbout ?? h;
-      res.capital = res.capital ?? extractCapital(h);
-      res.established_on = res.established_on ?? extractEstablished(h);
-      res.phone = res.phone ?? extractPhone(h);
-      if (!res.company_size) {
-        const m = h.match(
-          /(従業員|職員|社員)\s*[数数]?\s*[:：]?\s*([0-9０-９,，\.．]+)\s*名/
-        );
-        if (m) res.company_size = toHalf(m[2]).replace(/[^\d]/g, "") + "名";
-      }
-      if (!res.hq_address) {
-        const m = h.match(/(所在地|本社|住所)\s*[:：]?\s*([^\n<]{6,80})/);
-        if (m) res.hq_address = m[2].trim();
-      }
-      if (
-        res.capital ||
-        res.established_on ||
-        res.company_size ||
-        res.hq_address
-      )
-        break;
-    } catch {}
-  }
-  return res;
-}
-
-/** ========= 業種をChatGPTで厳密分類（REST fetch 版） ========= */
-async function classifyIndustryWithLLM(params: {
-  companyName: string;
-  htmlTop?: string | null;
-  htmlAbout?: string | null;
-}): Promise<{ large: IndustryLarge; small: string }> {
-  const FALL_LARGE: IndustryLarge = "その他サービス";
-  const FALL_SMALL = "その他サービス";
-  if (!OPENAI_API_KEY) return { large: FALL_LARGE, small: FALL_SMALL };
-
-  const text = [params.htmlAbout, params.htmlTop]
-    .filter(Boolean)
-    .map((h) => stripTags(String(h)).slice(0, 6000))
-    .join("\n")
-    .slice(0, 9000);
-
-  const system = [
-    "あなたは企業の事業内容から業種を判定するアシスタントです。",
-    "必ず与えられた候補リストの中からのみ、【大分類】と【小分類】を1つずつ選びます。",
-    "候補に無い語は絶対に返さないでください。迷う場合は「その他サービス / その他サービス」を選んでください。",
-  ].join("\n");
-  const catJson = JSON.stringify(INDUSTRY_CATEGORIES);
-  const user = [
-    `会社名: ${params.companyName}`,
-    "以下は会社の公式サイトから抽出したテキストの一部です。候補リストに厳密一致で選択してください。",
-    "",
-    "【候補リスト(JSON)】",
-    catJson,
-    "",
-    "【サイト本文 抜粋】",
-    text || "(データ少)",
-    "",
-    "出力は必ず以下のJSONだけにしてください:",
-    `{"large":"<大分類>","small":"<小分類>"}`,
-  ].join("\n");
-
-  try {
-    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${OPENAI_API_KEY}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        temperature: 0.1,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: user },
-        ],
-      }),
-    });
-    if (!resp.ok) throw new Error(`OpenAI ${resp.status}`);
-    const j = await resp.json();
-    const content: string =
-      j?.choices?.[0]?.message?.content ??
-      j?.choices?.[0]?.message?.tool_calls?.[0]?.function?.arguments ??
-      "{}";
-    const parsed = JSON.parse(content) as { large?: string; small?: string };
-
-    if (isValidIndustryPair(parsed.large as any, parsed.small)) {
-      return {
-        large: parsed.large as IndustryLarge,
-        small: parsed.small as string,
-      };
-    }
-    if (parsed.small && INDUSTRY_SMALL_SET.has(parsed.small)) {
-      const foundLarge = (
-        Object.keys(INDUSTRY_CATEGORIES) as IndustryLarge[]
-      ).find((L) => INDUSTRY_CATEGORIES[L].includes(parsed.small as string));
-      if (foundLarge) return { large: foundLarge, small: parsed.small };
-    }
-  } catch {}
-  return { large: FALL_LARGE, small: FALL_SMALL };
 }
 
 /** ========= メイン ========= */
@@ -718,6 +776,7 @@ export async function POST(req: Request) {
         ? body.since
         : new Date(Date.now() - 24 * 3600 * 1000).toISOString();
     const want = Math.max(1, Math.min(2000, Number(body?.want ?? 30)));
+    const tryLLM = !!body?.try_llm;
 
     const { sb } = getAdmin();
 
@@ -727,10 +786,10 @@ export async function POST(req: Request) {
     const rows: AddedRow[] = [];
     const rejected: RejectedRow[] = [];
     let inserted = 0;
+    let nearMissSaved = 0;
 
     for (const c of candidates) {
       if (rows.length >= want) break;
-
       const name = (c.company_name || "").trim();
       if (!name) {
         rejected.push({
@@ -738,21 +797,21 @@ export async function POST(req: Request) {
           corporate_number: c.corporate_number || null,
           hq_address: c.address || null,
           reject_reasons: ["会社名が空のためスキップ"],
+          source_site: "cache",
         });
         continue;
       }
 
-      // 1) CSE
+      // 1) CSE → 2) Maps（Mapsは番地一致が必須）
       let website: string | null = await findWebsiteByGoogleCSE(
         name,
         c.address
       );
       let source: "google" | "map" | null = website ? "google" : null;
 
-      // 2) Maps（社名 + 番地照合）
       if (!website) {
         const viaMap = await findWebsiteByGoogleMaps(name, c.address);
-        if (viaMap.website && viaMap.addrMatched) {
+        if (viaMap && viaMap.addrMatched) {
           website = viaMap.website;
           source = "map";
         }
@@ -764,67 +823,98 @@ export async function POST(req: Request) {
           corporate_number: c.corporate_number || null,
           hq_address: c.address || null,
           reject_reasons: [
-            "公式サイトが確定できず",
-            GOOGLE_CSE_KEY && GOOGLE_CSE_CX ? "CSE利用" : "CSE未設定",
-            GOOGLE_MAPS_API_KEY ? "Maps利用" : "Maps未設定",
+            "公式サイトが検索/マップともに確定できず",
+            GOOGLE_CSE_KEY && GOOGLE_CSE_CX ? "CSE利用済み" : "CSE未設定",
+            GOOGLE_MAPS_API_KEY ? "Maps利用済み" : "Maps未設定",
           ],
+          source_site: "none",
         });
         continue;
       }
 
-      // 3) トップHTMLに社名必須
+      // 2.5) トップページHTML
       const htmlTop = await getHtml(website);
-      if (!htmlTop || !htmlContainsCompany(htmlTop, name)) {
+
+      // 3) 会社概要等抽出
+      const prof = await profileScrape(website);
+
+      // 3.1) トップHTMLに社名無し → 近似保存（フォーム or メールがある場合に限る）
+      if (!htmlContainsCompany(htmlTop, name)) {
+        const hasContact = !!(prof.contact_form_url || prof.contact_email);
+        if (hasContact) {
+          try {
+            await upsertSimilarSite(sb, {
+              tenant_id: tenantId,
+              target_corporate_number: c.corporate_number || null,
+              target_company_name: name,
+              target_hq_address: c.address || null,
+              found_company_name: null,
+              found_website: website,
+              source_site: source || "google",
+              matched_addr: false,
+              matched_company_ratio: null,
+              contact_form_url: prof.contact_form_url || null,
+              contact_email: prof.contact_email || null,
+              phone: prof.phone || null,
+              reasons: ["トップHTML社名不一致／近似サイト保存"],
+            });
+            nearMissSaved += 1;
+          } catch {}
+        }
+
         rejected.push({
           company_name: name,
           website,
           corporate_number: c.corporate_number || null,
           hq_address: c.address || null,
-          reject_reasons: ["トップHTMLに社名が見当たらず除外"],
+          reject_reasons: [
+            "トップHTMLに社名が見当たらず除外",
+            hasContact ? "近似サイトは別テーブルに保存" : "連絡手段無し",
+          ],
+          source_site: source || "google",
         });
         continue;
       }
 
-      // 4) 会社概要抽出
-      const prof = await profileScrape(website);
-      const prefFromAddr =
-        pickPrefectureFromAddress(prof.hq_address || c.address) ||
-        pickPrefectureFromAddress(c.address);
+      // 4) 都道府県・業種
+      const pref =
+        extractPrefecture(prof.hq_address || c.address) ||
+        extractPrefecture(c.address);
+      let industryValue: string | null = null;
+      if (tryLLM) {
+        const cls = await classifyIndustryWithLLM({
+          companyName: name,
+          htmlTop: prof.htmlTop,
+          htmlAbout: prof.htmlAbout,
+        });
+        industryValue = `${cls.large} / ${cls.small}`;
+      }
 
-      // 5) 業種（候補厳守）
-      const { large, small } = await classifyIndustryWithLLM({
-        companyName: name,
-        htmlTop: prof.htmlTop || htmlTop,
-        htmlAbout: prof.htmlAbout,
-      });
-      const industryValue = `${large} / ${small}`;
-
-      // 6) 競合安全 UPSERT（onConflict で排他制御）
+      // 5) 競合安全 UPSERT（ユニーク整合に耐性あり）
       try {
-        const { saved, createdNew } = await upsertProspectSafe(sb, {
+        const { saved } = await upsertProspectSafe(sb, {
           tenant_id: tenantId,
           company_name: name,
           website,
           job_site_source: (source || "google") as "google" | "map",
           corporate_number: (c.corporate_number || "").trim() || null,
           hq_address: prof.hq_address || c.address || null,
-          contact_email: null,
+          contact_email: prof.contact_email || null,
           contact_form_url: prof.contact_form_url || null,
           phone: prof.phone || null,
           industry: industryValue,
           company_size: prof.company_size || null,
-          prefectures: prefFromAddr,
+          prefectures: pref || null,
           capital: prof.capital ?? null,
           established_on: prof.established_on ?? null,
         });
 
         rows.push(saved);
-        // 新規作成だけカウント（upsert でも created_at は新規でのみ近い時刻）
+
         const createdAt = saved.created_at ? Date.parse(saved.created_at) : NaN;
         const sinceAt = Date.parse(since);
         if (Number.isFinite(createdAt) && createdAt >= sinceAt) inserted += 1;
       } catch (e: any) {
-        // 競合やその他は reject に回して継続（500を出さない）
         rejected.push({
           company_name: name,
           website,
@@ -834,10 +924,12 @@ export async function POST(req: Request) {
             "保存時エラー",
             String(e?.message || e).slice(0, 160),
           ],
+          source_site: source || "google",
         });
       }
     }
 
+    // 不適合を反映
     for (const r of rejected) {
       await insertRejected(sb, { ...r, tenant_id: tenantId });
     }
@@ -847,11 +939,12 @@ export async function POST(req: Request) {
         rows,
         rejected,
         inserted,
+        near_miss_saved: nearMissSaved,
         trace,
         used: {
           google_cse: Boolean(GOOGLE_CSE_KEY && GOOGLE_CSE_CX),
           maps_places: Boolean(GOOGLE_MAPS_API_KEY),
-          openai: Boolean(OPENAI_API_KEY),
+          llm: Boolean(OPENAI_API_KEY && tryLLM),
         },
       },
       { status: 200 }
