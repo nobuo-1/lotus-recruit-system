@@ -3,7 +3,13 @@
 import React, { useEffect, useMemo, useState } from "react";
 import AppHeader from "@/components/AppHeader";
 import Link from "next/link";
-import { ChevronLeft, ChevronRight, ArrowUpDown } from "lucide-react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown,
+} from "lucide-react";
 
 type Dataset = "prospects" | "rejected" | "similar";
 
@@ -82,7 +88,6 @@ function ellipsize(u?: string | null, max = 54) {
 
 const PAGE_SIZE = 10;
 
-/** ▼ カラム定義型（required を常に持たせる） */
 type ColumnDef = {
   key: string;
   label: string;
@@ -90,7 +95,6 @@ type ColumnDef = {
   required: boolean;
 };
 
-/** ▼ テーブル別カラム（社名系のみ required: true、他は false を明示） */
 const COLS: Record<Dataset, ColumnDef[]> = {
   prospects: [
     { key: "company_name", label: "社名", sortable: true, required: true },
@@ -200,10 +204,9 @@ const COLS: Record<Dataset, ColumnDef[]> = {
 
 export default function CompaniesPage() {
   const [tenantId, setTenantId] = useState<string | null>(null);
-
   const [dataset, setDataset] = useState<Dataset>("prospects");
 
-  // フィルタ
+  // filters
   const [q, setQ] = useState("");
   const [emailFilter, setEmailFilter] = useState<"" | "has" | "none">("");
   const [formFilter, setFormFilter] = useState<"" | "has" | "none">("");
@@ -213,27 +216,24 @@ export default function CompaniesPage() {
   const [dateTo, setDateTo] = useState("");
   const [matchedAddr, setMatchedAddr] = useState<"" | "true" | "false">("");
 
-  // 並び
+  // sort
   const [sortKey, setSortKey] = useState<string>("created_at");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
-  // ページネーション
+  // pagination
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
 
-  // データ
+  // data
   const [rows, setRows] = useState<AnyRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
 
-  // ▼ カラム一覧（dataset 切替で都度入れ替え）: 明示的に ColumnDef[] にする
   const colList: ColumnDef[] = useMemo(() => COLS[dataset], [dataset]);
 
-  // カラム可視（社名は固定で true & disable）
   const [visibleCols, setVisibleCols] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
-    // 初期は、社名+いくつかをONに
     const init: Record<string, boolean> = {};
     for (const c of colList) {
       if (c.required) init[c.key] = true;
@@ -258,7 +258,6 @@ export default function CompaniesPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dataset, colList]);
 
-  // テナント取得
   useEffect(() => {
     (async () => {
       try {
@@ -268,13 +267,12 @@ export default function CompaniesPage() {
         const me = await meRes.json().catch(() => ({}));
         const tId = me?.tenant_id ?? me?.profile?.tenant_id ?? null;
         setTenantId(tId);
-      } catch (e) {
+      } catch {
         setTenantId(null);
       }
     })();
   }, []);
 
-  // データ取得
   const load = async () => {
     if (!tenantId) return;
     setLoading(true);
@@ -313,13 +311,11 @@ export default function CompaniesPage() {
     }
   };
 
-  // データ再取得トリガ
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenantId, dataset, page, sortKey, sortDir]);
 
-  // フィルタ適用ボタン
   const applyFilters = () => {
     setPage(1);
     load();
@@ -327,7 +323,6 @@ export default function CompaniesPage() {
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
-  // 表示ヘッダ
   const headers: ColumnDef[] = useMemo(
     () => colList.filter((c: ColumnDef) => visibleCols[c.key] || c.required),
     [colList, visibleCols]
@@ -384,7 +379,6 @@ export default function CompaniesPage() {
       "found_company_name" in row &&
       (row as any).found_company_name
     ) {
-      // similar では補助表示
       return (
         <div>
           <div>{String(v || "-")}</div>
@@ -395,6 +389,24 @@ export default function CompaniesPage() {
       );
     }
     return v ?? "-";
+  };
+
+  const tabLabel = (id: Dataset) =>
+    id === "prospects"
+      ? "正規企業リスト"
+      : id === "rejected"
+      ? "不備企業リスト"
+      : "近似サイトリスト";
+
+  const sortIcon = (key: string, sortable: boolean) => {
+    if (!sortable) return null;
+    if (sortKey !== key)
+      return <ArrowUpDown className="h-3.5 w-3.5 text-neutral-400" />;
+    return sortDir === "asc" ? (
+      <ArrowUp className="h-3.5 w-3.5 text-neutral-800" />
+    ) : (
+      <ArrowDown className="h-3.5 w-3.5 text-neutral-800" />
+    );
   };
 
   return (
@@ -426,23 +438,19 @@ export default function CompaniesPage() {
           </div>
         </div>
 
-        {/* タブ */}
+        {/* タブ（表示名を変更） */}
         <div className="mb-3 inline-flex rounded-lg border border-neutral-200 overflow-hidden">
-          {[
-            { id: "prospects", label: "form_prospects" },
-            { id: "rejected", label: "form_prospects_rejected" },
-            { id: "similar", label: "form_similar_sites" },
-          ].map((t) => (
+          {(["prospects", "rejected", "similar"] as Dataset[]).map((t) => (
             <button
-              key={t.id}
-              onClick={() => setDataset(t.id as Dataset)}
+              key={t}
+              onClick={() => setDataset(t)}
               className={`px-3 py-2 text-sm border-r border-neutral-200 last:border-r-0 ${
-                dataset === t.id
+                dataset === t
                   ? "bg-neutral-100 font-medium"
                   : "bg-white hover:bg-neutral-50"
               }`}
             >
-              {t.label}
+              {tabLabel(t)}
             </button>
           ))}
         </div>
@@ -639,15 +647,7 @@ export default function CompaniesPage() {
                         title={h.sortable ? "並び替え" : "並び不可"}
                       >
                         {h.label}
-                        {h.sortable && (
-                          <ArrowUpDown
-                            className={`h-3.5 w-3.5 ${
-                              sortKey === h.key
-                                ? "text-neutral-800"
-                                : "text-neutral-400"
-                            }`}
-                          />
-                        )}
+                        {sortIcon(h.key, h.sortable)}
                       </button>
                     </th>
                   ))}
