@@ -30,7 +30,6 @@ function resolveTable(
   if (s === "similar" || s === "form_similar_sites" || s.includes("近似")) {
     return "form_similar_sites";
   }
-  // "prospects" / "form_prospects" / その他は既定で正規企業
   return "form_prospects";
 }
 
@@ -129,6 +128,10 @@ export async function GET(req: NextRequest) {
           "job_site_source",
           "capital",
           "established_on",
+          "phone",
+          "phone_number",
+          "hq_address",
+          "corporate_number",
         ]).has(col);
       }
       if (table === "form_prospects_rejected") {
@@ -144,6 +147,12 @@ export async function GET(req: NextRequest) {
           "updated_at",
           "capital",
           "established_on",
+          "phone",
+          "source_site",
+          "company_size_extracted",
+          "company_size",
+          "hq_address",
+          "corporate_number",
         ]).has(col);
       }
       // similar
@@ -158,10 +167,11 @@ export async function GET(req: NextRequest) {
         "created_at",
         "updated_at",
         "source_site",
+        "phone",
       ]).has(col);
     };
 
-    /** 同じフィルタを両クエリへ適用する小関数 */
+    /** 同じフィルタをクエリへ適用（.or()に空を渡さない） */
     const applyFilters = (qry: any) => {
       let base = qry.eq("tenant_id", tenantId);
 
@@ -169,39 +179,28 @@ export async function GET(req: NextRequest) {
       if (q) {
         const like = `%${q}%`;
         if (table === "form_prospects") {
-          base = base.or(
-            [
-              hasCol("company_name") && `company_name.ilike.${like}`,
-              hasCol("website") && `website.ilike.${like}`,
-              hasCol("contact_email") && `contact_email.ilike.${like}`,
-            ]
-              .filter(Boolean)
-              .join(",")
-          );
+          const parts = [
+            hasCol("company_name") && `company_name.ilike.${like}`,
+            hasCol("website") && `website.ilike.${like}`,
+            hasCol("contact_email") && `contact_email.ilike.${like}`,
+          ].filter(Boolean) as string[];
+          if (parts.length) base = base.or(parts.join(","));
         } else if (table === "form_prospects_rejected") {
-          base = base.or(
-            [
-              hasCol("company_name") && `company_name.ilike.${like}`,
-              hasCol("website") && `website.ilike.${like}`,
-              hasCol("contact_email") && `contact_email.ilike.${like}`,
-            ]
-              .filter(Boolean)
-              .join(",")
-          );
+          const parts = [
+            hasCol("company_name") && `company_name.ilike.${like}`,
+            hasCol("website") && `website.ilike.${like}`,
+            hasCol("contact_email") && `contact_email.ilike.${like}`,
+          ].filter(Boolean) as string[];
+          if (parts.length) base = base.or(parts.join(","));
         } else {
-          // similar
-          base = base.or(
-            [
-              hasCol("target_company_name") &&
-                `target_company_name.ilike.${like}`,
-              hasCol("found_company_name") &&
-                `found_company_name.ilike.${like}`,
-              `found_website.ilike.${like}`,
-              hasCol("contact_email") && `contact_email.ilike.${like}`,
-            ]
-              .filter(Boolean)
-              .join(",")
-          );
+          const parts = [
+            hasCol("target_company_name") &&
+              `target_company_name.ilike.${like}`,
+            hasCol("found_company_name") && `found_company_name.ilike.${like}`,
+            hasCol("found_website") && `found_website.ilike.${like}`,
+            hasCol("contact_email") && `contact_email.ilike.${like}`,
+          ].filter(Boolean) as string[];
+          if (parts.length) base = base.or(parts.join(","));
         }
       }
 
@@ -225,7 +224,7 @@ export async function GET(req: NextRequest) {
         }
       }
 
-      // 都道府県（similar には列が無い）
+      // 都道府県
       if (prefecturesCsv && hasCol("prefectures")) {
         const prefs = prefecturesCsv
           .split(",")
@@ -243,10 +242,9 @@ export async function GET(req: NextRequest) {
           const parts = [
             hasCol("industry_large") && `industry_large.ilike.${like}`,
             hasCol("industry_small") && `industry_small.ilike.${like}`,
-          ].filter(Boolean);
+          ].filter(Boolean) as string[];
           if (parts.length) base = base.or(parts.join(","));
         }
-        // similar は対象外
       }
 
       // 作成日 from/to
@@ -269,7 +267,7 @@ export async function GET(req: NextRequest) {
       return base;
     };
 
-    // ---- 件数クエリ（最初の select で count/head を指定）----
+    // ---- 件数クエリ ----
     let countQuery = sb
       .from(table)
       .select("id", { count: "exact", head: true } as any);
@@ -279,7 +277,7 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: countErr.message }, { status: 500 });
     }
 
-    // ---- データクエリ（通常の取得）----
+    // ---- データクエリ ----
     let dataQuery = sb.from(table).select("*");
     dataQuery = applyFilters(dataQuery);
     const { data, error } = await dataQuery
@@ -293,7 +291,6 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
-    // デバッグ用にどのテーブルに解決されたか返す（不要なら削除OK）
     return NextResponse.json({
       table_resolved: table,
       rows: data ?? [],

@@ -230,12 +230,10 @@ export default function CompaniesPage() {
   const [msg, setMsg] = useState("");
 
   const colList: ColumnDef[] = useMemo(() => COLS[dataset], [dataset]);
-
   const [visibleCols, setVisibleCols] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     const init: Record<string, boolean> = {};
-    // 必須は常に表示、それ以外はデータセット別の現実的な初期値
     const prefer: Record<Dataset, string[]> = {
       prospects: [
         "website",
@@ -276,9 +274,7 @@ export default function CompaniesPage() {
       ],
     };
     const want = new Set(prefer[dataset]);
-    for (const c of colList) {
-      init[c.key] = c.required ? true : want.has(c.key);
-    }
+    for (const c of colList) init[c.key] = c.required ? true : want.has(c.key);
     setVisibleCols(init);
     setSortKey("created_at");
     setSortDir("desc");
@@ -314,8 +310,7 @@ export default function CompaniesPage() {
     setMsg("");
     try {
       const qs = new URLSearchParams();
-      // ★ 明示的に実テーブル名を送る（不備企業が空になる事象を防止）
-      qs.set("table", mapDatasetToTable(dataset));
+      qs.set("table", mapDatasetToTable(dataset)); // 実テーブル名を送る
       qs.set("limit", String(PAGE_SIZE));
       qs.set("page", String(page));
       qs.set("sort", sortKey);
@@ -366,9 +361,8 @@ export default function CompaniesPage() {
 
   const toggleSort = (key: string, sortable: boolean) => {
     if (!sortable) return;
-    if (sortKey === key) {
-      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
-    } else {
+    if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else {
       setSortKey(key);
       setSortDir("asc");
     }
@@ -411,9 +405,7 @@ export default function CompaniesPage() {
         return `${v}円`;
       }
     }
-    if (k === "matched_addr") {
-      return v ? "一致" : "不一致";
-    }
+    if (k === "matched_addr") return v ? "一致" : "不一致";
     if (
       k === "company_name" &&
       "found_company_name" in row &&
@@ -478,7 +470,7 @@ export default function CompaniesPage() {
           </div>
         </div>
 
-        {/* タブ（表示名を変更） */}
+        {/* タブ */}
         <div className="mb-3 inline-flex rounded-lg border border-neutral-200 overflow-hidden">
           {(["prospects", "rejected", "similar"] as Dataset[]).map((t) => (
             <button
@@ -676,19 +668,21 @@ export default function CompaniesPage() {
                       key={h.key}
                       className="px-3 py-3 text-left whitespace-nowrap select-none"
                     >
-                      <button
-                        className={`inline-flex items-center gap-1 ${
-                          h.sortable
-                            ? "hover:underline"
-                            : "opacity-60 cursor-default"
-                        }`}
-                        onClick={() => toggleSort(h.key, h.sortable)}
-                        disabled={!h.sortable}
-                        title={h.sortable ? "並び替え" : "並び不可"}
-                      >
-                        {h.label}
-                        {sortIcon(h.key, h.sortable)}
-                      </button>
+                      {h.sortable ? (
+                        <button
+                          className="inline-flex items-center gap-1 hover:underline text-neutral-800"
+                          onClick={() => toggleSort(h.key, h.sortable)}
+                          title="並び替え"
+                        >
+                          {h.label}
+                          {sortIcon(h.key, h.sortable)}
+                        </button>
+                      ) : (
+                        // ★ 非ソート列も濃い色で統一
+                        <span className="inline-flex items-center gap-1 text-neutral-800">
+                          {h.label}
+                        </span>
+                      )}
                     </th>
                   ))}
                 </tr>
@@ -726,8 +720,8 @@ export default function CompaniesPage() {
           <div className="flex items-center justify-between px-4 py-3 border-t border-neutral-200">
             <div className="text-xs text-neutral-500">
               全 {total} 件 / {page} /{" "}
-              {Math.max(1, Math.ceil(total / PAGE_SIZE))} ページ（
-              {PAGE_SIZE}件/ページ）
+              {Math.max(1, Math.ceil(total / PAGE_SIZE))} ページ（{PAGE_SIZE}
+              件/ページ）
             </div>
             <div className="flex items-center gap-2">
               <button
