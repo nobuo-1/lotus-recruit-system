@@ -235,21 +235,49 @@ export default function CompaniesPage() {
 
   useEffect(() => {
     const init: Record<string, boolean> = {};
+    // 必須は常に表示、それ以外はデータセット別の現実的な初期値
+    const prefer: Record<Dataset, string[]> = {
+      prospects: [
+        "website",
+        "contact_email",
+        "contact_form_url",
+        "phone",
+        "company_size",
+        "prefectures",
+        "industry",
+        "capital",
+        "established_on",
+        "job_site_source",
+        "created_at",
+      ],
+      rejected: [
+        "website",
+        "contact_email",
+        "phone",
+        "contact_form_url",
+        "industry_large",
+        "industry_small",
+        "company_size",
+        "company_size_extracted",
+        "prefectures",
+        "source_site",
+        "created_at",
+      ],
+      similar: [
+        "found_company_name",
+        "found_website",
+        "contact_email",
+        "contact_form_url",
+        "phone",
+        "matched_addr",
+        "matched_company_ratio",
+        "source_site",
+        "created_at",
+      ],
+    };
+    const want = new Set(prefer[dataset]);
     for (const c of colList) {
-      if (c.required) init[c.key] = true;
-      else {
-        init[c.key] = [
-          "website",
-          "contact_email",
-          "contact_form_url",
-          "industry",
-          "company_size",
-          "prefectures",
-          "created_at",
-          "found_website",
-          "matched_addr",
-        ].includes(c.key);
-      }
+      init[c.key] = c.required ? true : want.has(c.key);
     }
     setVisibleCols(init);
     setSortKey("created_at");
@@ -273,13 +301,21 @@ export default function CompaniesPage() {
     })();
   }, []);
 
+  const mapDatasetToTable = (d: Dataset) =>
+    d === "prospects"
+      ? "form_prospects"
+      : d === "rejected"
+      ? "form_prospects_rejected"
+      : "form_similar_sites";
+
   const load = async () => {
     if (!tenantId) return;
     setLoading(true);
     setMsg("");
     try {
       const qs = new URLSearchParams();
-      qs.set("table", dataset);
+      // ★ 明示的に実テーブル名を送る（不備企業が空になる事象を防止）
+      qs.set("table", mapDatasetToTable(dataset));
       qs.set("limit", String(PAGE_SIZE));
       qs.set("page", String(page));
       qs.set("sort", sortKey);
@@ -355,7 +391,11 @@ export default function CompaniesPage() {
     }
     if (k === "prefectures") {
       const arr = Array.isArray(v) ? v : [];
-      return arr.length ? arr.join(" / ") : "-";
+      return (
+        <span className="text-neutral-800">
+          {arr.length ? arr.join(" / ") : "-"}
+        </span>
+      );
     }
     if (k === "created_at" || k === "updated_at" || k === "established_on") {
       return v ? String(v).replace("T", " ").replace("Z", "") : "-";
@@ -657,7 +697,12 @@ export default function CompaniesPage() {
                 {rows.map((r: AnyRow) => (
                   <tr key={(r as any).id}>
                     {headers.map((h: ColumnDef) => (
-                      <td key={h.key} className="px-3 py-2 align-top">
+                      <td
+                        key={h.key}
+                        className={`px-3 py-2 align-top ${
+                          h.key === "prefectures" ? "text-neutral-800" : ""
+                        }`}
+                      >
                         {formatVal(h.key, (r as any)[h.key], r)}
                       </td>
                     ))}
@@ -681,8 +726,8 @@ export default function CompaniesPage() {
           <div className="flex items-center justify-between px-4 py-3 border-t border-neutral-200">
             <div className="text-xs text-neutral-500">
               全 {total} 件 / {page} /{" "}
-              {Math.max(1, Math.ceil(total / PAGE_SIZE))} ページ（{PAGE_SIZE}
-              件/ページ）
+              {Math.max(1, Math.ceil(total / PAGE_SIZE))} ページ（
+              {PAGE_SIZE}件/ページ）
             </div>
             <div className="flex items-center gap-2">
               <button
