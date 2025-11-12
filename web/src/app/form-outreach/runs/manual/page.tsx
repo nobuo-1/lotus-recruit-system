@@ -4,7 +4,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import AppHeader from "@/components/AppHeader";
 import Link from "next/link";
-
+import { useRouter } from "next/navigation";
 import {
   ChevronLeft,
   ChevronRight,
@@ -13,9 +13,7 @@ import {
   ArrowDown,
 } from "lucide-react";
 
-// ====== 設定 ======
 const PAGE_SIZE = 10;
-
 type Dataset = "prospects" | "rejected" | "similar";
 const DATASET_TO_TABLE: Record<Dataset, string> = {
   prospects: "form_prospects",
@@ -23,7 +21,6 @@ const DATASET_TO_TABLE: Record<Dataset, string> = {
   similar: "form_similar_sites",
 };
 
-// テナント取得ヘルパ
 async function fetchTenantId(): Promise<string | null> {
   try {
     let meRes = await fetch("/api/me/tenant", { cache: "no-store" });
@@ -50,7 +47,6 @@ type ProsRow = {
   created_at: string | null;
   updated_at: string | null;
 };
-
 type RejRow = {
   id: string;
   tenant_id: string | null;
@@ -73,7 +69,6 @@ type RejRow = {
   created_at: string | null;
   updated_at: string | null;
 };
-
 type SimRow = {
   id: string;
   tenant_id: string | null;
@@ -92,14 +87,13 @@ type SimRow = {
   created_at: string | null;
   updated_at: string | null;
 };
-
 type AnyRow = ProsRow | RejRow | SimRow;
 
 type TemplateRow = {
   id: string;
   name: string | null;
   subject: string | null;
-  channel: string | null; // "email" | "form" | "both"
+  channel: string | null;
   created_at: string | null;
 };
 
@@ -110,7 +104,6 @@ function ellipsize(u?: string | null, max = 54) {
   const tail = Math.max(0, max - 1 - head);
   return `${s.slice(0, head)}…${s.slice(-tail)}`;
 }
-
 function pickCompanyName(row: AnyRow) {
   return (
     (row as any).company_name ||
@@ -119,7 +112,6 @@ function pickCompanyName(row: AnyRow) {
     "-"
   );
 }
-
 function channelOf(row: AnyRow): "form" | "email" | "both" | "-" {
   const hasForm = !!String((row as any).contact_form_url || "").trim();
   const hasMail = !!String((row as any).contact_email || "").trim();
@@ -130,28 +122,24 @@ function channelOf(row: AnyRow): "form" | "email" | "both" | "-" {
 }
 
 export default function ManualRunsPage() {
-  // === テナント / データセット / ページング ===
+  const router = useRouter();
+
   const [tenantId, setTenantId] = useState<string | null>(null);
   const [dataset, setDataset] = useState<Dataset>("prospects");
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
 
-  // === フィルタ（最低限） ===
   const [q, setQ] = useState("");
   const [channelFilter, setChannelFilter] = useState<
     "all" | "form" | "email" | "both"
   >("all");
-
-  // === 並び替え ===
   const [sortKey, setSortKey] = useState<string>("created_at");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
-  // === データ ===
   const [rows, setRows] = useState<AnyRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
 
-  // === テンプレ ===
   const [templates, setTemplates] = useState<TemplateRow[]>([]);
   const [showTplModal, setShowTplModal] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
@@ -160,53 +148,45 @@ export default function ManualRunsPage() {
     [templates, selectedTemplateId]
   );
 
-  // フォーム用プレースホルダ編集（UIから可変）
   const [unknownPlaceholder, setUnknownPlaceholder] =
     useState("メッセージをご確認ください");
 
-  // === 選択状態 ===
+  // ★ 送信モード（メール or フォーム）
+  const [sendMode, setSendMode] = useState<"email" | "form">("email");
+
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const allChecked =
     rows.length > 0 && rows.every((r) => selected.has((r as any).id));
 
-  // 初期ロード：tenantId & テンプレ
   useEffect(() => {
     (async () => {
-      setTenantId(await fetchTenantId());
+      const t = await fetchTenantId();
+      setTenantId(t);
       try {
         const tr = await fetch("/api/form-outreach/templates", {
-          headers: { "x-tenant-id": (await fetchTenantId()) || "" },
+          headers: { "x-tenant-id": t || "" },
           cache: "no-store",
         });
         const tj = await tr.json();
         if (tr.ok) setTemplates(tj.rows ?? []);
-      } catch {
-        // 無視
-      }
+      } catch {}
     })();
   }, []);
 
-  // データロード
   const load = async () => {
     if (!tenantId) return;
     setLoading(true);
     setMsg("");
     try {
       const qs = new URLSearchParams();
-      qs.set("table", DATASET_TO_TABLE[dataset]); // 明示テーブル名
+      qs.set("table", DATASET_TO_TABLE[dataset]);
       qs.set("limit", String(PAGE_SIZE));
       qs.set("page", String(page));
       qs.set("sort", sortKey);
       qs.set("dir", sortDir);
       if (q.trim()) qs.set("q", q.trim());
-
-      // チャンネルフィルタ → APIには email/form の有無で投げる
       if (channelFilter === "email") qs.set("email", "has");
       if (channelFilter === "form") qs.set("form", "has");
-      if (channelFilter === "both") {
-        // APIは同時指定のANDが難しいため、まず全件取得→フロント側で絞る
-      }
-
       const resp = await fetch(
         `/api/form-outreach/companies?${qs.toString()}`,
         {
@@ -216,15 +196,9 @@ export default function ManualRunsPage() {
       );
       const j = await resp.json();
       if (!resp.ok) throw new Error(j?.error || "fetch failed");
-
       let arr: AnyRow[] = j.rows ?? [];
-
-      // both フィルタはフロント側で
-      if (channelFilter === "both") {
-        arr = arr.filter((r: AnyRow) => channelOf(r) === "both");
-      }
-
-      // q の見落とし防止（API側で検索しているが安全のため）
+      if (channelFilter === "both")
+        arr = arr.filter((r) => channelOf(r) === "both");
       if (q.trim()) {
         const qq = q.trim().toLowerCase();
         arr = arr.filter((r) => {
@@ -236,10 +210,9 @@ export default function ManualRunsPage() {
           return name.includes(qq) || web.includes(qq) || mail.includes(qq);
         });
       }
-
       setRows(arr);
       setTotal(Number(j.total || arr.length || 0));
-      setSelected(new Set()); // ページ切替時は選択解除
+      setSelected(new Set());
     } catch (e: any) {
       setRows([]);
       setTotal(0);
@@ -250,23 +223,20 @@ export default function ManualRunsPage() {
   };
 
   useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    load(); /* eslint-disable-next-line */
   }, [tenantId, dataset, page, sortKey, sortDir, channelFilter]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-
   const toggleAll = () => {
     if (allChecked) setSelected(new Set());
     else setSelected(new Set(rows.map((p) => (p as any).id)));
   };
-  const toggleOne = (id: string) => {
+  const toggleOne = (id: string) =>
     setSelected((prev) => {
       const n = new Set(prev);
       n.has(id) ? n.delete(id) : n.add(id);
       return n;
     });
-  };
 
   const sortIcon = (key: string) => {
     if (sortKey !== key)
@@ -277,7 +247,6 @@ export default function ManualRunsPage() {
       <ArrowDown className="h-3.5 w-3.5 text-neutral-800" />
     );
   };
-
   const toggleSort = (key: string) => {
     if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     else {
@@ -287,14 +256,12 @@ export default function ManualRunsPage() {
     setPage(1);
   };
 
-  // 実行
   const [executing, setExecuting] = useState(false);
   const handleExecute = async () => {
     setMsg("");
     if (!tenantId) return;
     if (selected.size === 0) return setMsg("対象の企業を選択してください。");
     if (!selectedTemplateId) return setMsg("テンプレートを選択してください。");
-
     setExecuting(true);
     try {
       const r = await fetch("/api/form-outreach/manual/send", {
@@ -304,6 +271,7 @@ export default function ManualRunsPage() {
           "x-tenant-id": tenantId,
         },
         body: JSON.stringify({
+          mode: sendMode, // ★ メール or フォーム
           table: DATASET_TO_TABLE[dataset],
           template_id: selectedTemplateId,
           prospect_ids: Array.from(selected),
@@ -312,27 +280,14 @@ export default function ManualRunsPage() {
       });
       const j = await r.json();
       if (!r.ok) throw new Error(j?.error || "manual send failed");
-
-      // 成功分は prospects の status を "sent" に（可能な範囲で）
-      if (dataset === "prospects" && j.ok?.length) {
-        await fetch("/api/form-outreach/prospects/status", {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-tenant-id": tenantId,
-          },
-          body: JSON.stringify({ prospect_ids: j.ok, status: "sent" }),
-        }).catch(() => {});
-      }
-
+      // 成功・失敗サマリを表示
       setMsg(
-        `送信成功: ${j.ok?.length || 0} / 待機追加: ${
-          j.queued?.length || 0
-        } / 失敗: ${j.failed?.length || 0}`
+        `成功:${j.ok?.length || 0} / 待機:${j.queued?.length || 0} / 失敗:${
+          j.failed?.length || 0
+        }`
       );
-
-      // 最新状態で再読込
-      await load();
+      // 実行ログページへ（反映済み）
+      router.push("/form-outreach/schedules");
     } catch (e: any) {
       setMsg(String(e?.message || e));
     } finally {
@@ -344,15 +299,14 @@ export default function ManualRunsPage() {
     <>
       <AppHeader showBack />
       <main className="mx-auto max-w-7xl p-6">
-        {/* ヘッダ */}
         <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h1 className="text-2xl font-semibold text-neutral-900">
               メッセージ手動送信
             </h1>
             <p className="text-sm text-neutral-500">
-              3テーブル切替 / 検索 / 10件ページング。テンプレ選択→「実行」で
-              メール送信 or 営業フォームは待機リストへ。
+              3テーブル切替 / 検索 /
+              10件ページング。テンプレ選択→送信モード選択→「実行」で送信。
             </p>
             <p className="text-xs text-neutral-500 mt-1">
               テナント: <span className="font-mono">{tenantId ?? "-"}</span>
@@ -362,14 +316,12 @@ export default function ManualRunsPage() {
             <Link
               href="/form-outreach/waitlist"
               className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
-              title="待機リストを開く"
             >
               待機リスト
             </Link>
             <Link
               href="/form-outreach/templates"
               className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
-              title="テンプレートを管理"
             >
               テンプレート管理
             </Link>
@@ -421,11 +373,7 @@ export default function ManualRunsPage() {
               <select
                 className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
                 value={channelFilter}
-                onChange={(e) =>
-                  setChannelFilter(
-                    e.target.value as "all" | "form" | "email" | "both"
-                  )
-                }
+                onChange={(e) => setChannelFilter(e.target.value as any)}
               >
                 <option value="all">すべて</option>
                 <option value="form">フォームのみ</option>
@@ -444,7 +392,6 @@ export default function ManualRunsPage() {
               />
             </div>
           </div>
-
           <div className="mt-3 flex items-center gap-2">
             <button
               onClick={() => {
@@ -470,7 +417,7 @@ export default function ManualRunsPage() {
           </div>
         </section>
 
-        {/* テンプレ選択バー */}
+        {/* テンプレ＋送信モード＋実行 */}
         <div className="mb-3 flex flex-wrap items-center gap-3">
           <button
             onClick={() => setShowTplModal(true)}
@@ -481,6 +428,28 @@ export default function ManualRunsPage() {
           <span className="inline-flex items-center rounded-full border border-neutral-300 bg-white px-3 py-1 text-xs font-medium text-neutral-700">
             {selectedTemplate?.name || "未選択"}
           </span>
+
+          {/* ★ 送信モード */}
+          <div className="ml-3 inline-flex items-center gap-4 text-sm">
+            <label className="inline-flex items-center gap-2">
+              <input
+                type="radio"
+                name="sendmode"
+                checked={sendMode === "email"}
+                onChange={() => setSendMode("email")}
+              />
+              <span>メールで送る</span>
+            </label>
+            <label className="inline-flex items-center gap-2">
+              <input
+                type="radio"
+                name="sendmode"
+                checked={sendMode === "form"}
+                onChange={() => setSendMode("form")}
+              />
+              <span>営業フォームで送る</span>
+            </label>
+          </div>
 
           <button
             onClick={handleExecute}
@@ -497,13 +466,13 @@ export default function ManualRunsPage() {
           </div>
         </div>
 
-        {/* テーブル（companiesと同じトーン：ヘッダ text-neutral-600） */}
+        {/* テーブル */}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden bg-white">
           <div className="overflow-x-auto">
             <table className="min-w-[1100px] w-full text-sm">
               <thead className="bg-neutral-50 text-neutral-600">
                 <tr>
-                  <th className="px-3 py-3 text-left">
+                  <th className="px-3 py-3">
                     <input
                       type="checkbox"
                       checked={allChecked}
@@ -515,8 +484,7 @@ export default function ManualRunsPage() {
                       className="inline-flex items-center gap-1 hover:underline"
                       onClick={() => toggleSort("company_name")}
                     >
-                      社名
-                      {sortIcon("company_name")}
+                      社名{sortIcon("company_name")}
                     </button>
                   </th>
                   <th className="px-3 py-3 text-left">
@@ -524,8 +492,7 @@ export default function ManualRunsPage() {
                       className="inline-flex items-center gap-1 hover:underline"
                       onClick={() => toggleSort("website")}
                     >
-                      サイトURL
-                      {sortIcon("website")}
+                      サイトURL{sortIcon("website")}
                     </button>
                   </th>
                   <th className="px-3 py-3 text-left">
@@ -533,8 +500,7 @@ export default function ManualRunsPage() {
                       className="inline-flex items-center gap-1 hover:underline"
                       onClick={() => toggleSort("contact_email")}
                     >
-                      メール
-                      {sortIcon("contact_email")}
+                      メール{sortIcon("contact_email")}
                     </button>
                   </th>
                   <th className="px-3 py-3 text-left">フォーム</th>
@@ -545,8 +511,7 @@ export default function ManualRunsPage() {
                       className="inline-flex items-center gap-1 hover:underline"
                       onClick={() => toggleSort("created_at")}
                     >
-                      取得日時
-                      {sortIcon("created_at")}
+                      取得日時{sortIcon("created_at")}
                     </button>
                   </th>
                   <th className="px-3 py-3 text-left">チャンネル</th>
@@ -583,7 +548,6 @@ export default function ManualRunsPage() {
                       : ch === "email"
                       ? "メール"
                       : "-";
-
                   return (
                     <tr key={id}>
                       <td className="px-3 py-2">
@@ -638,8 +602,6 @@ export default function ManualRunsPage() {
               </tbody>
             </table>
           </div>
-
-          {/* ページネーション（companiesと同トーン） */}
           <div className="flex items-center justify-between px-4 py-3 border-t border-neutral-200">
             <div className="text-xs text-neutral-500">
               全 {total} 件 / {page} / {totalPages} ページ（{PAGE_SIZE}
@@ -694,7 +656,6 @@ export default function ManualRunsPage() {
                 閉じる
               </button>
             </div>
-
             <div className="max-h-80 overflow-auto rounded-xl border border-neutral-200">
               <table className="w-full text-sm">
                 <thead className="bg-neutral-50 text-neutral-600">
@@ -739,7 +700,6 @@ export default function ManualRunsPage() {
                 </tbody>
               </table>
             </div>
-
             <div className="mt-3 text-xs text-neutral-600">
               現在の選択：{" "}
               <span className="font-medium">

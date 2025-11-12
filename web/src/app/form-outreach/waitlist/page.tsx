@@ -9,11 +9,11 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 type WaitRow = {
   id: string;
   tenant_id: string | null;
-  table_name: string | null; // form_prospects / form_prospects_rejected / form_similar_sites
+  table_name: string | null;
   prospect_id: string | null;
-  reason: string | null; // queue_form / recaptcha / error など
-  status?: string | null; // waiting / failed / done など（無ければ undefined）
-  payload?: any | null; // JSONB
+  reason: string | null; // queue_form / recaptcha / error / no_email など
+  status?: string | null; // waiting / failed / done
+  payload?: any | null;
   created_at: string | null;
   updated_at: string | null;
   tries?: number | null;
@@ -43,6 +43,9 @@ export default function WaitlistPage() {
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(false);
 
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const allChecked = rows.length > 0 && rows.every((r) => selected.has(r.id));
+
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   useEffect(() => {
@@ -57,8 +60,6 @@ export default function WaitlistPage() {
       const qs = new URLSearchParams();
       qs.set("limit", String(PAGE_SIZE));
       qs.set("page", String(page));
-
-      // 事前に用意してある想定のAPI（前回案）
       const r = await fetch(`/api/form-outreach/waitlist?${qs.toString()}`, {
         headers: { "x-tenant-id": tenantId },
         cache: "no-store",
@@ -67,6 +68,7 @@ export default function WaitlistPage() {
       if (!r.ok) throw new Error(j?.error || "fetch failed");
       setRows(j.rows ?? []);
       setTotal(j.total ?? j.rows?.length ?? 0);
+      setSelected(new Set());
     } catch (e: any) {
       setRows([]);
       setTotal(0);
@@ -77,9 +79,66 @@ export default function WaitlistPage() {
   };
 
   useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    load(); /* eslint-disable-next-line */
   }, [tenantId, page]);
+
+  const toggleAll = () => {
+    if (allChecked) setSelected(new Set());
+    else setSelected(new Set(rows.map((r) => r.id)));
+  };
+  const toggleOne = (id: string) => {
+    setSelected((prev) => {
+      const n = new Set(prev);
+      n.has(id) ? n.delete(id) : n.add(id);
+      return n;
+    });
+  };
+
+  const retrySelected = async () => {
+    if (!tenantId || selected.size === 0) return;
+    setMsg("");
+    try {
+      const r = await fetch("/api/form-outreach/waitlist/retry", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-tenant-id": tenantId,
+        },
+        body: JSON.stringify({ ids: Array.from(selected) }),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j?.error || "retry failed");
+      setMsg(
+        `再試行 成功:${j.ok?.length || 0} / 待機:${
+          j.waiting?.length || 0
+        } / 失敗:${j.failed?.length || 0}`
+      );
+      await load();
+    } catch (e: any) {
+      setMsg(String(e?.message || e));
+    }
+  };
+
+  const deleteSelected = async () => {
+    if (!tenantId || selected.size === 0) return;
+    setMsg("");
+    try {
+      const r = await fetch("/api/form-outreach/waitlist/delete", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-tenant-id": tenantId,
+        },
+        body: JSON.stringify({ ids: Array.from(selected) }),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j?.error || "delete failed");
+      setMsg(`削除 ${j.deleted || 0} 件`);
+      await load();
+    } catch (e: any) {
+      setMsg(String(e?.message || e));
+    }
+  };
 
   return (
     <>
@@ -105,6 +164,20 @@ export default function WaitlistPage() {
               手動送信へ戻る
             </Link>
             <button
+              onClick={retrySelected}
+              disabled={selected.size === 0}
+              className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50 disabled:opacity-50"
+            >
+              選択を再試行
+            </button>
+            <button
+              onClick={deleteSelected}
+              disabled={selected.size === 0}
+              className="rounded-lg border border-red-200 text-red-700 px-3 py-2 text-sm hover:bg-red-50 disabled:opacity-50"
+            >
+              選択を削除
+            </button>
+            <button
               onClick={() => load()}
               className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
             >
@@ -118,6 +191,13 @@ export default function WaitlistPage() {
             <table className="min-w-[1100px] w-full text-sm">
               <thead className="bg-neutral-50 text-neutral-600">
                 <tr>
+                  <th className="px-3 py-3">
+                    <input
+                      type="checkbox"
+                      checked={allChecked}
+                      onChange={toggleAll}
+                    />
+                  </th>
                   <th className="px-3 py-3 text-left">登録日時</th>
                   <th className="px-3 py-3 text-left">対象テーブル</th>
                   <th className="px-3 py-3 text-left">Prospect ID</th>
@@ -144,9 +224,15 @@ export default function WaitlistPage() {
                   const tries =
                     typeof w.tries === "number" ? String(w.tries) : "-";
                   const err = w.last_error ? String(w.last_error) : "-";
-
                   return (
                     <tr key={w.id}>
+                      <td className="px-3 py-2">
+                        <input
+                          type="checkbox"
+                          checked={selected.has(w.id)}
+                          onChange={() => toggleOne(w.id)}
+                        />
+                      </td>
                       <td className="px-3 py-2">{created}</td>
                       <td className="px-3 py-2">{w.table_name || "-"}</td>
                       <td className="px-3 py-2 font-mono">
@@ -185,7 +271,7 @@ export default function WaitlistPage() {
                 {rows.length === 0 && (
                   <tr>
                     <td
-                      colSpan={8}
+                      colSpan={9}
                       className="px-4 py-10 text-center text-neutral-400"
                     >
                       待機中のデータはありません
@@ -196,7 +282,6 @@ export default function WaitlistPage() {
             </table>
           </div>
 
-          {/* ページネーション */}
           <div className="flex items-center justify-between px-4 py-3 border-t border-neutral-200">
             <div className="text-xs text-neutral-500">
               全 {total} 件 / {page} / {totalPages} ページ（{PAGE_SIZE}

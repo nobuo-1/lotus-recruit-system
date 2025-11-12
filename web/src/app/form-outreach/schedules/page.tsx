@@ -53,7 +53,7 @@ export default function SchedulesPage() {
         <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h1 className="text-2xl font-semibold text-neutral-900">
-              送信ログ / スケジュール
+              実行ログ
             </h1>
             <p className="text-sm text-neutral-500">
               実行履歴を一覧。定期実行の設定は「自動実行設定」から管理します。
