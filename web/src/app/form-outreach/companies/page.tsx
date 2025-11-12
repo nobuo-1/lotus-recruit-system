@@ -303,7 +303,6 @@ export default function CompaniesPage() {
     setMsg("");
     try {
       const qs = new URLSearchParams();
-      // ← API 側で正規化するので、シンプルに dataset を送る
       qs.set("table", dataset); // prospects | rejected | similar
       qs.set("limit", String(PAGE_SIZE));
       qs.set("page", String(page));
@@ -364,24 +363,40 @@ export default function CompaniesPage() {
   };
 
   const formatVal = (k: string, v: any, row: AnyRow) => {
-    // URLをリンク表示する列（フォームは除外するように変更）
+    // サイトURLリンク
     if ((k === "website" || k === "found_website") && v) {
       const url = String(v || "");
       return (
         <a
           href={url}
           target="_blank"
+          rel="noreferrer"
           className="text-indigo-700 hover:underline break-all"
         >
           {ellipsize(url)}
         </a>
       );
     }
-    // フォーム：URLではなく あり/なし
+
+    // ★ フォーム：あり → リンク（テキストは「あり」）、なし → 「なし」
     if (k === "contact_form_url") {
-      const has = !!String(v || "").trim();
-      return <span className="text-neutral-800">{has ? "あり" : "なし"}</span>;
+      const url = String(v || "").trim();
+      if (url) {
+        return (
+          <a
+            href={url}
+            target="_blank"
+            rel="noreferrer"
+            className="text-indigo-700 hover:underline"
+            title={url}
+          >
+            あり
+          </a>
+        );
+      }
+      return <span className="text-neutral-800">なし</span>;
     }
+
     if (k === "prefectures") {
       const arr = Array.isArray(v) ? v : [];
       return (
@@ -405,6 +420,22 @@ export default function CompaniesPage() {
       }
     }
     if (k === "matched_addr") return v ? "一致" : "不一致";
+
+    // 社名・業種系は 18文字程度までは折り返さない
+    if (
+      k === "company_name" ||
+      k === "industry" ||
+      k === "industry_large" ||
+      k === "industry_small"
+    ) {
+      return (
+        <span className="inline-block min-w-[18ch] whitespace-nowrap">
+          {v ?? "-"}
+        </span>
+      );
+    }
+
+    // similar の表示補助
     if (
       k === "company_name" &&
       "found_company_name" in row &&
