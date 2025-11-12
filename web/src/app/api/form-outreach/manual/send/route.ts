@@ -3,18 +3,22 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { emailQueue } from "@/server/queue";
 import { randomUUID } from "crypto";
+import { supabaseServer } from "@/lib/supabaseServer";
 
 export const runtime = "nodejs";
 
 /* ========= Supabase REST ========= */
-const REST_URL = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/rest/v1`;
-const ANON = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-const SERVICE = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const REST_URL = process.env.NEXT_PUBLIC_SUPABASE_URL
+  ? `${process.env.NEXT_PUBLIC_SUPABASE_URL}/rest/v1`
+  : "";
+const ANON = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
+const SERVICE = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const CAN_USE_REST = !!(REST_URL && (SERVICE || ANON));
 
 function authHeaders() {
   const token = SERVICE || ANON;
   return {
-    apikey: ANON,
+    apikey: ANON || token,
     Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
     Prefer: "return=representation",
@@ -60,25 +64,21 @@ type AnyRow =
     };
 
 /* ========= Helpers ========= */
-
 function escapeHtml(s: string) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
-
 function textToHtml(text: string) {
+  // 改行→<br>（本文はテキスト起点なのでエスケープ前提）
   return escapeHtml(text).replace(/\r?\n/g, "<br>");
 }
-
 function pickCompanyName(r: AnyRow) {
   return r.company_name || r.target_company_name || r.found_company_name || "-";
 }
-
 function pickWebsite(r: AnyRow) {
   return r.website || (r as any).found_website || "";
 }
-
 function replaceAllKeys(src: string, dict: Record<string, string>) {
-  let out = src;
+  let out = src || "";
   for (const [k, v] of Object.entries(dict)) {
     const re = new RegExp(
       String(k).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
@@ -89,28 +89,54 @@ function replaceAllKeys(src: string, dict: Record<string, string>) {
   return out;
 }
 
+/* ========= Loaders (REST or SDK fallback) ========= */
 async function loadTemplate(tenantId: string, templateId: string) {
-  const url =
-    `${REST_URL}/form_outreach_messages?select=id,name,subject,body_text,body_html` +
-    `&tenant_id=eq.${tenantId}&id=eq.${templateId}&limit=1`;
-  const r = await fetch(url, { headers: authHeaders(), cache: "no-store" });
-  if (!r.ok) {
-    const t = await r.text().catch(() => "");
-    throw new Error(`template fetch error ${r.status}: ${t}`);
+  if (CAN_USE_REST) {
+    const url =
+      `${REST_URL}/form_outreach_messages?select=id,name,subject,body_text,body_html` +
+      `&tenant_id=eq.${tenantId}&id=eq.${templateId}&limit=1`;
+    const r = await fetch(url, { headers: authHeaders(), cache: "no-store" });
+    if (!r.ok)
+      throw new Error(`template fetch error ${r.status}: ${await r.text()}`);
+    const rows = (await r.json()) as TemplateRow[];
+    if (!rows?.length) throw new Error("template not found");
+    return rows[0];
+  } else {
+    const sb = await supabaseServer();
+    const { data, error } = await sb
+      .from("form_outreach_messages")
+      .select("id,name,subject,body_text,body_html")
+      .eq("tenant_id", tenantId)
+      .eq("id", templateId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new Error("template not found");
+    return data as TemplateRow;
   }
-  const rows = (await r.json()) as TemplateRow[];
-  if (!rows?.length) throw new Error("template not found");
-  return rows[0];
 }
 
 async function loadSender(tenantId: string): Promise<SenderRow | null> {
-  const url =
-    `${REST_URL}/form_outreach_senders?select=id,from_name,from_email,reply_to,phone,website,signature,is_default` +
-    `&tenant_id=eq.${tenantId}&is_default=is.true&limit=1`;
-  const r = await fetch(url, { headers: authHeaders(), cache: "no-store" });
-  if (!r.ok) return null;
-  const rows = (await r.json()) as SenderRow[];
-  return rows?.[0] ?? null;
+  if (CAN_USE_REST) {
+    const url =
+      `${REST_URL}/form_outreach_senders?select=id,from_name,from_email,reply_to,phone,website,signature,is_default` +
+      `&tenant_id=eq.${tenantId}&is_default=is.true&limit=1`;
+    const r = await fetch(url, { headers: authHeaders(), cache: "no-store" });
+    if (!r.ok) return null;
+    const rows = (await r.json()) as SenderRow[];
+    return rows?.[0] ?? null;
+  } else {
+    const sb = await supabaseServer();
+    const { data, error } = await sb
+      .from("form_outreach_senders")
+      .select(
+        "id,from_name,from_email,reply_to,phone,website,signature,is_default"
+      )
+      .eq("tenant_id", tenantId)
+      .eq("is_default", true)
+      .limit(1);
+    if (error) return null;
+    return (data ?? [])[0] ?? null;
+  }
 }
 
 async function loadProspects(
@@ -124,25 +150,37 @@ async function loadProspects(
     tableName === "form_similar_sites"
       ? tableName
       : "form_prospects";
-  const idCsv = ids.map((x) => x).join(",");
-  const selectCols =
-    "id,company_name,website,contact_form_url,contact_email," +
-    "target_company_name,found_company_name,found_website";
-  const url =
-    `${REST_URL}/${table}?select=${selectCols}` +
-    `&tenant_id=eq.${tenantId}&id=in.(${idCsv})&limit=${ids.length}`;
-  const r = await fetch(encodeURI(url), {
-    headers: authHeaders(),
-    cache: "no-store",
-  });
-  if (!r.ok) {
-    const t = await r.text().catch(() => "");
-    throw new Error(`prospects fetch error ${r.status}: ${t}`);
+
+  if (CAN_USE_REST) {
+    const idCsv = ids.map((x) => x).join(",");
+    const selectCols =
+      "id,company_name,website,contact_form_url,contact_email," +
+      "target_company_name,found_company_name,found_website";
+    const url =
+      `${REST_URL}/${table}?select=${selectCols}` +
+      `&tenant_id=eq.${tenantId}&id=in.(${idCsv})&limit=${ids.length}`;
+    const r = await fetch(encodeURI(url), {
+      headers: authHeaders(),
+      cache: "no-store",
+    });
+    if (!r.ok)
+      throw new Error(`prospects fetch error ${r.status}: ${await r.text()}`);
+    return (await r.json()) as AnyRow[];
+  } else {
+    const sb = await supabaseServer();
+    const { data, error } = await sb
+      .from(table)
+      .select(
+        "id,company_name,website,contact_form_url,contact_email,target_company_name,found_company_name,found_website"
+      )
+      .eq("tenant_id", tenantId)
+      .in("id", ids);
+    if (error) throw new Error(error.message);
+    return (data ?? []) as AnyRow[];
   }
-  const rows = (await r.json()) as AnyRow[];
-  return rows;
 }
 
+/* ========= Runs insert/update ========= */
 async function insertRun(
   tenantId: string,
   payload: {
@@ -153,31 +191,46 @@ async function insertRun(
     finished_at?: string | null;
   }
 ) {
-  const url = `${REST_URL}/form_outreach_runs`;
-  const body = [{ tenant_id: tenantId, ...payload }];
-  const r = await fetch(url, {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) return null;
-  const rows = await r.json().catch(() => null);
-  return rows?.[0] ?? null;
+  if (CAN_USE_REST) {
+    const url = `${REST_URL}/form_outreach_runs`;
+    const r = await fetch(url, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify([{ tenant_id: tenantId, ...payload }]),
+    });
+    if (!r.ok) return null;
+    const rows = await r.json().catch(() => null);
+    return rows?.[0] ?? null;
+  } else {
+    const sb = await supabaseServer();
+    const { data, error } = await sb
+      .from("form_outreach_runs")
+      .insert({ tenant_id: tenantId, ...payload })
+      .select()
+      .maybeSingle();
+    if (error) return null;
+    return data ?? null;
+  }
 }
 
 async function updateRun(
   id: string,
   patch: { status?: string; error?: string | null; finished_at?: string }
 ) {
-  const url = `${REST_URL}/form_outreach_runs?id=eq.${id}`;
-  await fetch(url, {
-    method: "PATCH",
-    headers: authHeaders(),
-    body: JSON.stringify(patch),
-  }).catch(() => {});
+  if (CAN_USE_REST) {
+    const url = `${REST_URL}/form_outreach_runs?id=eq.${id}`;
+    await fetch(url, {
+      method: "PATCH",
+      headers: authHeaders(),
+      body: JSON.stringify(patch),
+    }).catch(() => {});
+  } else {
+    const sb = await supabaseServer();
+    await sb.from("form_outreach_runs").update(patch).eq("id", id);
+  }
 }
 
-/* ★ 修正点：kind を "direct_email" に統一 ★ */
+/* ========= Queue ========= */
 async function enqueueDirectEmail(args: {
   to: string;
   subject: string;
@@ -188,24 +241,28 @@ async function enqueueDirectEmail(args: {
   brandSupport?: string | null;
 }) {
   const name = `direct:${Date.now()}:${randomUUID()}`;
-  await emailQueue.add(
-    name,
-    {
-      kind: "direct_email", // ← ここを修正（型: "direct_email" | "campaign_send"）
-      to: args.to,
-      subject: args.subject,
-      html: args.html,
-      text: args.text,
-      brandCompany: args.brandCompany,
-      fromOverride: args.fromOverride || undefined,
-      brandSupport: args.brandSupport || undefined,
-    },
-    { removeOnComplete: 500, removeOnFail: 500 }
-  );
+  try {
+    await emailQueue.add(
+      name,
+      {
+        kind: "direct_email", // 型: "direct_email" | "campaign_send"
+        to: args.to,
+        subject: args.subject,
+        html: args.html,
+        text: args.text,
+        brandCompany: args.brandCompany,
+        fromOverride: args.fromOverride || undefined,
+        brandSupport: args.brandSupport || undefined,
+      },
+      { removeOnComplete: 500, removeOnFail: 500 }
+    );
+  } catch (e: any) {
+    // キュー接続不良でも API 全体を 500 にしない
+    throw new Error(`queue_unavailable: ${e?.message || e}`);
+  }
 }
 
 /* ========= Main ========= */
-
 export async function POST(req: NextRequest) {
   const nowIso = new Date().toISOString();
 
@@ -213,8 +270,8 @@ export async function POST(req: NextRequest) {
     const tenantId =
       req.headers.get("x-tenant-id")?.trim() ??
       "175b1a9d-3f85-482d-9323-68a44d214424";
-
     const body = await req.json().catch(() => ({}));
+
     const {
       table = "form_prospects",
       template_id,
@@ -252,6 +309,7 @@ export async function POST(req: NextRequest) {
     const support = sender?.from_email || null;
     const signature = sender?.signature || "";
 
+    // 送信元差し込みを拡張対応
     const senderDict: Record<string, string> = {
       "{{sender_company}}": brandCompany,
       "{{sender_name}}": brandCompany,
@@ -286,6 +344,7 @@ export async function POST(req: NextRequest) {
           ? `${baseText}\n\n${signature}`
           : baseText;
 
+        // 改行を確実に <br> 化
         const baseHtmlRaw =
           tpl.body_html && tpl.body_html.trim().length > 0
             ? replaceAllKeys(tpl.body_html, ctx)
@@ -309,17 +368,30 @@ export async function POST(req: NextRequest) {
             continue;
           }
 
-          await enqueueDirectEmail({
-            to: toEmail,
-            subject,
-            html: finalHtml,
-            text: finalText,
-            brandCompany,
-            fromOverride: replyTo,
-            brandSupport: support,
-          });
-
-          ok.push(String(r.id));
+          try {
+            await enqueueDirectEmail({
+              to: toEmail,
+              subject,
+              html: finalHtml,
+              text: finalText,
+              brandCompany,
+              fromOverride: replyTo,
+              brandSupport: support,
+            });
+            ok.push(String(r.id));
+          } catch (qe: any) {
+            // キューに積めなかったら失敗として記録（APIは継続）
+            await enqueueWaitlist(tenantId, {
+              table_name: String(table),
+              prospect_id: String(r.id),
+              reason: "queue_error",
+              payload: {
+                error: String(qe?.message || qe),
+                context: { recipient_company: recipientCompany },
+              },
+            }).catch(() => {});
+            failed.push(String(r.id));
+          }
         } else if (channel === "form") {
           if (!formUrl) {
             await enqueueWaitlist(tenantId, {
@@ -353,7 +425,7 @@ export async function POST(req: NextRequest) {
         } else {
           failed.push(String(r.id));
         }
-      } catch {
+      } catch (e) {
         failed.push(String((r as any).id));
       }
     }
@@ -374,6 +446,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ ok, queued, failed });
   } catch (e: any) {
+    // ここで 500 を握りつぶさず原因を返す
     return NextResponse.json(
       { error: String(e?.message || e) },
       { status: 500 }
@@ -391,14 +464,20 @@ async function enqueueWaitlist(
     payload?: any;
   }
 ) {
-  const url = `${REST_URL}/form_outreach_waitlist`;
-  const r = await fetch(url, {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify([{ tenant_id: tenantId, ...row }]),
-  });
-  if (!r.ok) {
-    const t = await r.text().catch(() => "");
-    throw new Error(`waitlist insert error ${r.status}: ${t}`);
+  if (CAN_USE_REST) {
+    const url = `${REST_URL}/form_outreach_waitlist`;
+    const r = await fetch(url, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify([{ tenant_id: tenantId, ...row }]),
+    });
+    if (!r.ok)
+      throw new Error(`waitlist insert error ${r.status}: ${await r.text()}`);
+  } else {
+    const sb = await supabaseServer();
+    const { error } = await sb
+      .from("form_outreach_waitlist")
+      .insert({ tenant_id: tenantId, ...row });
+    if (error) throw new Error(error.message);
   }
 }
