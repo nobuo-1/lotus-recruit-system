@@ -185,6 +185,14 @@ export default function FormOutreachLanding() {
                     テンプレートリスト
                   </Link>
                 </li>
+                <li>
+                  <Link
+                    href="/form-outreach/waitlist"
+                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
+                  >
+                    待機リスト
+                  </Link>
+                </li>
               </ul>
             </section>
 
