@@ -297,20 +297,14 @@ export default function CompaniesPage() {
     })();
   }, []);
 
-  const mapDatasetToTable = (d: Dataset) =>
-    d === "prospects"
-      ? "form_prospects"
-      : d === "rejected"
-      ? "form_prospects_rejected"
-      : "form_similar_sites";
-
   const load = async () => {
     if (!tenantId) return;
     setLoading(true);
     setMsg("");
     try {
       const qs = new URLSearchParams();
-      qs.set("table", mapDatasetToTable(dataset)); // 実テーブル名を送る
+      // ← API 側で正規化するので、シンプルに dataset を送る
+      qs.set("table", dataset); // prospects | rejected | similar
       qs.set("limit", String(PAGE_SIZE));
       qs.set("page", String(page));
       qs.set("sort", sortKey);
@@ -370,9 +364,9 @@ export default function CompaniesPage() {
   };
 
   const formatVal = (k: string, v: any, row: AnyRow) => {
-    if (k === "website" || k === "found_website" || k === "contact_form_url") {
+    // URLをリンク表示する列（フォームは除外するように変更）
+    if ((k === "website" || k === "found_website") && v) {
       const url = String(v || "");
-      if (!url) return "-";
       return (
         <a
           href={url}
@@ -382,6 +376,11 @@ export default function CompaniesPage() {
           {ellipsize(url)}
         </a>
       );
+    }
+    // フォーム：URLではなく あり/なし
+    if (k === "contact_form_url") {
+      const has = !!String(v || "").trim();
+      return <span className="text-neutral-800">{has ? "あり" : "なし"}</span>;
     }
     if (k === "prefectures") {
       const arr = Array.isArray(v) ? v : [];
@@ -412,12 +411,25 @@ export default function CompaniesPage() {
       (row as any).found_company_name
     ) {
       return (
-        <div>
+        <div className="min-w-[18ch] whitespace-nowrap">
           <div>{String(v || "-")}</div>
           <div className="text-xs text-neutral-500">
             検出: {(row as any).found_company_name || "-"}
           </div>
         </div>
+      );
+    }
+    // 社名・業種系は 18ch までは折り返さない
+    if (
+      k === "company_name" ||
+      k === "industry" ||
+      k === "industry_large" ||
+      k === "industry_small"
+    ) {
+      return (
+        <span className="inline-block min-w-[18ch] whitespace-nowrap">
+          {v ?? "-"}
+        </span>
       );
     }
     return v ?? "-";
@@ -433,11 +445,11 @@ export default function CompaniesPage() {
   const sortIcon = (key: string, sortable: boolean) => {
     if (!sortable) return null;
     if (sortKey !== key)
-      return <ArrowUpDown className="h-3.5 w-3.5 text-neutral-400" />;
+      return <ArrowUpDown className="h-3.5 w-3.5 text-neutral-500" />;
     return sortDir === "asc" ? (
-      <ArrowUp className="h-3.5 w-3.5 text-neutral-800" />
+      <ArrowUp className="h-3.5 w-3.5 text-neutral-600" />
     ) : (
-      <ArrowDown className="h-3.5 w-3.5 text-neutral-800" />
+      <ArrowDown className="h-3.5 w-3.5 text-neutral-600" />
     );
   };
 
@@ -661,6 +673,7 @@ export default function CompaniesPage() {
         <section className="rounded-2xl border border-neutral-200 overflow-hidden bg-white">
           <div className="overflow-x-auto">
             <table className="min-w-[1100px] w-full text-sm">
+              {/* ヘッダ色はテンプレートページと同じに統一 */}
               <thead className="bg-neutral-50 text-neutral-600">
                 <tr>
                   {headers.map((h: ColumnDef) => (
@@ -670,7 +683,7 @@ export default function CompaniesPage() {
                     >
                       {h.sortable ? (
                         <button
-                          className="inline-flex items-center gap-1 hover:underline text-neutral-800"
+                          className="inline-flex items-center gap-1 hover:underline text-neutral-600"
                           onClick={() => toggleSort(h.key, h.sortable)}
                           title="並び替え"
                         >
@@ -678,8 +691,7 @@ export default function CompaniesPage() {
                           {sortIcon(h.key, h.sortable)}
                         </button>
                       ) : (
-                        // ★ 非ソート列も濃い色で統一
-                        <span className="inline-flex items-center gap-1 text-neutral-800">
+                        <span className="inline-flex items-center gap-1 text-neutral-600">
                           {h.label}
                         </span>
                       )}
