@@ -1,281 +1,375 @@
 // web/src/app/api/form-outreach/manual/send/route.ts
+import type { NextRequest } from "next/server";
+import { NextResponse } from "next/server";
+import { emailQueue } from "@/server/queue";
+import { randomUUID } from "crypto";
+
 export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-export const revalidate = 0;
 
-import { NextRequest, NextResponse } from "next/server";
-import { supabaseServer } from "@/lib/supabaseServer";
-import { sendMail } from "@/server/mailer";
+/* ========= Supabase REST ========= */
+const REST_URL = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/rest/v1`;
+const ANON = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+const SERVICE = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-type Mode = "email" | "form";
+function authHeaders() {
+  const token = SERVICE || ANON;
+  return {
+    apikey: ANON,
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+    Prefer: "return=representation",
+  };
+}
 
-function compile(t: string, dict: Record<string, string>) {
-  let out = t || "";
-  for (const k of Object.keys(dict)) out = out.split(k).join(dict[k]);
+type SenderRow = {
+  id: string;
+  from_name: string | null;
+  from_email: string | null;
+  reply_to: string | null;
+  phone: string | null;
+  website: string | null;
+  signature: string | null;
+  is_default: boolean | null;
+};
+
+type TemplateRow = {
+  id: string;
+  name: string | null;
+  subject: string | null;
+  body_text: string | null;
+  body_html?: string | null;
+};
+
+type AnyRow =
+  | {
+      id: string;
+      company_name?: string | null;
+      website?: string | null;
+      contact_form_url?: string | null;
+      contact_email?: string | null;
+      [k: string]: any;
+    }
+  | {
+      id: string;
+      target_company_name?: string | null;
+      found_company_name?: string | null;
+      found_website?: string | null;
+      contact_form_url?: string | null;
+      contact_email?: string | null;
+      [k: string]: any;
+    };
+
+/* ========= Helpers ========= */
+
+function escapeHtml(s: string) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function textToHtml(text: string) {
+  return escapeHtml(text).replace(/\r?\n/g, "<br>");
+}
+
+function pickCompanyName(r: AnyRow) {
+  return r.company_name || r.target_company_name || r.found_company_name || "-";
+}
+
+function pickWebsite(r: AnyRow) {
+  return r.website || (r as any).found_website || "";
+}
+
+function replaceAllKeys(src: string, dict: Record<string, string>) {
+  let out = src;
+  for (const [k, v] of Object.entries(dict)) {
+    const re = new RegExp(
+      String(k).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+      "g"
+    );
+    out = out.replace(re, v);
+  }
   return out;
 }
 
-async function trySubmitForm(
-  formUrl: string,
-  message: string,
-  context: any
-): Promise<{ ok: boolean; error?: string }> {
-  try {
-    // 1st: 画面を事前取得（reCAPTCHA等の検知）
-    const res = await fetch(formUrl, { method: "GET" });
-    const html = await res.text();
-    if (/recaptcha|grecaptcha|hcaptcha/i.test(html)) {
-      return { ok: false, error: "recaptcha_detected" };
-    }
-
-    // 2nd: よくあるフィールド名で POST（簡易）
-    const fd = new URLSearchParams();
-    fd.set(
-      "company",
-      context?.sender_company || context?.recipient_company || "株式会社LOTUS"
-    );
-    fd.set("name", context?.sender_name || "担当者");
-    fd.set("email", context?.sender_email || "no-reply@example.com");
-    fd.set("subject", context?.subject || "お問い合わせ");
-    fd.set("message", message || "メッセージをご確認ください");
-
-    const pr = await fetch(formUrl, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: fd.toString(),
-    });
-    const ok = pr.status >= 200 && pr.status < 400;
-    if (!ok) return { ok: false, error: `status_${pr.status}` };
-    return { ok: true };
-  } catch (e: any) {
-    return { ok: false, error: String(e?.message || e) };
+async function loadTemplate(tenantId: string, templateId: string) {
+  const url =
+    `${REST_URL}/form_outreach_messages?select=id,name,subject,body_text,body_html` +
+    `&tenant_id=eq.${tenantId}&id=eq.${templateId}&limit=1`;
+  const r = await fetch(url, { headers: authHeaders(), cache: "no-store" });
+  if (!r.ok) {
+    const t = await r.text().catch(() => "");
+    throw new Error(`template fetch error ${r.status}: ${t}`);
   }
+  const rows = (await r.json()) as TemplateRow[];
+  if (!rows?.length) throw new Error("template not found");
+  return rows[0];
 }
 
+async function loadSender(tenantId: string): Promise<SenderRow | null> {
+  const url =
+    `${REST_URL}/form_outreach_senders?select=id,from_name,from_email,reply_to,phone,website,signature,is_default` +
+    `&tenant_id=eq.${tenantId}&is_default=is.true&limit=1`;
+  const r = await fetch(url, { headers: authHeaders(), cache: "no-store" });
+  if (!r.ok) return null;
+  const rows = (await r.json()) as SenderRow[];
+  return rows?.[0] ?? null;
+}
+
+async function loadProspects(
+  tenantId: string,
+  tableName: string,
+  ids: string[]
+) {
+  const table =
+    tableName === "form_prospects" ||
+    tableName === "form_prospects_rejected" ||
+    tableName === "form_similar_sites"
+      ? tableName
+      : "form_prospects";
+  const idCsv = ids.map((x) => x).join(",");
+  const selectCols =
+    "id,company_name,website,contact_form_url,contact_email," +
+    "target_company_name,found_company_name,found_website";
+  const url =
+    `${REST_URL}/${table}?select=${selectCols}` +
+    `&tenant_id=eq.${tenantId}&id=in.(${idCsv})&limit=${ids.length}`;
+  const r = await fetch(encodeURI(url), {
+    headers: authHeaders(),
+    cache: "no-store",
+  });
+  if (!r.ok) {
+    const t = await r.text().catch(() => "");
+    throw new Error(`prospects fetch error ${r.status}: ${t}`);
+  }
+  const rows = (await r.json()) as AnyRow[];
+  return rows;
+}
+
+async function insertRun(
+  tenantId: string,
+  payload: {
+    flow: string;
+    status: string;
+    error?: string | null;
+    started_at?: string | null;
+    finished_at?: string | null;
+  }
+) {
+  const url = `${REST_URL}/form_outreach_runs`;
+  const body = [{ tenant_id: tenantId, ...payload }];
+  const r = await fetch(url, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) return null;
+  const rows = await r.json().catch(() => null);
+  return rows?.[0] ?? null;
+}
+
+async function updateRun(
+  id: string,
+  patch: { status?: string; error?: string | null; finished_at?: string }
+) {
+  const url = `${REST_URL}/form_outreach_runs?id=eq.${id}`;
+  await fetch(url, {
+    method: "PATCH",
+    headers: authHeaders(),
+    body: JSON.stringify(patch),
+  }).catch(() => {});
+}
+
+/* ★ 修正点：kind を "direct_email" に統一 ★ */
+async function enqueueDirectEmail(args: {
+  to: string;
+  subject: string;
+  html: string;
+  text?: string;
+  brandCompany: string;
+  fromOverride?: string | null;
+  brandSupport?: string | null;
+}) {
+  const name = `direct:${Date.now()}:${randomUUID()}`;
+  await emailQueue.add(
+    name,
+    {
+      kind: "direct_email", // ← ここを修正（型: "direct_email" | "campaign_send"）
+      to: args.to,
+      subject: args.subject,
+      html: args.html,
+      text: args.text,
+      brandCompany: args.brandCompany,
+      fromOverride: args.fromOverride || undefined,
+      brandSupport: args.brandSupport || undefined,
+    },
+    { removeOnComplete: 500, removeOnFail: 500 }
+  );
+}
+
+/* ========= Main ========= */
+
 export async function POST(req: NextRequest) {
+  const nowIso = new Date().toISOString();
+
   try {
-    const tenantId = req.headers.get("x-tenant-id") || "";
-    if (!tenantId) {
-      return NextResponse.json(
-        { error: "x-tenant-id required" },
-        { status: 400 }
-      );
-    }
+    const tenantId =
+      req.headers.get("x-tenant-id")?.trim() ??
+      "175b1a9d-3f85-482d-9323-68a44d214424";
 
     const body = await req.json().catch(() => ({}));
-    const mode: Mode = body?.mode === "form" ? "form" : "email";
-    const table: string = String(body?.table || "");
-    const templateId: string = String(body?.template_id || "");
-    const ids: string[] = Array.isArray(body?.prospect_ids)
-      ? body.prospect_ids
-      : [];
-    const unknownPlaceholder: string = String(
-      body?.unknown_placeholder || "メッセージをご確認ください"
-    );
+    const {
+      table = "form_prospects",
+      template_id,
+      prospect_ids = [],
+      unknown_placeholder = "メッセージをご確認ください",
+      channel = "email",
+    } = body || {};
 
-    if (!table || !templateId || !ids.length) {
+    if (!template_id)
       return NextResponse.json(
-        { error: "table, template_id, prospect_ids are required" },
+        { error: "template_id is required" },
         { status: 400 }
       );
-    }
-
-    const sb = await supabaseServer();
-
-    // テンプレ取得
-    const { data: tpl, error: tplErr } = await sb
-      .from("form_outreach_messages")
-      .select("id, name, subject, body_text")
-      .eq("id", templateId)
-      .maybeSingle();
-    if (tplErr || !tpl) {
+    if (!Array.isArray(prospect_ids) || prospect_ids.length === 0)
       return NextResponse.json(
-        { error: tplErr?.message || "template not found" },
-        { status: 404 }
+        { error: "prospect_ids is empty" },
+        { status: 400 }
       );
-    }
 
-    // 対象行を取得
-    const { data: prospects, error: pErr } = await sb
-      .from(table)
-      .select("*")
-      .eq("tenant_id", tenantId)
-      .in("id", ids);
+    const run = await insertRun(tenantId, {
+      flow: `manual-send/${channel}`,
+      status: "running",
+      started_at: nowIso,
+    });
 
-    if (pErr) {
-      return NextResponse.json({ error: pErr.message }, { status: 500 });
-    }
+    const [tpl, sender, targets] = await Promise.all([
+      loadTemplate(tenantId, String(template_id)),
+      loadSender(tenantId),
+      loadProspects(tenantId, String(table), prospect_ids.map(String)),
+    ]);
+
+    const brandCompany =
+      (sender?.from_name && sender.from_name.trim()) || "Lotus System";
+    const replyTo = sender?.reply_to || null;
+    const support = sender?.from_email || null;
+    const signature = sender?.signature || "";
+
+    const senderDict: Record<string, string> = {
+      "{{sender_company}}": brandCompany,
+      "{{sender_name}}": brandCompany,
+      "{{sender_email}}": sender?.from_email || "",
+      "{{sender_reply_to}}": sender?.reply_to || "",
+      "{{sender_phone}}": sender?.phone || "",
+      "{{sender_website}}": sender?.website || "",
+      "{{signature}}": signature || "",
+      "{{today}}": nowIso.slice(0, 10),
+    };
 
     const ok: string[] = [];
-    const failed: Array<{ id: string; error: string }> = [];
     const queued: string[] = [];
+    const failed: string[] = [];
 
-    const today = new Date().toISOString().slice(0, 10);
+    for (const r of targets) {
+      try {
+        const recipientCompany = String(pickCompanyName(r) || "-");
+        const website = String(pickWebsite(r) || "");
+        const formUrl = String((r as any).contact_form_url || "");
+        const toEmail = String((r as any).contact_email || "");
 
-    for (const row of prospects || []) {
-      const ctx = {
-        sender_company: "株式会社LOTUS",
-        sender_name: "担当者",
-        recipient_company:
-          (row as any).company_name ||
-          (row as any).target_company_name ||
-          (row as any).found_company_name ||
-          "-",
-        website: (row as any).website || (row as any).found_website || "",
-        today,
-      };
+        const ctx: Record<string, string> = {
+          ...senderDict,
+          "{{recipient_company}}": recipientCompany,
+          "{{website}}": website,
+        };
 
-      const subject =
-        compile(tpl.subject || "", {
-          "{{sender_company}}": ctx.sender_company,
-          "{{sender_name}}": ctx.sender_name,
-          "{{recipient_company}}": ctx.recipient_company,
-          "{{website}}": ctx.website,
-          "{{today}}": ctx.today,
-        }) || "ご連絡";
+        const subject = replaceAllKeys(tpl.subject || "", ctx) || "(件名なし)";
+        const baseText = replaceAllKeys(tpl.body_text || "", ctx);
+        const withSignatureText = signature
+          ? `${baseText}\n\n${signature}`
+          : baseText;
 
-      const bodyText =
-        compile(tpl.body_text || "", {
-          "{{sender_company}}": ctx.sender_company,
-          "{{sender_name}}": ctx.sender_name,
-          "{{recipient_company}}": ctx.recipient_company,
-          "{{website}}": ctx.website,
-          "{{today}}": ctx.today,
-        }) || unknownPlaceholder;
+        const baseHtmlRaw =
+          tpl.body_html && tpl.body_html.trim().length > 0
+            ? replaceAllKeys(tpl.body_html, ctx)
+            : textToHtml(withSignatureText);
 
-      if (mode === "email") {
-        const to = String((row as any).contact_email || "").trim();
-        if (!to) {
-          // メールアドレス無し → 待機へ
-          queued.push((row as any).id);
-          await sb.from("form_outreach_waitlist").insert({
-            tenant_id: tenantId,
-            table_name: table,
-            prospect_id: (row as any).id,
-            reason: "no_email",
-            status: "waiting",
-            payload: {
-              mode: "email",
-              contact_email: null,
-              subject,
-              body_text: bodyText,
-              context: ctx,
-            },
-          });
-          continue;
-        }
-        try {
-          await sendMail({
-            to,
+        const finalHtml = baseHtmlRaw;
+        const finalText = withSignatureText;
+
+        if (channel === "email") {
+          if (!toEmail) {
+            await enqueueWaitlist(tenantId, {
+              table_name: String(table),
+              prospect_id: String(r.id),
+              reason: "no_email",
+              payload: {
+                context: { recipient_company: recipientCompany },
+                form_url: formUrl || null,
+              },
+            });
+            queued.push(String(r.id));
+            continue;
+          }
+
+          await enqueueDirectEmail({
+            to: toEmail,
             subject,
-            html: bodyText,
-            text: bodyText,
+            html: finalHtml,
+            text: finalText,
+            brandCompany,
+            fromOverride: replyTo,
+            brandSupport: support,
           });
-          ok.push((row as any).id);
-        } catch (e: any) {
-          const msg = String(e?.message || e);
-          failed.push({ id: (row as any).id, error: msg });
-          await sb.from("form_outreach_waitlist").insert({
-            tenant_id: tenantId,
-            table_name: table,
-            prospect_id: (row as any).id,
-            reason: "error",
-            status: "waiting",
-            payload: {
-              mode: "email",
-              contact_email: to,
-              subject,
-              body_text: bodyText,
-              context: ctx,
-              last_error: msg,
-            },
-          });
-        }
-      } else {
-        // フォーム送信
-        const formUrl = String((row as any).contact_form_url || "").trim();
-        if (!formUrl) {
-          queued.push((row as any).id);
-          await sb.from("form_outreach_waitlist").insert({
-            tenant_id: tenantId,
-            table_name: table,
-            prospect_id: (row as any).id,
+
+          ok.push(String(r.id));
+        } else if (channel === "form") {
+          if (!formUrl) {
+            await enqueueWaitlist(tenantId, {
+              table_name: String(table),
+              prospect_id: String(r.id),
+              reason: "no_form",
+              payload: {
+                context: {
+                  recipient_company: recipientCompany,
+                  message: finalText || baseText || unknown_placeholder,
+                },
+              },
+            });
+            queued.push(String(r.id));
+            continue;
+          }
+
+          await enqueueWaitlist(tenantId, {
+            table_name: String(table),
+            prospect_id: String(r.id),
             reason: "queue_form",
-            status: "waiting",
             payload: {
-              mode: "form",
-              form_url: null,
-              body_text: bodyText,
-              context: ctx,
-            },
-          });
-          continue;
-        }
-        const res = await trySubmitForm(formUrl, bodyText, {
-          ...ctx,
-          subject,
-        });
-        if (res.ok) {
-          ok.push((row as any).id);
-        } else if (res.error === "recaptcha_detected") {
-          queued.push((row as any).id);
-          await sb.from("form_outreach_waitlist").insert({
-            tenant_id: tenantId,
-            table_name: table,
-            prospect_id: (row as any).id,
-            reason: "recaptcha",
-            status: "waiting",
-            payload: {
-              mode: "form",
+              context: {
+                recipient_company: recipientCompany,
+                message: finalText || baseText || unknown_placeholder,
+              },
               form_url: formUrl,
-              body_text: bodyText,
-              context: ctx,
-              last_error: res.error,
             },
           });
+          queued.push(String(r.id));
         } else {
-          failed.push({ id: (row as any).id, error: res.error || "unknown" });
-          await sb.from("form_outreach_waitlist").insert({
-            tenant_id: tenantId,
-            table_name: table,
-            prospect_id: (row as any).id,
-            reason: "error",
-            status: "waiting",
-            payload: {
-              mode: "form",
-              form_url: formUrl,
-              body_text: bodyText,
-              context: ctx,
-              last_error: res.error || "unknown",
-            },
-          });
+          failed.push(String(r.id));
         }
+      } catch {
+        failed.push(String((r as any).id));
       }
     }
 
-    // 実行ログ（拡張カラムに合わせて保存）
-    try {
-      await sb.from("form_outreach_runs").insert({
-        tenant_id: tenantId,
-        flow: mode === "email" ? "manual-send-email" : "manual-send-form",
-        status: failed.length
-          ? ok.length
-            ? "partial"
-            : "failed"
-          : "succeeded",
-        error: failed.length ? `${failed.length} failed` : null,
-        started_at: new Date().toISOString(),
+    if (run?.id) {
+      const status =
+        failed.length === 0
+          ? "done"
+          : ok.length > 0 || queued.length > 0
+          ? "partial"
+          : "failed";
+      await updateRun(run.id, {
+        status,
+        error: failed.length ? `failed: ${failed.length}` : null,
         finished_at: new Date().toISOString(),
-        mode,
-        table_name: table,
-        template_id: templateId,
-        ok_count: ok.length,
-        queued_count: queued.length,
-        failed_count: failed.length,
-        meta: { ok, queued, failed },
       });
-    } catch {
-      // ログの失敗は致命的ではないので握りつぶし
     }
 
     return NextResponse.json({ ok, queued, failed });
@@ -284,5 +378,27 @@ export async function POST(req: NextRequest) {
       { error: String(e?.message || e) },
       { status: 500 }
     );
+  }
+}
+
+/* ========= 待機リスト API 呼び出し ========= */
+async function enqueueWaitlist(
+  tenantId: string,
+  row: {
+    table_name: string;
+    prospect_id: string;
+    reason: string;
+    payload?: any;
+  }
+) {
+  const url = `${REST_URL}/form_outreach_waitlist`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify([{ tenant_id: tenantId, ...row }]),
+  });
+  if (!r.ok) {
+    const t = await r.text().catch(() => "");
+    throw new Error(`waitlist insert error ${r.status}: ${t}`);
   }
 }
