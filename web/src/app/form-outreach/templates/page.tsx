@@ -88,6 +88,7 @@ export default function TemplatesPage() {
       "{{sender_website}}": "https://lotus.example.com",
       "{{recipient_company}}": "○○株式会社",
       "{{recipient_prefecture}}": "東京都",
+      "{{recipient_industry}}": "IT・ソフトウェア",
       "{{website}}": "https://example.com",
       "{{signature}}":
         "―――――――――\n株式会社LOTUS\n営業部 山田\nhttps://lotus.example.com",
@@ -109,6 +110,7 @@ export default function TemplatesPage() {
       "{{sender_website}}": "https://lotus.example.com",
       "{{recipient_company}}": "○○株式会社",
       "{{recipient_prefecture}}": "東京都",
+      "{{recipient_industry}}": "IT・ソフトウェア",
       "{{website}}": "https://example.com",
       "{{signature}}":
         "―――――――――\n株式会社LOTUS\n営業部 山田\nhttps://lotus.example.com",
@@ -233,7 +235,7 @@ export default function TemplatesPage() {
   };
 
   const placeholdersLine =
-    "{{sender_company}}, {{sender_name}}, {{sender_email}}, {{sender_reply_to}}, {{sender_phone}}, {{sender_website}}, {{recipient_company}}, {{recipient_prefecture}}, {{website}}, {{signature}}, {{today}}";
+    "{{sender_company}}, {{sender_name}}, {{sender_email}}, {{sender_reply_to}}, {{sender_phone}}, {{sender_website}}, {{recipient_company}}, {{recipient_prefecture}}, {{recipient_industry}}, {{website}}, {{signature}}, {{today}}";
 
   const PlaceholderHelp = () => (
     <div className="mt-2 rounded-lg border border-neutral-200 bg-neutral-50 p-2 text-[11px] leading-5 text-neutral-700">
@@ -260,7 +262,8 @@ export default function TemplatesPage() {
         </li>
         <li>
           <code>{"{{signature}}"}</code>
-          ：署名（送信元設定。本文末尾にも自動追記されます）
+          ：署名（送信元設定。
+          テンプレート本文内でこのプレースホルダを書いた場所にだけ展開されます）
         </li>
         <li>
           <code>{"{{recipient_company}}"}</code>
@@ -269,6 +272,11 @@ export default function TemplatesPage() {
         <li>
           <code>{"{{recipient_prefecture}}"}</code>
           ：相手企業の都道府県（prefectures の先頭要素）
+        </li>
+        <li>
+          <code>{"{{recipient_industry}}"}</code>
+          ：相手企業の業種 （form_prospects.industry または
+          form_prospects_rejected.industry_small / industry_large）
         </li>
         <li>
           <code>{"{{website}}"}</code>：相手企業サイトURL（取得できた場合）

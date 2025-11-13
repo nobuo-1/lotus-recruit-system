@@ -4,6 +4,10 @@ import { NextResponse } from "next/server";
 import { emailQueue } from "@/server/queue";
 import { randomUUID } from "crypto";
 import { supabaseServer } from "@/lib/supabaseServer";
+import {
+  planFormSubmission,
+  submitFormPlan,
+} from "@/server/formOutreachFormSender";
 
 export const runtime = "nodejs";
 
@@ -25,16 +29,25 @@ function authHeaders() {
   };
 }
 
+/* ========= Types ========= */
 type SenderRow = {
   id: string;
-  sender_company: string | null; // 追加：会社名 {{sender_company}}
-  from_name: string | null; // 個人名 {{sender_name}}
+  sender_company: string | null; // 会社名（{{sender_company}})
+  from_name: string | null; // 個人名/担当者名（{{sender_name}})
+  from_header_name: string | null; // From: 表示名
   from_email: string | null;
   reply_to: string | null;
   phone: string | null;
   website: string | null;
   signature: string | null;
   is_default: boolean | null;
+
+  // ★ フォーム営業用 住所・氏名
+  postal_code?: string | null;
+  sender_prefecture?: string | null;
+  sender_address?: string | null;
+  sender_last_name?: string | null;
+  sender_first_name?: string | null;
 };
 
 type TemplateRow = {
@@ -50,29 +63,40 @@ type ProspectBase = {
   contact_form_url?: string | null;
   contact_email?: string | null;
 };
-type ProspectA = ProspectBase & {
+
+type ProspectProspects = ProspectBase & {
   company_name?: string | null;
   website?: string | null;
-  // form_prospects / form_prospects_rejected 用の都道府県
+  industry?: string | null;
   prefectures?: string[] | null;
 };
-type ProspectB = ProspectBase & {
+
+type ProspectRejected = ProspectBase & {
+  company_name?: string | null;
+  website?: string | null;
+  industry_large?: string | null;
+  industry_small?: string | null;
+  prefectures?: string[] | null;
+};
+
+type ProspectSimilar = ProspectBase & {
   target_company_name?: string | null;
   found_company_name?: string | null;
   found_website?: string | null;
-  // form_prospects_rejected にも prefectures がある
-  prefectures?: string[] | null;
 };
-type AnyRow = ProspectA | ProspectB;
+
+type AnyRow = ProspectProspects | ProspectRejected | ProspectSimilar;
 
 /* ========= Helpers ========= */
 function escapeHtml(s: string) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
+
 function textToHtml(text: string) {
   // 改行→<br>（本文はテキスト起点なのでエスケープ前提）
   return escapeHtml(text).replace(/\r?\n/g, "<br>");
 }
+
 function pickCompanyName(r: AnyRow) {
   return (
     (r as any).company_name ||
@@ -81,16 +105,23 @@ function pickCompanyName(r: AnyRow) {
     "-"
   );
 }
+
 function pickWebsite(r: AnyRow) {
   return (r as any).website || (r as any).found_website || "";
 }
+
 function pickPrefecture(r: AnyRow): string {
   const arr = (r as any).prefectures as string[] | null | undefined;
-  if (Array.isArray(arr) && arr.length > 0) {
-    return arr[0] || "";
-  }
-  return "";
+  return Array.isArray(arr) && arr.length > 0 ? arr[0] : "";
 }
+
+function pickIndustry(r: AnyRow): string {
+  const a = (r as any).industry as string | null | undefined;
+  const b = (r as any).industry_small as string | null | undefined;
+  const c = (r as any).industry_large as string | null | undefined;
+  return a || b || c || "";
+}
+
 function replaceAllKeys(src: string, dict: Record<string, string>) {
   let out = src || "";
   for (const [k, v] of Object.entries(dict)) {
@@ -104,6 +135,7 @@ function replaceAllKeys(src: string, dict: Record<string, string>) {
 }
 
 /* ========= Loaders (REST or SDK fallback) ========= */
+
 async function loadTemplate(tenantId: string, templateId: string) {
   if (CAN_USE_REST) {
     const url =
@@ -132,7 +164,7 @@ async function loadTemplate(tenantId: string, templateId: string) {
 async function loadSender(tenantId: string): Promise<SenderRow | null> {
   if (CAN_USE_REST) {
     const url =
-      `${REST_URL}/form_outreach_senders?select=id,sender_company,from_name,from_email,reply_to,phone,website,signature,is_default` +
+      `${REST_URL}/form_outreach_senders?select=id,sender_company,from_name,from_header_name,from_email,reply_to,phone,website,signature,is_default,postal_code,sender_prefecture,sender_address,sender_last_name,sender_first_name` +
       `&tenant_id=eq.${tenantId}&is_default=is.true&limit=1`;
     const r = await fetch(url, { headers: authHeaders(), cache: "no-store" });
     if (!r.ok) return null;
@@ -143,7 +175,7 @@ async function loadSender(tenantId: string): Promise<SenderRow | null> {
     const { data, error } = await sb
       .from("form_outreach_senders")
       .select(
-        "id,sender_company,from_name,from_email,reply_to,phone,website,signature,is_default"
+        "id,sender_company,from_name,from_header_name,from_email,reply_to,phone,website,signature,is_default,postal_code,sender_prefecture,sender_address,sender_last_name,sender_first_name"
       )
       .eq("tenant_id", tenantId)
       .eq("is_default", true)
@@ -172,6 +204,8 @@ function selectColsFor(table: string) {
         "website",
         "contact_form_url",
         "contact_email",
+        "industry_large",
+        "industry_small",
         "prefectures",
       ].join(",");
     case "form_prospects":
@@ -182,6 +216,7 @@ function selectColsFor(table: string) {
         "website",
         "contact_form_url",
         "contact_email",
+        "industry",
         "prefectures",
       ].join(",");
   }
@@ -283,7 +318,7 @@ async function enqueueDirectEmail(args: {
   subject: string;
   html: string;
   text?: string;
-  brandCompany: string;
+  brandCompany: string; // From 表示名
   fromOverride?: string | null;
   brandSupport?: string | null;
 }) {
@@ -312,6 +347,7 @@ export async function POST(req: NextRequest) {
     const tenantId =
       req.headers.get("x-tenant-id")?.trim() ??
       "175b1a9d-3f85-482d-9323-68a44d214424";
+
     const body = await req.json().catch(() => ({}));
 
     const {
@@ -345,23 +381,24 @@ export async function POST(req: NextRequest) {
       loadProspects(tenantId, String(table), prospect_ids.map(String)),
     ]);
 
-    // 会社名／担当者名の優先順位
-    const senderCompany =
-      (sender?.sender_company && sender.sender_company.trim()) || null;
-    const senderPersonName =
-      (sender?.from_name && sender.from_name.trim()) || null;
+    const senderCompany = (sender?.sender_company || "").trim();
+    const senderName = (sender?.from_name || "").trim();
 
-    const brandCompany = senderCompany || senderPersonName || "Lotus System"; // キュー用ブランド表示
+    // メールの From: に表示する名前
+    const brandCompany =
+      (sender?.from_header_name || "").trim() ||
+      senderCompany ||
+      senderName ||
+      "Lotus System";
 
     const replyTo = sender?.reply_to || null;
     const support = sender?.from_email || null;
     const signature = sender?.signature || "";
 
+    // ★ 送信元差し込み：署名は自動でくっつけず、{{signature}} を書いた時だけ反映
     const senderDict: Record<string, string> = {
-      // 会社名プレースホルダ
       "{{sender_company}}": senderCompany || brandCompany,
-      // 担当者名プレースホルダ
-      "{{sender_name}}": senderPersonName || brandCompany,
+      "{{sender_name}}": senderName || brandCompany,
       "{{sender_email}}": sender?.from_email || "",
       "{{sender_reply_to}}": sender?.reply_to || "",
       "{{sender_phone}}": sender?.phone || "",
@@ -378,30 +415,32 @@ export async function POST(req: NextRequest) {
       try {
         const recipientCompany = String(pickCompanyName(r) || "-");
         const website = String(pickWebsite(r) || "");
-        const prefecture = String(pickPrefecture(r) || "");
+        const recipientPref = String(pickPrefecture(r) || "");
+        const recipientIndustry = String(pickIndustry(r) || "");
         const formUrl = String((r as any).contact_form_url || "");
         const toEmail = String((r as any).contact_email || "");
 
         const ctx: Record<string, string> = {
           ...senderDict,
           "{{recipient_company}}": recipientCompany,
+          "{{recipient_prefecture}}": recipientPref,
+          "{{recipient_industry}}": recipientIndustry,
           "{{website}}": website,
-          "{{recipient_prefecture}}": prefecture,
         };
 
         const subject = replaceAllKeys(tpl.subject || "", ctx) || "(件名なし)";
         const baseText = replaceAllKeys(tpl.body_text || "", ctx);
-        const withSignatureText = signature
-          ? `${baseText}\n\n${signature}`
-          : baseText;
+
+        // ★ 署名は自動で末尾に付与しない（{{signature}} を書いたところだけに入る）
+        const finalText = baseText;
 
         const baseHtmlRaw =
           tpl.body_html && tpl.body_html.trim().length > 0
             ? replaceAllKeys(tpl.body_html, ctx)
-            : textToHtml(withSignatureText);
+            : textToHtml(finalText || unknown_placeholder);
 
         const finalHtml = baseHtmlRaw;
-        const finalText = withSignatureText;
+        const messageText = finalText || baseText || unknown_placeholder;
 
         if (channel === "email") {
           if (!toEmail) {
@@ -410,7 +449,11 @@ export async function POST(req: NextRequest) {
               prospect_id: String(r.id),
               reason: "no_email",
               payload: {
-                context: { recipient_company: recipientCompany },
+                context: {
+                  recipient_company: recipientCompany,
+                  recipient_prefecture: recipientPref,
+                  recipient_industry: recipientIndustry,
+                },
                 form_url: formUrl || null,
               },
             });
@@ -437,7 +480,9 @@ export async function POST(req: NextRequest) {
               payload: {
                 context: {
                   recipient_company: recipientCompany,
-                  message: finalText || baseText || unknown_placeholder,
+                  recipient_prefecture: recipientPref,
+                  recipient_industry: recipientIndustry,
+                  message: messageText,
                 },
               },
             });
@@ -445,19 +490,84 @@ export async function POST(req: NextRequest) {
             continue;
           }
 
-          await enqueueWaitlist(tenantId, {
-            table_name: String(table),
-            prospect_id: String(r.id),
-            reason: "queue_form",
-            payload: {
-              context: {
-                recipient_company: recipientCompany,
-                message: finalText || baseText || unknown_placeholder,
+          try {
+            // 1. フォームHTML取得
+            const pageRes = await fetch(formUrl, { method: "GET" });
+            if (!pageRes.ok) {
+              throw new Error(`form page fetch error: ${pageRes.status}`);
+            }
+            const html = await pageRes.text();
+
+            // 2. ChatGPT にフォーム入力プランを作成させる（message にテンプレ本文を渡す）
+            const plan = await planFormSubmission({
+              targetUrl: formUrl,
+              html,
+              message: messageText,
+              sender: {
+                company:
+                  sender?.sender_company || senderCompany || brandCompany,
+                postal_code: sender?.postal_code || "",
+                prefecture: sender?.sender_prefecture || "",
+                address: sender?.sender_address || "",
+                last_name: sender?.sender_last_name || senderName || "",
+                first_name: sender?.sender_first_name || "",
+                email: sender?.from_email || "",
+                phone: sender?.phone || "",
+                website: sender?.website || "",
               },
-              form_url: formUrl,
-            },
-          });
-          queued.push(String(r.id));
+              recipient: {
+                company_name: recipientCompany,
+                website,
+                industry: recipientIndustry,
+                prefecture: recipientPref,
+              },
+            });
+
+            if (!plan) {
+              throw new Error("form plan not generated");
+            }
+
+            // 3. 実際にフォーム送信
+            const result = await submitFormPlan(formUrl, plan);
+
+            if (result.ok) {
+              ok.push(String(r.id));
+            } else {
+              await enqueueWaitlist(tenantId, {
+                table_name: String(table),
+                prospect_id: String(r.id),
+                reason: "queue_form",
+                payload: {
+                  context: {
+                    recipient_company: recipientCompany,
+                    recipient_prefecture: recipientPref,
+                    recipient_industry: recipientIndustry,
+                    message: messageText,
+                  },
+                  form_url: formUrl,
+                  last_status: result.status,
+                },
+              });
+              queued.push(String(r.id));
+            }
+          } catch (err) {
+            await enqueueWaitlist(tenantId, {
+              table_name: String(table),
+              prospect_id: String(r.id),
+              reason: "queue_form",
+              payload: {
+                context: {
+                  recipient_company: recipientCompany,
+                  recipient_prefecture: recipientPref,
+                  recipient_industry: recipientIndustry,
+                  message: messageText,
+                },
+                form_url: formUrl,
+                error: String(err),
+              },
+            });
+            queued.push(String(r.id));
+          }
         } else {
           failed.push(String(r.id));
         }

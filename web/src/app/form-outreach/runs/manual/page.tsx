@@ -271,7 +271,7 @@ export default function ManualRunsPage() {
           "x-tenant-id": tenantId,
         },
         body: JSON.stringify({
-          mode: sendMode, // ★ メール or フォーム
+          channel: sendMode, // ★ メール or フォーム（API 側の channel に合わせる）
           table: DATASET_TO_TABLE[dataset],
           template_id: selectedTemplateId,
           prospect_ids: Array.from(selected),
