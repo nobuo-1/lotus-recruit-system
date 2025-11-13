@@ -27,7 +27,8 @@ function authHeaders() {
 
 type SenderRow = {
   id: string;
-  from_name: string | null;
+  sender_company: string | null; // 追加：会社名 {{sender_company}}
+  from_name: string | null; // 個人名 {{sender_name}}
   from_email: string | null;
   reply_to: string | null;
   phone: string | null;
@@ -52,11 +53,15 @@ type ProspectBase = {
 type ProspectA = ProspectBase & {
   company_name?: string | null;
   website?: string | null;
+  // form_prospects / form_prospects_rejected 用の都道府県
+  prefectures?: string[] | null;
 };
 type ProspectB = ProspectBase & {
   target_company_name?: string | null;
   found_company_name?: string | null;
   found_website?: string | null;
+  // form_prospects_rejected にも prefectures がある
+  prefectures?: string[] | null;
 };
 type AnyRow = ProspectA | ProspectB;
 
@@ -78,6 +83,13 @@ function pickCompanyName(r: AnyRow) {
 }
 function pickWebsite(r: AnyRow) {
   return (r as any).website || (r as any).found_website || "";
+}
+function pickPrefecture(r: AnyRow): string {
+  const arr = (r as any).prefectures as string[] | null | undefined;
+  if (Array.isArray(arr) && arr.length > 0) {
+    return arr[0] || "";
+  }
+  return "";
 }
 function replaceAllKeys(src: string, dict: Record<string, string>) {
   let out = src || "";
@@ -120,7 +132,7 @@ async function loadTemplate(tenantId: string, templateId: string) {
 async function loadSender(tenantId: string): Promise<SenderRow | null> {
   if (CAN_USE_REST) {
     const url =
-      `${REST_URL}/form_outreach_senders?select=id,from_name,from_email,reply_to,phone,website,signature,is_default` +
+      `${REST_URL}/form_outreach_senders?select=id,sender_company,from_name,from_email,reply_to,phone,website,signature,is_default` +
       `&tenant_id=eq.${tenantId}&is_default=is.true&limit=1`;
     const r = await fetch(url, { headers: authHeaders(), cache: "no-store" });
     if (!r.ok) return null;
@@ -131,7 +143,7 @@ async function loadSender(tenantId: string): Promise<SenderRow | null> {
     const { data, error } = await sb
       .from("form_outreach_senders")
       .select(
-        "id,from_name,from_email,reply_to,phone,website,signature,is_default"
+        "id,sender_company,from_name,from_email,reply_to,phone,website,signature,is_default"
       )
       .eq("tenant_id", tenantId)
       .eq("is_default", true)
@@ -154,6 +166,14 @@ function selectColsFor(table: string) {
         "contact_email",
       ].join(",");
     case "form_prospects_rejected":
+      return [
+        "id",
+        "company_name",
+        "website",
+        "contact_form_url",
+        "contact_email",
+        "prefectures",
+      ].join(",");
     case "form_prospects":
     default:
       return [
@@ -162,6 +182,7 @@ function selectColsFor(table: string) {
         "website",
         "contact_form_url",
         "contact_email",
+        "prefectures",
       ].join(",");
   }
 }
@@ -324,15 +345,23 @@ export async function POST(req: NextRequest) {
       loadProspects(tenantId, String(table), prospect_ids.map(String)),
     ]);
 
-    const brandCompany =
-      (sender?.from_name && sender.from_name.trim()) || "Lotus System";
+    // 会社名／担当者名の優先順位
+    const senderCompany =
+      (sender?.sender_company && sender.sender_company.trim()) || null;
+    const senderPersonName =
+      (sender?.from_name && sender.from_name.trim()) || null;
+
+    const brandCompany = senderCompany || senderPersonName || "Lotus System"; // キュー用ブランド表示
+
     const replyTo = sender?.reply_to || null;
     const support = sender?.from_email || null;
     const signature = sender?.signature || "";
 
     const senderDict: Record<string, string> = {
-      "{{sender_company}}": brandCompany,
-      "{{sender_name}}": brandCompany,
+      // 会社名プレースホルダ
+      "{{sender_company}}": senderCompany || brandCompany,
+      // 担当者名プレースホルダ
+      "{{sender_name}}": senderPersonName || brandCompany,
       "{{sender_email}}": sender?.from_email || "",
       "{{sender_reply_to}}": sender?.reply_to || "",
       "{{sender_phone}}": sender?.phone || "",
@@ -349,6 +378,7 @@ export async function POST(req: NextRequest) {
       try {
         const recipientCompany = String(pickCompanyName(r) || "-");
         const website = String(pickWebsite(r) || "");
+        const prefecture = String(pickPrefecture(r) || "");
         const formUrl = String((r as any).contact_form_url || "");
         const toEmail = String((r as any).contact_email || "");
 
@@ -356,6 +386,7 @@ export async function POST(req: NextRequest) {
           ...senderDict,
           "{{recipient_company}}": recipientCompany,
           "{{website}}": website,
+          "{{recipient_prefecture}}": prefecture,
         };
 
         const subject = replaceAllKeys(tpl.subject || "", ctx) || "(件名なし)";

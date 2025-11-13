@@ -87,6 +87,7 @@ export default function TemplatesPage() {
       "{{sender_phone}}": "03-1234-5678",
       "{{sender_website}}": "https://lotus.example.com",
       "{{recipient_company}}": "○○株式会社",
+      "{{recipient_prefecture}}": "東京都",
       "{{website}}": "https://example.com",
       "{{signature}}":
         "―――――――――\n株式会社LOTUS\n営業部 山田\nhttps://lotus.example.com",
@@ -107,6 +108,7 @@ export default function TemplatesPage() {
       "{{sender_phone}}": "03-1234-5678",
       "{{sender_website}}": "https://lotus.example.com",
       "{{recipient_company}}": "○○株式会社",
+      "{{recipient_prefecture}}": "東京都",
       "{{website}}": "https://example.com",
       "{{signature}}":
         "―――――――――\n株式会社LOTUS\n営業部 山田\nhttps://lotus.example.com",
@@ -231,16 +233,18 @@ export default function TemplatesPage() {
   };
 
   const placeholdersLine =
-    "{{sender_company}}, {{sender_name}}, {{sender_email}}, {{sender_reply_to}}, {{sender_phone}}, {{sender_website}}, {{recipient_company}}, {{website}}, {{signature}}, {{today}}";
+    "{{sender_company}}, {{sender_name}}, {{sender_email}}, {{sender_reply_to}}, {{sender_phone}}, {{sender_website}}, {{recipient_company}}, {{recipient_prefecture}}, {{website}}, {{signature}}, {{today}}";
 
   const PlaceholderHelp = () => (
     <div className="mt-2 rounded-lg border border-neutral-200 bg-neutral-50 p-2 text-[11px] leading-5 text-neutral-700">
       <div className="font-medium mb-1">差し込み変数一覧</div>
       <ul className="list-disc ml-5 space-y-0.5">
         <li>
-          <code>{"{{sender_company}}"}</code> / <code>{"{{sender_name}}"}</code>
-          ：送信者名（送信元設定の from_name、未設定時は{" "}
-          <code>Lotus System</code>）
+          <code>{"{{sender_company}}"}</code>
+          ：送信者の会社名（送信元設定の sender_company）
+        </li>
+        <li>
+          <code>{"{{sender_name}}"}</code>：送信者名（送信元設定の from_name）
         </li>
         <li>
           <code>{"{{sender_email}}"}</code>：送信メール（送信元設定）
@@ -259,7 +263,12 @@ export default function TemplatesPage() {
           ：署名（送信元設定。本文末尾にも自動追記されます）
         </li>
         <li>
-          <code>{"{{recipient_company}}"}</code>：相手企業名（行ごとに差し替え）
+          <code>{"{{recipient_company}}"}</code>
+          ：相手企業名（行ごとに差し替え）
+        </li>
+        <li>
+          <code>{"{{recipient_prefecture}}"}</code>
+          ：相手企業の都道府県（prefectures の先頭要素）
         </li>
         <li>
           <code>{"{{website}}"}</code>：相手企業サイトURL（取得できた場合）
