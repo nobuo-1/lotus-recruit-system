@@ -44,24 +44,21 @@ type TemplateRow = {
   body_html?: string | null;
 };
 
-type AnyRow =
-  | {
-      id: string;
-      company_name?: string | null;
-      website?: string | null;
-      contact_form_url?: string | null;
-      contact_email?: string | null;
-      [k: string]: any;
-    }
-  | {
-      id: string;
-      target_company_name?: string | null;
-      found_company_name?: string | null;
-      found_website?: string | null;
-      contact_form_url?: string | null;
-      contact_email?: string | null;
-      [k: string]: any;
-    };
+type ProspectBase = {
+  id: string;
+  contact_form_url?: string | null;
+  contact_email?: string | null;
+};
+type ProspectA = ProspectBase & {
+  company_name?: string | null;
+  website?: string | null;
+};
+type ProspectB = ProspectBase & {
+  target_company_name?: string | null;
+  found_company_name?: string | null;
+  found_website?: string | null;
+};
+type AnyRow = ProspectA | ProspectB;
 
 /* ========= Helpers ========= */
 function escapeHtml(s: string) {
@@ -72,10 +69,15 @@ function textToHtml(text: string) {
   return escapeHtml(text).replace(/\r?\n/g, "<br>");
 }
 function pickCompanyName(r: AnyRow) {
-  return r.company_name || r.target_company_name || r.found_company_name || "-";
+  return (
+    (r as any).company_name ||
+    (r as any).target_company_name ||
+    (r as any).found_company_name ||
+    "-"
+  );
 }
 function pickWebsite(r: AnyRow) {
-  return r.website || (r as any).found_website || "";
+  return (r as any).website || (r as any).found_website || "";
 }
 function replaceAllKeys(src: string, dict: Record<string, string>) {
   let out = src || "";
@@ -98,7 +100,7 @@ async function loadTemplate(tenantId: string, templateId: string) {
     const r = await fetch(url, { headers: authHeaders(), cache: "no-store" });
     if (!r.ok)
       throw new Error(`template fetch error ${r.status}: ${await r.text()}`);
-    const rows = (await r.json()) as TemplateRow[];
+    const rows = (await r.json()) as unknown as TemplateRow[];
     if (!rows?.length) throw new Error("template not found");
     return rows[0];
   } else {
@@ -122,7 +124,7 @@ async function loadSender(tenantId: string): Promise<SenderRow | null> {
       `&tenant_id=eq.${tenantId}&is_default=is.true&limit=1`;
     const r = await fetch(url, { headers: authHeaders(), cache: "no-store" });
     if (!r.ok) return null;
-    const rows = (await r.json()) as SenderRow[];
+    const rows = (await r.json()) as unknown as SenderRow[];
     return rows?.[0] ?? null;
   } else {
     const sb = await supabaseServer();
@@ -139,6 +141,31 @@ async function loadSender(tenantId: string): Promise<SenderRow | null> {
   }
 }
 
+/** テーブルごとに存在するカラムのみを選択する */
+function selectColsFor(table: string) {
+  switch (table) {
+    case "form_similar_sites":
+      return [
+        "id",
+        "target_company_name",
+        "found_company_name",
+        "found_website",
+        "contact_form_url",
+        "contact_email",
+      ].join(",");
+    case "form_prospects_rejected":
+    case "form_prospects":
+    default:
+      return [
+        "id",
+        "company_name",
+        "website",
+        "contact_form_url",
+        "contact_email",
+      ].join(",");
+  }
+}
+
 async function loadProspects(
   tenantId: string,
   tableName: string,
@@ -151,11 +178,10 @@ async function loadProspects(
       ? tableName
       : "form_prospects";
 
+  const selectCols = selectColsFor(table);
+
   if (CAN_USE_REST) {
-    const idCsv = ids.map((x) => x).join(",");
-    const selectCols =
-      "id,company_name,website,contact_form_url,contact_email," +
-      "target_company_name,found_company_name,found_website";
+    const idCsv = ids.join(",");
     const url =
       `${REST_URL}/${table}?select=${selectCols}` +
       `&tenant_id=eq.${tenantId}&id=in.(${idCsv})&limit=${ids.length}`;
@@ -165,18 +191,18 @@ async function loadProspects(
     });
     if (!r.ok)
       throw new Error(`prospects fetch error ${r.status}: ${await r.text()}`);
-    return (await r.json()) as AnyRow[];
+    const rows = (await r.json()) as unknown as AnyRow[];
+    return rows;
   } else {
     const sb = await supabaseServer();
     const { data, error } = await sb
       .from(table)
-      .select(
-        "id,company_name,website,contact_form_url,contact_email,target_company_name,found_company_name,found_website"
-      )
+      .select(selectCols)
       .eq("tenant_id", tenantId)
       .in("id", ids);
     if (error) throw new Error(error.message);
-    return (data ?? []) as AnyRow[];
+    const rows = (data ?? []) as unknown as AnyRow[];
+    return rows;
   }
 }
 
@@ -241,25 +267,20 @@ async function enqueueDirectEmail(args: {
   brandSupport?: string | null;
 }) {
   const name = `direct:${Date.now()}:${randomUUID()}`;
-  try {
-    await emailQueue.add(
-      name,
-      {
-        kind: "direct_email", // 型: "direct_email" | "campaign_send"
-        to: args.to,
-        subject: args.subject,
-        html: args.html,
-        text: args.text,
-        brandCompany: args.brandCompany,
-        fromOverride: args.fromOverride || undefined,
-        brandSupport: args.brandSupport || undefined,
-      },
-      { removeOnComplete: 500, removeOnFail: 500 }
-    );
-  } catch (e: any) {
-    // キュー接続不良でも API 全体を 500 にしない
-    throw new Error(`queue_unavailable: ${e?.message || e}`);
-  }
+  await emailQueue.add(
+    name,
+    {
+      kind: "direct_email",
+      to: args.to,
+      subject: args.subject,
+      html: args.html,
+      text: args.text,
+      brandCompany: args.brandCompany,
+      fromOverride: args.fromOverride || undefined,
+      brandSupport: args.brandSupport || undefined,
+    },
+    { removeOnComplete: 500, removeOnFail: 500 }
+  );
 }
 
 /* ========= Main ========= */
@@ -309,7 +330,6 @@ export async function POST(req: NextRequest) {
     const support = sender?.from_email || null;
     const signature = sender?.signature || "";
 
-    // 送信元差し込みを拡張対応
     const senderDict: Record<string, string> = {
       "{{sender_company}}": brandCompany,
       "{{sender_name}}": brandCompany,
@@ -344,7 +364,6 @@ export async function POST(req: NextRequest) {
           ? `${baseText}\n\n${signature}`
           : baseText;
 
-        // 改行を確実に <br> 化
         const baseHtmlRaw =
           tpl.body_html && tpl.body_html.trim().length > 0
             ? replaceAllKeys(tpl.body_html, ctx)
@@ -368,30 +387,16 @@ export async function POST(req: NextRequest) {
             continue;
           }
 
-          try {
-            await enqueueDirectEmail({
-              to: toEmail,
-              subject,
-              html: finalHtml,
-              text: finalText,
-              brandCompany,
-              fromOverride: replyTo,
-              brandSupport: support,
-            });
-            ok.push(String(r.id));
-          } catch (qe: any) {
-            // キューに積めなかったら失敗として記録（APIは継続）
-            await enqueueWaitlist(tenantId, {
-              table_name: String(table),
-              prospect_id: String(r.id),
-              reason: "queue_error",
-              payload: {
-                error: String(qe?.message || qe),
-                context: { recipient_company: recipientCompany },
-              },
-            }).catch(() => {});
-            failed.push(String(r.id));
-          }
+          await enqueueDirectEmail({
+            to: toEmail,
+            subject,
+            html: finalHtml,
+            text: finalText,
+            brandCompany,
+            fromOverride: replyTo,
+            brandSupport: support,
+          });
+          ok.push(String(r.id));
         } else if (channel === "form") {
           if (!formUrl) {
             await enqueueWaitlist(tenantId, {
@@ -446,7 +451,6 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ ok, queued, failed });
   } catch (e: any) {
-    // ここで 500 を握りつぶさず原因を返す
     return NextResponse.json(
       { error: String(e?.message || e) },
       { status: 500 }

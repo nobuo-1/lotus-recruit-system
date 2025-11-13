@@ -4,7 +4,16 @@
 import React, { useEffect, useMemo, useState } from "react";
 import AppHeader from "@/components/AppHeader";
 
-const TENANT_ID = "175b1a9d-3f85-482d-9323-68a44d214424";
+/** Cookie から tenant_id を読む */
+function getTenantIdFromCookie(): string | null {
+  try {
+    if (typeof document === "undefined") return null;
+    const m = document.cookie.match(/(?:^|; )tenant_id=([^;]+)/);
+    return m ? decodeURIComponent(m[1]) : null;
+  } catch {
+    return null;
+  }
+}
 
 type TemplateRow = {
   id: string;
@@ -43,9 +52,16 @@ export default function TemplatesPage() {
 
   const load = async () => {
     setMsg("");
+    const tenantId = getTenantIdFromCookie();
+    if (!tenantId) {
+      setMsg("テナントIDが取得できませんでした。ログインし直してください。");
+      setRows([]);
+      return;
+    }
+
     try {
       const r = await fetch("/api/form-outreach/templates", {
-        headers: { "x-tenant-id": TENANT_ID },
+        headers: { "x-tenant-id": tenantId },
         cache: "no-store",
       });
       const j = await r.json();
@@ -103,12 +119,18 @@ export default function TemplatesPage() {
 
   // 新規作成
   const save = async () => {
+    const tenantId = getTenantIdFromCookie();
+    if (!tenantId) {
+      alert("テナントIDが取得できませんでした。ログインし直してください。");
+      return;
+    }
+
     try {
       const r = await fetch("/api/form-outreach/templates", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-tenant-id": TENANT_ID,
+          "x-tenant-id": tenantId,
         },
         body: JSON.stringify({
           name,
@@ -128,12 +150,18 @@ export default function TemplatesPage() {
     }
   };
 
-  // 編集開始：サーバから既存値を取得してモーダルへ反映
+  // 編集開始
   const openEdit = async (id: string) => {
     setMsg("");
+    const tenantId = getTenantIdFromCookie();
+    if (!tenantId) {
+      setMsg("テナントIDが取得できませんでした。ログインし直してください。");
+      return;
+    }
+
     try {
       const r = await fetch(`/api/form-outreach/templates/${id}`, {
-        headers: { "x-tenant-id": TENANT_ID },
+        headers: { "x-tenant-id": tenantId },
         cache: "no-store",
       });
       const j: { row?: TemplateDetail; error?: string } = await r.json();
@@ -151,12 +179,18 @@ export default function TemplatesPage() {
 
   // 編集保存
   const update = async () => {
+    const tenantId = getTenantIdFromCookie();
+    if (!tenantId) {
+      alert("テナントIDが取得できませんでした。ログインし直してください。");
+      return;
+    }
+
     try {
       const r = await fetch(`/api/form-outreach/templates/${editingId}`, {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          "x-tenant-id": TENANT_ID,
+          "x-tenant-id": tenantId,
         },
         body: JSON.stringify({
           name: eName,
@@ -176,10 +210,17 @@ export default function TemplatesPage() {
   // 削除
   const remove = async (id: string) => {
     if (!confirm("このテンプレートを削除します。よろしいですか？")) return;
+
+    const tenantId = getTenantIdFromCookie();
+    if (!tenantId) {
+      alert("テナントIDが取得できませんでした。ログインし直してください。");
+      return;
+    }
+
     try {
       const r = await fetch(`/api/form-outreach/templates/${id}`, {
         method: "DELETE",
-        headers: { "x-tenant-id": TENANT_ID },
+        headers: { "x-tenant-id": tenantId },
       });
       const j = await r.json();
       if (!r.ok) throw new Error(j?.error || "delete failed");
@@ -312,8 +353,8 @@ export default function TemplatesPage() {
         {/* 新規作成モーダル */}
         {open && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-            <div className="w-[900px] max-w-[95vw] rounded-2xl bg-white shadow-xl border border-neutral-200 overflow-hidden">
-              <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200">
+            <div className="w-[900px] max-w-[95vw] max-h-[90vh] overflow-y-auto rounded-2xl bg-white shadow-xl border border-neutral-200">
+              <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 sticky top-0 bg-white">
                 <div className="font-semibold">テンプレート新規作成</div>
                 <div className="flex items-center gap-2">
                   <button
@@ -331,7 +372,7 @@ export default function TemplatesPage() {
                 </div>
               </div>
 
-              <div className="p-4 grid grid-cols-2 gap-4">
+              <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="space-y-3">
                   <div>
                     <div className="text-xs text-neutral-600 mb-1">名称</div>
@@ -386,8 +427,8 @@ export default function TemplatesPage() {
         {/* 編集モーダル */}
         {editOpen && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-            <div className="w-[900px] max-w-[95vw] rounded-2xl bg-white shadow-xl border border-neutral-200 overflow-hidden">
-              <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200">
+            <div className="w-[900px] max-w-[95vw] max-h-[90vh] overflow-y-auto rounded-2xl bg-white shadow-xl border border-neutral-200">
+              <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 sticky top-0 bg-white">
                 <div className="font-semibold">テンプレートを編集</div>
                 <div className="flex items-center gap-2">
                   <button
@@ -405,7 +446,7 @@ export default function TemplatesPage() {
                 </div>
               </div>
 
-              <div className="p-4 grid grid-cols-2 gap-4">
+              <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="space-y-3">
                   <div>
                     <div className="text-xs text-neutral-600 mb-1">名称</div>
