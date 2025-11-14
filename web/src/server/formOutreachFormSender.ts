@@ -1,5 +1,6 @@
 // web/src/server/formOutreachFormSender.ts
 
+// フォーム送信に使うコンテキスト
 export type FormSenderContext = {
   targetUrl: string;
   html: string;
@@ -28,6 +29,18 @@ export type FormPlan = {
   action: string;
   fields: Record<string, string>;
 };
+
+/** reCAPTCHA / hCaptcha を検出する（自動送信不可にするため） */
+function hasCaptcha(html: string): boolean {
+  const lower = html.toLowerCase();
+  return (
+    lower.includes("g-recaptcha") ||
+    lower.includes("grecaptcha") ||
+    lower.includes("recaptcha/api.js") ||
+    lower.includes("hcaptcha") ||
+    lower.includes("data-sitekey")
+  );
+}
 
 function buildSystemPrompt(): string {
   return `
@@ -107,6 +120,10 @@ function buildSystemPrompt(): string {
 `;
 }
 
+/**
+ * OpenAI に HTML + 文脈を渡して「どのフィールドに何を入れるか」のプランを作らせる
+ * - reCAPTCHA / hCaptcha があるページは null を返して自動送信不可にする
+ */
 export async function planFormSubmission(
   ctx: FormSenderContext
 ): Promise<FormPlan | null> {
@@ -117,6 +134,15 @@ export async function planFormSubmission(
   // HTML が長すぎるとトークンが厳しいので先頭だけを渡す
   const htmlSnippet =
     ctx.html.length > 20000 ? ctx.html.slice(0, 20000) : ctx.html;
+
+  // reCAPTCHA / hCaptcha があれば、この時点で自動送信不可として null を返す
+  if (hasCaptcha(htmlSnippet)) {
+    // route.ts 側で「plan が null → エラー扱い → waitlist」に流れる
+    console.log("[form-plan] captcha detected, skip auto submission:", {
+      url: ctx.targetUrl,
+    });
+    return null;
+  }
 
   const userPayload = {
     targetUrl: ctx.targetUrl,
@@ -177,72 +203,203 @@ export async function planFormSubmission(
 }
 
 /**
- * 実際にフォーム送信を行う
+ * 実際にフォーム送信を Playwright で行う
+ * - targetUrl へアクセス
+ * - plan.fields の name に対応する input/textarea/select に値を入力
+ * - フォーム内の「送信」ボタンを特定してクリック
+ * - 遷移後の HTML を返す
+ *
  * @param targetUrl フォームページのURL（元ページ）
  * @param plan OpenAI が生成した送信プラン
- * @param cookieHeader フォームページ取得時の Set-Cookie（そのまま Cookie として送る）
+ * @param _cookieHeader 互換用（現在は未使用）
  */
 export async function submitFormPlan(
   targetUrl: string,
   plan: FormPlan,
-  cookieHeader?: string
+  _cookieHeader?: string
 ): Promise<{ ok: boolean; status: number; url: string; html: string }> {
-  const base = new URL(targetUrl);
+  // Playwright を動的 import（型エラー回避 & serverless 対応のため）
+  const pw = await import("playwright");
+  const chromium = (pw as any).chromium as typeof import("playwright").chromium;
 
-  let actionUrl: string;
-  if (!plan.action || plan.action === "#") {
-    actionUrl = targetUrl;
-  } else {
-    actionUrl = new URL(plan.action, base).toString();
-  }
+  const browser = await chromium.launch({ headless: true });
+  let page: import("playwright").Page | null = null;
 
-  const params = new URLSearchParams();
-  for (const [k, v] of Object.entries(plan.fields || {})) {
-    params.append(k, v);
-  }
+  try {
+    page = await browser.newPage({
+      viewport: { width: 1280, height: 720 },
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) LotusRecruitBot/1.0 Chrome/120.0.0.0 Safari/537.36",
+    });
 
-  const method = plan.method.toUpperCase();
+    console.log("[form-submit] goto", targetUrl);
+    await page.goto(targetUrl, {
+      waitUntil: "networkidle",
+      timeout: 30000,
+    });
 
-  const commonHeaders: Record<string, string> = {
-    "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) LotusRecruitBot/1.0 Chrome/120.0.0.0 Safari/537.36",
-    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "ja,en;q=0.8",
-    Referer: targetUrl,
-  };
-  if (cookieHeader) {
-    commonHeaders["Cookie"] = cookieHeader;
-  }
+    // === 1. フィールド入力 ===
+    const fieldEntries = Object.entries(plan.fields || {});
+    let firstFieldSelector: string | null = null;
 
-  let res: Response;
-  if (method === "GET") {
-    const urlObj = new URL(actionUrl);
-    for (const [k, v] of params.entries()) {
-      urlObj.searchParams.set(k, v);
+    for (const [name, value] of fieldEntries) {
+      const selector = `input[name="${name}"], textarea[name="${name}"], select[name="${name}"]`;
+      const el = await page.$(selector);
+      if (!el) {
+        console.log("[form-submit] field not found:", name);
+        continue;
+      }
+      if (!firstFieldSelector) firstFieldSelector = selector;
+
+      const tagName = await el.evaluate((node) => node.tagName.toLowerCase());
+      const typeAttr = await el.evaluate(
+        (node: any) => (node.getAttribute && node.getAttribute("type")) || ""
+      );
+      const type = String(typeAttr || "").toLowerCase();
+
+      if (tagName === "select") {
+        try {
+          await el.selectOption({ value: value });
+        } catch {
+          // value で選択できない場合は label マッチも試す
+          await el.selectOption({ label: value });
+        }
+        continue;
+      }
+
+      if (tagName === "input" && (type === "checkbox" || type === "radio")) {
+        // チェック系は、value が空でなければ true とみなしてチェック
+        if (value && value !== "0" && value.toLowerCase() !== "false") {
+          await el.check().catch(() => {});
+        } else {
+          await el.uncheck().catch(() => {});
+        }
+        continue;
+      }
+
+      // その他の input / textarea は単純に文字列として入力
+      await el.fill(value ?? "").catch(() => {});
     }
-    res = await fetch(urlObj.toString(), {
-      method: "GET",
-      headers: commonHeaders,
-    });
-  } else {
-    res = await fetch(actionUrl, {
-      method: "POST",
-      headers: {
-        ...commonHeaders,
-        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-      },
-      body: params.toString(),
-    });
+
+    // === 2. 対象フォームの submit ボタンを探してクリック ===
+
+    // まず、最初に見つかったフィールドが属する form を探す
+    let formHandle: import("playwright").ElementHandle<HTMLElement> | null =
+      null;
+    if (firstFieldSelector) {
+      const fieldHandle = await page.$(firstFieldSelector);
+      if (fieldHandle) {
+        const jsHandle = await fieldHandle.evaluateHandle(
+          (el) => el.closest("form") as HTMLFormElement | null
+        );
+        const maybeForm = jsHandle.asElement();
+        if (maybeForm) {
+          formHandle =
+            maybeForm as import("playwright").ElementHandle<HTMLElement>;
+        }
+      }
+    }
+
+    // fallback: ページ内の最初の form
+    if (!formHandle) {
+      const forms = await page.$$("form");
+      if (forms.length > 0) {
+        formHandle =
+          forms[0] as import("playwright").ElementHandle<HTMLElement>;
+      }
+    }
+
+    if (!formHandle) {
+      console.log("[form-submit] no form found, cannot submit");
+      return {
+        ok: false,
+        status: 0,
+        url: page.url(),
+        html: await page.content(),
+      };
+    }
+
+    // form 内の送信ボタン候補
+    const submitSelectors = [
+      'button[type="submit"]',
+      'input[type="submit"]',
+      'button:has-text("送信")',
+      'button:has-text("確認")',
+      'button:has-text("送信する")',
+      'button:has-text("同意して送信")',
+      'input[type="button"]',
+    ];
+
+    for (const sel of submitSelectors) {
+      const btn = await formHandle.$(sel);
+      if (btn) {
+        console.log("[form-submit] click submit button selector:", sel);
+        const [response] = await Promise.all([
+          page
+            .waitForNavigation({
+              waitUntil: "networkidle",
+              timeout: 15000,
+            })
+            .catch(() => null),
+          btn.click().catch(() => null),
+        ]);
+        const status = response?.status() ?? 200;
+        const html = await page.content();
+        return {
+          ok: true,
+          status,
+          url: page.url(),
+          html,
+        };
+      }
+    }
+
+    // 送信ボタンが見つからない場合は、form.submit() を直接呼ぶ
+    console.log("[form-submit] no submit button, call form.submit()");
+    const [response] = await Promise.all([
+      page
+        .waitForNavigation({
+          waitUntil: "networkidle",
+          timeout: 15000,
+        })
+        .catch(() => null),
+      formHandle.evaluate((form) => {
+        (form as HTMLFormElement).submit();
+      }),
+    ]);
+    const status = response?.status() ?? 200;
+    const html = await page.content();
+
+    return {
+      ok: true,
+      status,
+      url: page.url(),
+      html,
+    };
+  } catch (e) {
+    console.error("[form-submit] error", e);
+    if (page) {
+      try {
+        const html = await page.content();
+        return {
+          ok: false,
+          status: 0,
+          url: page.url(),
+          html,
+        };
+      } catch {
+        // どうしようもない場合
+      }
+    }
+    return {
+      ok: false,
+      status: 0,
+      url: targetUrl,
+      html: "",
+    };
+  } finally {
+    await browser.close();
   }
-
-  const html = await res.text().catch(() => "");
-
-  return {
-    ok: res.ok,
-    status: res.status,
-    url: actionUrl,
-    html,
-  };
 }
 
 /**
@@ -303,7 +460,7 @@ export async function judgeFormSubmissionResult(args: {
 
 # 仕事
 - HTML の内容から、このページが「問い合わせ送信が正常に完了したサンクスページ」なのか、
-  それとも「エラー・未入力警告・確認画面などでまだ送信されていないページ」なのかを判定します。
+ それとも「エラー・未入力警告・確認画面などでまだ送信されていないページ」なのかを判定します。
 
 # 成功（success）の例
 - 「送信が完了しました」「お問い合わせを受け付けました」「ありがとうございました」などが目立つ
