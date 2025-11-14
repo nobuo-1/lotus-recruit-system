@@ -3,7 +3,7 @@
 export type FormSenderContext = {
   targetUrl: string;
   html: string;
-  message: string; // ★ テンプレート本文（問い合わせ内容）
+  message: string; // ★ メッセージテンプレート本文（問い合わせ内容）
   sender: {
     company?: string | null;
     postal_code?: string | null;
@@ -23,7 +23,7 @@ export type FormSenderContext = {
   };
 };
 
-type FormPlan = {
+export type FormPlan = {
   method: "GET" | "POST";
   action: string;
   fields: Record<string, string>;
@@ -61,6 +61,7 @@ function buildSystemPrompt(): string {
   
   # 入力ルール
   - 「必須」や「*」が付いている項目はできるだけすべて埋める。
+  - type="hidden" も含め、重要そうな hidden フィールドは可能な限り HTML から name / value を読み取り、そのまま fields に含める。
   - text, textarea: 送信者情報や **message（テンプレート本文）** から適切な日本語で入力する。
     - 問い合わせ内容やご質問の欄には、基本的に **message** をそのまま入力する。
   - select, radio, checkbox:
@@ -178,13 +179,23 @@ export async function planFormSubmission(
 
 /**
  * 実際にフォーム送信を行う
+ * @param targetUrl フォームページのURL（元ページ）
+ * @param plan OpenAI が生成した送信プラン
+ * @param cookieHeader フォームページ取得時の Set-Cookie（そのまま Cookie として送る）
  */
 export async function submitFormPlan(
   targetUrl: string,
-  plan: FormPlan
+  plan: FormPlan,
+  cookieHeader?: string
 ): Promise<{ ok: boolean; status: number; url: string }> {
   const base = new URL(targetUrl);
-  const actionUrl = new URL(plan.action || ".", base).toString();
+
+  let actionUrl: string;
+  if (!plan.action || plan.action === "#") {
+    actionUrl = targetUrl;
+  } else {
+    actionUrl = new URL(plan.action, base).toString();
+  }
 
   const params = new URLSearchParams();
   for (const [k, v] of Object.entries(plan.fields || {})) {
@@ -192,6 +203,17 @@ export async function submitFormPlan(
   }
 
   const method = plan.method.toUpperCase();
+
+  const commonHeaders: Record<string, string> = {
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) LotusRecruitBot/1.0 Chrome/120.0.0.0 Safari/537.36",
+    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ja,en;q=0.8",
+    Referer: targetUrl,
+  };
+  if (cookieHeader) {
+    commonHeaders["Cookie"] = cookieHeader;
+  }
 
   let res: Response;
   if (method === "GET") {
@@ -201,16 +223,14 @@ export async function submitFormPlan(
     }
     res = await fetch(urlObj.toString(), {
       method: "GET",
-      headers: {
-        Referer: targetUrl,
-      },
+      headers: commonHeaders,
     });
   } else {
     res = await fetch(actionUrl, {
       method: "POST",
       headers: {
+        ...commonHeaders,
         "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-        Referer: targetUrl,
       },
       body: params.toString(),
     });

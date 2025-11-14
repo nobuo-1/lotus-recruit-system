@@ -62,6 +62,8 @@ type ProspectBase = {
   id: string;
   contact_form_url?: string | null;
   contact_email?: string | null;
+  email_sent?: boolean | null;
+  form_sent?: boolean | null;
 };
 
 type ProspectProspects = ProspectBase & {
@@ -196,6 +198,8 @@ function selectColsFor(table: string) {
         "found_website",
         "contact_form_url",
         "contact_email",
+        "email_sent",
+        "form_sent",
       ].join(",");
     case "form_prospects_rejected":
       return [
@@ -207,6 +211,8 @@ function selectColsFor(table: string) {
         "industry_large",
         "industry_small",
         "prefectures",
+        "email_sent",
+        "form_sent",
       ].join(",");
     case "form_prospects":
     default:
@@ -218,6 +224,8 @@ function selectColsFor(table: string) {
         "contact_email",
         "industry",
         "prefectures",
+        "email_sent",
+        "form_sent",
       ].join(",");
   }
 }
@@ -337,6 +345,38 @@ async function enqueueDirectEmail(args: {
     },
     { removeOnComplete: 500, removeOnFail: 500 }
   );
+}
+
+/* ========= Prospect sent flags ========= */
+
+async function markProspectChannelSent(
+  tenantId: string,
+  tableName: string,
+  id: string,
+  channel: "email" | "form"
+) {
+  const table =
+    tableName === "form_prospects" ||
+    tableName === "form_prospects_rejected" ||
+    tableName === "form_similar_sites"
+      ? tableName
+      : "form_prospects";
+
+  const patch: Record<string, any> = {};
+  if (channel === "email") patch.email_sent = true;
+  if (channel === "form") patch.form_sent = true;
+
+  if (CAN_USE_REST) {
+    const url = `${REST_URL}/${table}?tenant_id=eq.${tenantId}&id=eq.${id}`;
+    await fetch(url, {
+      method: "PATCH",
+      headers: authHeaders(),
+      body: JSON.stringify(patch),
+    }).catch(() => {});
+  } else {
+    const sb = await supabaseServer();
+    await sb.from(table).update(patch).eq("tenant_id", tenantId).eq("id", id);
+  }
 }
 
 /* ========= Main ========= */
@@ -470,6 +510,13 @@ export async function POST(req: NextRequest) {
             fromOverride: replyTo,
             brandSupport: support,
           });
+
+          await markProspectChannelSent(
+            tenantId,
+            String(table),
+            String(r.id),
+            "email"
+          );
           ok.push(String(r.id));
         } else if (channel === "form") {
           if (!formUrl) {
@@ -491,12 +538,22 @@ export async function POST(req: NextRequest) {
           }
 
           try {
-            // 1. フォームHTML取得
-            const pageRes = await fetch(formUrl, { method: "GET" });
+            // 1. フォームHTML取得（Cookie / UA を付けてブラウザっぽく）
+            const pageRes = await fetch(formUrl, {
+              method: "GET",
+              headers: {
+                "User-Agent":
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) LotusRecruitBot/1.0 Chrome/120.0.0.0 Safari/537.36",
+                Accept:
+                  "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "ja,en;q=0.8",
+              },
+            });
             if (!pageRes.ok) {
               throw new Error(`form page fetch error: ${pageRes.status}`);
             }
             const html = await pageRes.text();
+            const cookieHeader = pageRes.headers.get("set-cookie") ?? undefined;
 
             // 2. ChatGPT にフォーム入力プランを作成させる（message にテンプレ本文を渡す）
             const plan = await planFormSubmission({
@@ -527,10 +584,16 @@ export async function POST(req: NextRequest) {
               throw new Error("form plan not generated");
             }
 
-            // 3. 実際にフォーム送信
-            const result = await submitFormPlan(formUrl, plan);
+            // 3. 実際にフォーム送信（Cookie も引き継ぎ）
+            const result = await submitFormPlan(formUrl, plan, cookieHeader);
 
             if (result.ok) {
+              await markProspectChannelSent(
+                tenantId,
+                String(table),
+                String(r.id),
+                "form"
+              );
               ok.push(String(r.id));
             } else {
               await enqueueWaitlist(tenantId, {

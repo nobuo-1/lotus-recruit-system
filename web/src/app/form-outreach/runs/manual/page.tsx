@@ -33,13 +33,18 @@ async function fetchTenantId(): Promise<string | null> {
   }
 }
 
-type ProsRow = {
+type BaseRow = {
   id: string;
   tenant_id: string | null;
-  company_name: string | null;
-  website: string | null;
   contact_form_url: string | null;
   contact_email: string | null;
+  email_sent?: boolean | null;
+  form_sent?: boolean | null;
+};
+
+type ProsRow = BaseRow & {
+  company_name: string | null;
+  website: string | null;
   industry: string | null;
   company_size: string | null;
   job_site_source: string | null;
@@ -47,15 +52,12 @@ type ProsRow = {
   created_at: string | null;
   updated_at: string | null;
 };
-type RejRow = {
-  id: string;
-  tenant_id: string | null;
+
+type RejRow = BaseRow & {
   corporate_number: string | null;
   company_name: string | null;
   website: string | null;
-  contact_email: string | null;
   phone: string | null;
-  contact_form_url: string | null;
   industry_large: string | null;
   industry_small: string | null;
   company_size: string | null;
@@ -69,9 +71,8 @@ type RejRow = {
   created_at: string | null;
   updated_at: string | null;
 };
-type SimRow = {
-  id: string;
-  tenant_id: string | null;
+
+type SimRow = BaseRow & {
   target_corporate_number: string | null;
   target_company_name: string | null;
   target_hq_address: string | null;
@@ -80,13 +81,12 @@ type SimRow = {
   source_site: string | null;
   matched_addr: boolean | null;
   matched_company_ratio: number | null;
-  contact_form_url: string | null;
-  contact_email: string | null;
   phone: string | null;
   reasons: string[] | null;
   created_at: string | null;
   updated_at: string | null;
 };
+
 type AnyRow = ProsRow | RejRow | SimRow;
 
 type TemplateRow = {
@@ -133,6 +133,15 @@ export default function ManualRunsPage() {
   const [channelFilter, setChannelFilter] = useState<
     "all" | "form" | "email" | "both"
   >("all");
+
+  // ★ 送信済みフラグ用フィルタ
+  const [emailSentFilter, setEmailSentFilter] = useState<
+    "all" | "sent" | "unsent"
+  >("all");
+  const [formSentFilter, setFormSentFilter] = useState<
+    "all" | "sent" | "unsent"
+  >("all");
+
   const [sortKey, setSortKey] = useState<string>("created_at");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
@@ -197,6 +206,7 @@ export default function ManualRunsPage() {
       const j = await resp.json();
       if (!resp.ok) throw new Error(j?.error || "fetch failed");
       let arr: AnyRow[] = j.rows ?? [];
+
       if (channelFilter === "both")
         arr = arr.filter((r) => channelOf(r) === "both");
       if (q.trim()) {
@@ -210,9 +220,23 @@ export default function ManualRunsPage() {
           return name.includes(qq) || web.includes(qq) || mail.includes(qq);
         });
       }
+
+      // ★ フラグフィルタ（メール/フォーム送信）
+      if (emailSentFilter === "sent") {
+        arr = arr.filter((r) => !!(r as any).email_sent);
+      } else if (emailSentFilter === "unsent") {
+        arr = arr.filter((r) => !(r as any).email_sent);
+      }
+
+      if (formSentFilter === "sent") {
+        arr = arr.filter((r) => !!(r as any).form_sent);
+      } else if (formSentFilter === "unsent") {
+        arr = arr.filter((r) => !(r as any).form_sent);
+      }
+
       setRows(arr);
       setTotal(Number(j.total || arr.length || 0));
-      setSelected(new Set());
+      // ★ 修正2: ページを跨いでも選択解除しないので、ここで setSelected() しない
     } catch (e: any) {
       setRows([]);
       setTotal(0);
@@ -224,7 +248,16 @@ export default function ManualRunsPage() {
 
   useEffect(() => {
     load(); /* eslint-disable-next-line */
-  }, [tenantId, dataset, page, sortKey, sortDir, channelFilter]);
+  }, [
+    tenantId,
+    dataset,
+    page,
+    sortKey,
+    sortDir,
+    channelFilter,
+    emailSentFilter,
+    formSentFilter,
+  ]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const toggleAll = () => {
@@ -271,7 +304,7 @@ export default function ManualRunsPage() {
           "x-tenant-id": tenantId,
         },
         body: JSON.stringify({
-          channel: sendMode, // ★ メール or フォーム（API 側の channel に合わせる）
+          channel: sendMode, // ★ メール or フォーム
           table: DATASET_TO_TABLE[dataset],
           template_id: selectedTemplateId,
           prospect_ids: Array.from(selected),
@@ -280,13 +313,11 @@ export default function ManualRunsPage() {
       });
       const j = await r.json();
       if (!r.ok) throw new Error(j?.error || "manual send failed");
-      // 成功・失敗サマリを表示
       setMsg(
         `成功:${j.ok?.length || 0} / 待機:${j.queued?.length || 0} / 失敗:${
           j.failed?.length || 0
         }`
       );
-      // 実行ログページへ（反映済み）
       router.push("/form-outreach/schedules");
     } catch (e: any) {
       setMsg(String(e?.message || e));
@@ -312,7 +343,14 @@ export default function ManualRunsPage() {
               テナント: <span className="font-mono">{tenantId ?? "-"}</span>
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {/* ★ 修正4: フォーム営業トップ */}
+            <Link
+              href="/form-outreach"
+              className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
+            >
+              フォーム営業トップ
+            </Link>
             <Link
               href="/form-outreach/waitlist"
               className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
@@ -354,7 +392,7 @@ export default function ManualRunsPage() {
 
         {/* フィルタ */}
         <section className="rounded-2xl border border-neutral-200 p-4 mb-3 bg-white">
-          <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
             <div className="md:col-span-2">
               <label className="block text-xs text-neutral-600 mb-1">
                 キーワード
@@ -381,6 +419,45 @@ export default function ManualRunsPage() {
                 <option value="both">両方可</option>
               </select>
             </div>
+
+            {/* ★ メール送信フラグ */}
+            <div>
+              <label className="block text-xs text-neutral-600 mb-1">
+                メール送信
+              </label>
+              <select
+                className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
+                value={emailSentFilter}
+                onChange={(e) =>
+                  setEmailSentFilter(
+                    e.target.value as "all" | "sent" | "unsent"
+                  )
+                }
+              >
+                <option value="all">指定なし</option>
+                <option value="sent">送信済のみ</option>
+                <option value="unsent">未送信のみ</option>
+              </select>
+            </div>
+
+            {/* ★ フォーム送信フラグ */}
+            <div>
+              <label className="block text-xs text-neutral-600 mb-1">
+                フォーム送信
+              </label>
+              <select
+                className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
+                value={formSentFilter}
+                onChange={(e) =>
+                  setFormSentFilter(e.target.value as "all" | "sent" | "unsent")
+                }
+              >
+                <option value="all">指定なし</option>
+                <option value="sent">送信済のみ</option>
+                <option value="unsent">未送信のみ</option>
+              </select>
+            </div>
+
             <div className="md:col-span-2">
               <label className="block text-xs text-neutral-600 mb-1">
                 未確定項目プレースホルダ
@@ -406,6 +483,8 @@ export default function ManualRunsPage() {
               onClick={() => {
                 setQ("");
                 setChannelFilter("all");
+                setEmailSentFilter("all");
+                setFormSentFilter("all");
                 setUnknownPlaceholder("メッセージをご確認ください");
                 setPage(1);
                 load();
@@ -469,7 +548,7 @@ export default function ManualRunsPage() {
         {/* テーブル */}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden bg-white">
           <div className="overflow-x-auto">
-            <table className="min-w-[1100px] w-full text-sm">
+            <table className="min-w-[1200px] w-full text-sm">
               <thead className="bg-neutral-50 text-neutral-600">
                 <tr>
                   <th className="px-3 py-3">
@@ -514,6 +593,8 @@ export default function ManualRunsPage() {
                       取得日時{sortIcon("created_at")}
                     </button>
                   </th>
+                  {/* ★ 送信状況列 */}
+                  <th className="px-3 py-3 text-left">送信状況</th>
                   <th className="px-3 py-3 text-left">チャンネル</th>
                 </tr>
               </thead>
@@ -548,6 +629,10 @@ export default function ManualRunsPage() {
                       : ch === "email"
                       ? "メール"
                       : "-";
+
+                  const emailSent = !!(r as any).email_sent;
+                  const formSent = !!(r as any).form_sent;
+
                   return (
                     <tr key={id}>
                       <td className="px-3 py-2">
@@ -585,6 +670,30 @@ export default function ManualRunsPage() {
                       </td>
                       <td className="px-3 py-2">{size || "-"}</td>
                       <td className="px-3 py-2">{created}</td>
+                      <td className="px-3 py-2">
+                        <div className="flex flex-wrap items-center gap-1 text-xs">
+                          <span
+                            className={`inline-flex items-center rounded-full border px-2 py-0.5 ${
+                              emailSent
+                                ? "border-emerald-300 bg-emerald-50 text-emerald-700"
+                                : "border-neutral-200 bg-neutral-50 text-neutral-500"
+                            }`}
+                          >
+                            メール
+                            {emailSent ? "済" : "未"}
+                          </span>
+                          <span
+                            className={`inline-flex items-center rounded-full border px-2 py-0.5 ${
+                              formSent
+                                ? "border-sky-300 bg-sky-50 text-sky-700"
+                                : "border-neutral-200 bg-neutral-50 text-neutral-500"
+                            }`}
+                          >
+                            フォーム
+                            {formSent ? "済" : "未"}
+                          </span>
+                        </div>
+                      </td>
                       <td className="px-3 py-2">{chLabel}</td>
                     </tr>
                   );
@@ -592,7 +701,7 @@ export default function ManualRunsPage() {
                 {rows.length === 0 && (
                   <tr>
                     <td
-                      colSpan={9}
+                      colSpan={10}
                       className="px-4 py-10 text-center text-neutral-400"
                     >
                       対象がありません

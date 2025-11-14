@@ -14,34 +14,35 @@ type Sender = {
   phone?: string | null;
   website?: string | null;
   signature?: string | null;
+  is_default: boolean;
 
-  // ★ フォーム営業用 住所系
+  // ★ フォーム営業用 送信者情報
   postal_code?: string | null;
   sender_prefecture?: string | null;
   sender_address?: string | null;
   sender_last_name?: string | null;
   sender_first_name?: string | null;
+};
 
-  is_default: boolean;
+const defaultSender: Sender = {
+  sender_company: "",
+  from_header_name: "",
+  from_name: "",
+  from_email: "",
+  reply_to: "",
+  phone: "",
+  website: "",
+  signature: "",
+  is_default: true,
+  postal_code: "",
+  sender_prefecture: "",
+  sender_address: "",
+  sender_last_name: "",
+  sender_first_name: "",
 };
 
 export default function SenderSettings() {
-  const [s, setS] = useState<Sender>({
-    sender_company: "",
-    from_header_name: "",
-    from_name: "",
-    from_email: "",
-    reply_to: "",
-    phone: "",
-    website: "",
-    signature: "",
-    postal_code: "",
-    sender_prefecture: "",
-    sender_address: "",
-    sender_last_name: "",
-    sender_first_name: "",
-    is_default: true,
-  });
+  const [s, setS] = useState<Sender>(defaultSender);
   const [msg, setMsg] = useState("");
 
   const load = async () => {
@@ -50,24 +51,7 @@ export default function SenderSettings() {
     });
     const j = await res.json();
     if (!res.ok) return setMsg(j?.error || "fetch failed");
-    setS(
-      j.row ?? {
-        sender_company: "",
-        from_header_name: "",
-        from_name: "",
-        from_email: "",
-        reply_to: "",
-        phone: "",
-        website: "",
-        signature: "",
-        postal_code: "",
-        sender_prefecture: "",
-        sender_address: "",
-        sender_last_name: "",
-        sender_first_name: "",
-        is_default: true,
-      }
-    );
+    setS(j.row ?? defaultSender);
   };
 
   useEffect(() => {
@@ -164,23 +148,9 @@ export default function SenderSettings() {
             />
           </Field>
 
-          <Field label="署名（{{signature}} 用テキスト）">
-            <textarea
-              className="w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm"
-              rows={6}
-              value={s.signature ?? ""}
-              onChange={(e) => setS({ ...s, signature: e.target.value })}
-            />
-            <p className="mt-1 text-[11px] text-neutral-500">
-              テンプレート本文内で <code>{"{{signature}}"}</code>{" "}
-              を書いた場所にだけ、この署名が展開されます（自動で末尾には付きません）。
-            </p>
-          </Field>
-
-          {/* ★ フォーム営業用 住所情報 */}
-          <hr className="my-4 border-neutral-200" />
-          <div className="text-xs font-semibold text-neutral-700 mb-2">
-            フォーム営業用：送信者の住所情報
+          {/* ★ フォーム営業用 送信者情報 */}
+          <div className="mt-4 mb-2 text-xs font-semibold text-neutral-500">
+            フォーム営業で使う送信者情報
           </div>
 
           <Field label="郵便番号">
@@ -203,10 +173,9 @@ export default function SenderSettings() {
             />
           </Field>
 
-          <Field label="住所（市区町村以降）">
+          <Field label="住所（市区町村・番地・建物名など）">
             <input
               className="w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm"
-              placeholder="例）大阪市〇〇区△△1-2-3 LOTUSビル3F"
               value={s.sender_address ?? ""}
               onChange={(e) => setS({ ...s, sender_address: e.target.value })}
             />
@@ -216,7 +185,6 @@ export default function SenderSettings() {
             <Field label="姓（フォーム用）">
               <input
                 className="w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm"
-                placeholder="例）山田"
                 value={s.sender_last_name ?? ""}
                 onChange={(e) =>
                   setS({ ...s, sender_last_name: e.target.value })
@@ -226,7 +194,6 @@ export default function SenderSettings() {
             <Field label="名（フォーム用）">
               <input
                 className="w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm"
-                placeholder="例）太郎"
                 value={s.sender_first_name ?? ""}
                 onChange={(e) =>
                   setS({ ...s, sender_first_name: e.target.value })
@@ -235,11 +202,18 @@ export default function SenderSettings() {
             </Field>
           </div>
 
-          <p className="mt-1 text-[11px] text-neutral-500">
-            ※
-            フォーム項目が「姓」「名」「郵便番号」などに分かれている場合、ChatGPT
-            にこの情報を渡して自動入力に使用します。
-          </p>
+          <Field label="署名（{{signature}} 用テキスト）">
+            <textarea
+              className="w-full rounded-lg border border-neutral-200 px-3 py-2 text-sm"
+              rows={6}
+              value={s.signature ?? ""}
+              onChange={(e) => setS({ ...s, signature: e.target.value })}
+            />
+            <p className="mt-1 text-[11px] text-neutral-500">
+              テンプレート本文内で <code>{"{{signature}}"}</code>{" "}
+              を書いた場所にだけ、この署名が展開されます（自動で末尾には付きません）。
+            </p>
+          </Field>
 
           <div className="mt-3">
             <button
