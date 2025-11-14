@@ -137,7 +137,6 @@ export async function planFormSubmission(
 
   // reCAPTCHA / hCaptcha があれば、この時点で自動送信不可として null を返す
   if (hasCaptcha(htmlSnippet)) {
-    // route.ts 側で「plan が null → エラー扱い → waitlist」に流れる
     console.log("[form-plan] captcha detected, skip auto submission:", {
       url: ctx.targetUrl,
     });
@@ -207,7 +206,7 @@ export async function planFormSubmission(
  * - targetUrl へアクセス
  * - plan.fields の name に対応する input/textarea/select に値を入力
  * - フォーム内の「送信」ボタンを特定してクリック
- * - 遷移後の HTML を返す
+ * - 遷移 or DOM 変化後の HTML を返す
  *
  * @param targetUrl フォームページのURL（元ページ）
  * @param plan OpenAI が生成した送信プラン
@@ -218,7 +217,7 @@ export async function submitFormPlan(
   plan: FormPlan,
   _cookieHeader?: string
 ): Promise<{ ok: boolean; status: number; url: string; html: string }> {
-  // Playwright を動的 import（型エラー回避 & serverless 対応のため）
+  // Playwright を動的 import（serverless / バンドルエラー回避）
   const pw = await import("playwright");
   const chromium = (pw as any).chromium as typeof import("playwright").chromium;
 
@@ -284,18 +283,17 @@ export async function submitFormPlan(
     // === 2. 対象フォームの submit ボタンを探してクリック ===
 
     // まず、最初に見つかったフィールドが属する form を探す
-    let formHandle: import("playwright").ElementHandle<HTMLElement> | null =
-      null;
+    let formHandle: import("playwright").ElementHandle<Element> | null = null;
+
     if (firstFieldSelector) {
       const fieldHandle = await page.$(firstFieldSelector);
       if (fieldHandle) {
-        const jsHandle = await fieldHandle.evaluateHandle(
-          (el) => el.closest("form") as HTMLFormElement | null
+        const jsHandle = await fieldHandle.evaluateHandle((el) =>
+          el.closest("form")
         );
-        const maybeForm = jsHandle.asElement();
-        if (maybeForm) {
-          formHandle =
-            maybeForm as import("playwright").ElementHandle<HTMLElement>;
+        const elHandle = jsHandle.asElement();
+        if (elHandle) {
+          formHandle = elHandle;
         }
       }
     }
@@ -304,8 +302,7 @@ export async function submitFormPlan(
     if (!formHandle) {
       const forms = await page.$$("form");
       if (forms.length > 0) {
-        formHandle =
-          forms[0] as import("playwright").ElementHandle<HTMLElement>;
+        formHandle = forms[0];
       }
     }
 
@@ -343,8 +340,15 @@ export async function submitFormPlan(
             .catch(() => null),
           btn.click().catch(() => null),
         ]);
+
+        // SPA など遷移しないケースもあるので、一応少し待ってから HTML を取得
+        if (!response) {
+          await page.waitForTimeout(1500).catch(() => {});
+        }
+
         const status = response?.status() ?? 200;
         const html = await page.content();
+
         return {
           ok: true,
           status,
@@ -367,6 +371,11 @@ export async function submitFormPlan(
         (form as HTMLFormElement).submit();
       }),
     ]);
+
+    if (!response) {
+      await page.waitForTimeout(1500).catch(() => {});
+    }
+
     const status = response?.status() ?? 200;
     const html = await page.content();
 
@@ -460,7 +469,7 @@ export async function judgeFormSubmissionResult(args: {
 
 # 仕事
 - HTML の内容から、このページが「問い合わせ送信が正常に完了したサンクスページ」なのか、
- それとも「エラー・未入力警告・確認画面などでまだ送信されていないページ」なのかを判定します。
+  それとも「エラー・未入力警告・確認画面などでまだ送信されていないページ」なのかを判定します。
 
 # 成功（success）の例
 - 「送信が完了しました」「お問い合わせを受け付けました」「ありがとうございました」などが目立つ
