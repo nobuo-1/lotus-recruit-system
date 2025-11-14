@@ -34,6 +34,20 @@ async function fetchTenantId(): Promise<string | null> {
   }
 }
 
+/** ISO文字列を日本時間表示に整形 */
+function formatJst(iso: string | null | undefined): string {
+  if (!iso) return "-";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) {
+    // 一応、壊れた文字列も見やすく
+    return iso.replace("T", " ").replace("Z", "");
+  }
+  return d.toLocaleString("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    hour12: false,
+  });
+}
+
 export default function WaitlistPage() {
   const [tenantId, setTenantId] = useState<string | null>(null);
 
@@ -198,7 +212,7 @@ export default function WaitlistPage() {
                       onChange={toggleAll}
                     />
                   </th>
-                  <th className="px-3 py-3 text-left">登録日時</th>
+                  <th className="px-3 py-3 text-left">登録日時（日本時間）</th>
                   <th className="px-3 py-3 text-left">対象テーブル</th>
                   <th className="px-3 py-3 text-left">Prospect ID</th>
                   <th className="px-3 py-3 text-left">会社名</th>
@@ -210,8 +224,7 @@ export default function WaitlistPage() {
               </thead>
               <tbody className="divide-y divide-neutral-200">
                 {rows.map((w) => {
-                  const created =
-                    w.created_at?.replace("T", " ").replace("Z", "") || "-";
+                  const created = formatJst(w.created_at);
                   const ctx = (w.payload?.context || {}) as any;
                   const company =
                     ctx?.recipient_company || w.payload?.company_name || "-";

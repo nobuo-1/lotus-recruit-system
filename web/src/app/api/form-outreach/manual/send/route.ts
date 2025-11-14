@@ -591,7 +591,7 @@ export async function POST(req: NextRequest) {
               throw new Error("form plan not generated");
             }
 
-            // 3. 実際にフォーム送信（Cookie も引き継ぎ）
+            // 3. 実際にフォーム送信（Playwright 経由）
             const result = await submitFormPlan(formUrl, plan, cookieHeader);
 
             // 4. 結果HTMLから「送信成功かどうか」を判定
@@ -655,16 +655,27 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // === 実行ログのステータスまとめ ===
     if (run?.id) {
-      const status =
-        failed.length === 0
-          ? "done"
-          : ok.length > 0 || queued.length > 0
-          ? "partial"
-          : "failed";
+      let status: string;
+      if (failed.length === 0 && queued.length === 0) {
+        // 全件OK
+        status = "done";
+      } else if (ok.length > 0 || queued.length > 0) {
+        // 一部でも成功 or 待機があれば partial
+        status = "partial";
+      } else {
+        // 全件失敗
+        status = "failed";
+      }
+
+      const errParts: string[] = [];
+      if (queued.length) errParts.push(`queued:${queued.length}`);
+      if (failed.length) errParts.push(`failed:${failed.length}`);
+
       await updateRun(run.id, {
         status,
-        error: failed.length ? `failed: ${failed.length}` : null,
+        error: errParts.length ? errParts.join(", ") : null,
         finished_at: new Date().toISOString(),
       });
     }

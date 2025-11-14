@@ -140,7 +140,7 @@ export async function planFormSubmission(
     console.log("[form-plan] captcha detected, skip auto submission:", {
       url: ctx.targetUrl,
     });
-    return null;
+    return null; // route.ts 側で waitlist 行き
   }
 
   const userPayload = {
@@ -205,8 +205,8 @@ export async function planFormSubmission(
  * 実際にフォーム送信を Playwright で行う
  * - targetUrl へアクセス
  * - plan.fields の name に対応する input/textarea/select に値を入力
- * - フォーム内の「送信」ボタンを特定してクリック
- * - 遷移 or DOM 変化後の HTML を返す
+ * - フォーム内の「確認」「送信」ボタンを順にクリック
+ * - 最終的なページの HTML を返す
  *
  * @param targetUrl フォームページのURL（元ページ）
  * @param plan OpenAI が生成した送信プラン
@@ -217,12 +217,12 @@ export async function submitFormPlan(
   plan: FormPlan,
   _cookieHeader?: string
 ): Promise<{ ok: boolean; status: number; url: string; html: string }> {
-  // Playwright を動的 import（serverless / バンドルエラー回避）
+  // Playwright を動的 import（型エラー回避 & serverless 対応のため）
   const pw = await import("playwright");
   const chromium = (pw as any).chromium as typeof import("playwright").chromium;
 
   const browser = await chromium.launch({ headless: true });
-  let page: import("playwright").Page | null = null;
+  let page: any = null;
 
   try {
     page = await browser.newPage({
@@ -243,146 +243,137 @@ export async function submitFormPlan(
 
     for (const [name, value] of fieldEntries) {
       const selector = `input[name="${name}"], textarea[name="${name}"], select[name="${name}"]`;
-      const el = await page.$(selector);
-      if (!el) {
+      const locator = page.locator(selector).first();
+      const count = await locator.count();
+      if (!count) {
         console.log("[form-submit] field not found:", name);
         continue;
       }
       if (!firstFieldSelector) firstFieldSelector = selector;
 
-      const tagName = await el.evaluate((node) => node.tagName.toLowerCase());
-      const typeAttr = await el.evaluate(
-        (node: any) => (node.getAttribute && node.getAttribute("type")) || ""
+      const tagName = await locator.evaluate((node: any) =>
+        String(node.tagName || "").toLowerCase()
+      );
+      const typeAttr = await locator.evaluate(
+        (node: any) => node.getAttribute && node.getAttribute("type")
       );
       const type = String(typeAttr || "").toLowerCase();
 
       if (tagName === "select") {
         try {
-          await el.selectOption({ value: value });
+          await locator.selectOption({ value: value });
         } catch {
-          // value で選択できない場合は label マッチも試す
-          await el.selectOption({ label: value });
+          await locator.selectOption({ label: value }).catch(() => {});
         }
         continue;
       }
 
       if (tagName === "input" && (type === "checkbox" || type === "radio")) {
-        // チェック系は、value が空でなければ true とみなしてチェック
         if (value && value !== "0" && value.toLowerCase() !== "false") {
-          await el.check().catch(() => {});
+          await locator.check().catch(() => {});
         } else {
-          await el.uncheck().catch(() => {});
+          await locator.uncheck().catch(() => {});
         }
         continue;
       }
 
-      // その他の input / textarea は単純に文字列として入力
-      await el.fill(value ?? "").catch(() => {});
+      await locator.fill(value ?? "").catch(() => {});
     }
 
-    // === 2. 対象フォームの submit ボタンを探してクリック ===
-
-    // まず、最初に見つかったフィールドが属する form を探す
-    let formHandle: import("playwright").ElementHandle<Element> | null = null;
-
+    // === 2. 対象フォームをマーキング ===
     if (firstFieldSelector) {
-      const fieldHandle = await page.$(firstFieldSelector);
-      if (fieldHandle) {
-        const jsHandle = await fieldHandle.evaluateHandle((el) =>
-          el.closest("form")
+      try {
+        await page
+          .locator(firstFieldSelector)
+          .first()
+          .evaluate((el: any) => {
+            const f = el.closest("form");
+            if (f) f.setAttribute("data-lotus-target-form", "1");
+          });
+      } catch {
+        // ignore
+      }
+    }
+
+    const formLocator = page
+      .locator('form[data-lotus-target-form="1"]')
+      .first();
+    if (!(await formLocator.count())) {
+      // fallback: 最初の form
+      const anyForm = page.locator("form").first();
+      if (await anyForm.count()) {
+        await anyForm.evaluate((f: any) =>
+          f.setAttribute("data-lotus-target-form", "1")
         );
-        const elHandle = jsHandle.asElement();
-        if (elHandle) {
-          formHandle = elHandle;
+      }
+    }
+
+    // ボタン候補: フォーム内の button / submit / button型 input を全て見てテキストで判定
+    async function clickOnce(preferConfirmFirst: boolean): Promise<boolean> {
+      const candidates = page.locator(
+        'form[data-lotus-target-form="1"] button, ' +
+          'form[data-lotus-target-form="1"] input[type="submit"], ' +
+          'form[data-lotus-target-form="1"] input[type="button"]'
+      );
+
+      const count = await candidates.count();
+      if (!count) return false;
+
+      type Cand = { idx: number; label: string; priority: number };
+      const list: Cand[] = [];
+
+      for (let i = 0; i < count; i++) {
+        const el = candidates.nth(i);
+        const text = (await el.innerText().catch(() => "")) || "";
+        const valueAttr = (await el.getAttribute("value")) || "";
+        const label = (text || valueAttr).trim();
+        if (!label) continue;
+
+        const isConfirm = /確認/.test(label);
+        const isSend = /送信/.test(label);
+
+        let priority = 99;
+        if (preferConfirmFirst) {
+          if (isConfirm) priority = 1;
+          else if (isSend) priority = 2;
+        } else {
+          if (isSend) priority = 1;
+          else if (isConfirm) priority = 2;
         }
+        if (priority === 99) continue;
+
+        list.push({ idx: i, label, priority });
       }
+
+      if (!list.length) return false;
+      list.sort((a, b) => a.priority - b.priority);
+      const target = candidates.nth(list[0].idx);
+      console.log("[form-submit] click button:", list[0].label);
+
+      await Promise.all([
+        target.click().catch(() => {}),
+        page
+          .waitForLoadState("networkidle", { timeout: 15000 })
+          .catch(() => {}),
+      ]);
+
+      // 少し待ってから
+      await page.waitForTimeout(800).catch(() => {});
+      return true;
     }
 
-    // fallback: ページ内の最初の form
-    if (!formHandle) {
-      const forms = await page.$$("form");
-      if (forms.length > 0) {
-        formHandle = forms[0];
-      }
-    }
+    // 1回目: 「確認」ボタン優先（確認画面へ）
+    await clickOnce(true).catch(() => {});
+    // 2回目: 「送信」ボタン優先（確定送信）
+    await clickOnce(false).catch(() => {});
 
-    if (!formHandle) {
-      console.log("[form-submit] no form found, cannot submit");
-      return {
-        ok: false,
-        status: 0,
-        url: page.url(),
-        html: await page.content(),
-      };
-    }
-
-    // form 内の送信ボタン候補
-    const submitSelectors = [
-      'button[type="submit"]',
-      'input[type="submit"]',
-      'button:has-text("送信")',
-      'button:has-text("確認")',
-      'button:has-text("送信する")',
-      'button:has-text("同意して送信")',
-      'input[type="button"]',
-    ];
-
-    for (const sel of submitSelectors) {
-      const btn = await formHandle.$(sel);
-      if (btn) {
-        console.log("[form-submit] click submit button selector:", sel);
-        const [response] = await Promise.all([
-          page
-            .waitForNavigation({
-              waitUntil: "networkidle",
-              timeout: 15000,
-            })
-            .catch(() => null),
-          btn.click().catch(() => null),
-        ]);
-
-        // SPA など遷移しないケースもあるので、一応少し待ってから HTML を取得
-        if (!response) {
-          await page.waitForTimeout(1500).catch(() => {});
-        }
-
-        const status = response?.status() ?? 200;
-        const html = await page.content();
-
-        return {
-          ok: true,
-          status,
-          url: page.url(),
-          html,
-        };
-      }
-    }
-
-    // 送信ボタンが見つからない場合は、form.submit() を直接呼ぶ
-    console.log("[form-submit] no submit button, call form.submit()");
-    const [response] = await Promise.all([
-      page
-        .waitForNavigation({
-          waitUntil: "networkidle",
-          timeout: 15000,
-        })
-        .catch(() => null),
-      formHandle.evaluate((form) => {
-        (form as HTMLFormElement).submit();
-      }),
-    ]);
-
-    if (!response) {
-      await page.waitForTimeout(1500).catch(() => {});
-    }
-
-    const status = response?.status() ?? 200;
     const html = await page.content();
+    const url = page.url();
 
     return {
       ok: true,
-      status,
-      url: page.url(),
+      status: 200,
+      url,
       html,
     };
   } catch (e) {
@@ -397,7 +388,7 @@ export async function submitFormPlan(
           html,
         };
       } catch {
-        // どうしようもない場合
+        // ignore
       }
     }
     return {
@@ -460,7 +451,6 @@ export async function judgeFormSubmissionResult(args: {
 
   // ★ 2. ここから先は「判断」が必要なケース → OpenAI にだけ任せる
   if (!process.env.OPENAI_API_KEY) {
-    // API キーが無ければ、曖昧なので unknown とする
     return "unknown";
   }
 
@@ -487,7 +477,6 @@ export async function judgeFormSubmissionResult(args: {
 
 # 出力形式
 - 必ず JSON だけを返してください（余計な文字は一切禁止）
-- 形式:
   {
     "status": "success" または "failure" または "unknown",
     "reason": "簡単な理由（日本語文字列）"
