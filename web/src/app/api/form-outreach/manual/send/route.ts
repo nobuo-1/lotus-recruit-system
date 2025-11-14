@@ -7,6 +7,7 @@ import { supabaseServer } from "@/lib/supabaseServer";
 import {
   planFormSubmission,
   submitFormPlan,
+  judgeFormSubmissionResult,
 } from "@/server/formOutreachFormSender";
 
 export const runtime = "nodejs";
@@ -395,8 +396,14 @@ export async function POST(req: NextRequest) {
       template_id,
       prospect_ids = [],
       unknown_placeholder = "メッセージをご確認ください",
-      channel = "email",
+      mode,
+      channel: bodyChannel,
     } = body || {};
+
+    // フロントからは mode: "email" | "form" が来る想定だが、
+    // 互換のため channel も受け付ける
+    const channel: "email" | "form" =
+      mode === "form" || bodyChannel === "form" ? "form" : "email";
 
     if (!template_id)
       return NextResponse.json(
@@ -587,7 +594,14 @@ export async function POST(req: NextRequest) {
             // 3. 実際にフォーム送信（Cookie も引き継ぎ）
             const result = await submitFormPlan(formUrl, plan, cookieHeader);
 
-            if (result.ok) {
+            // 4. 結果HTMLから「送信成功かどうか」を判定
+            const judge = await judgeFormSubmissionResult({
+              url: result.url,
+              html: result.html,
+            });
+
+            if (judge === "success") {
+              // 明らかに送信成功と判断できたときだけ form_sent を true にする
               await markProspectChannelSent(
                 tenantId,
                 String(table),
@@ -596,6 +610,7 @@ export async function POST(req: NextRequest) {
               );
               ok.push(String(r.id));
             } else {
+              // 失敗・不明は待機リストに積んで queued 扱い（あとで人間が確認）
               await enqueueWaitlist(tenantId, {
                 table_name: String(table),
                 prospect_id: String(r.id),
@@ -609,6 +624,7 @@ export async function POST(req: NextRequest) {
                   },
                   form_url: formUrl,
                   last_status: result.status,
+                  judge,
                 },
               });
               queued.push(String(r.id));
