@@ -9,6 +9,7 @@ import {
   submitFormPlan,
   judgeFormSubmissionResult,
   detectCaptchaFromHtml,
+  collectFormDebugOnly, // ★ 追加
 } from "@/server/formOutreachFormSender";
 
 export const runtime = "nodejs";
@@ -594,33 +595,67 @@ export async function POST(req: NextRequest) {
             debugForThis.hasCaptcha = hasCaptcha;
 
             // 2. ChatGPT にフォーム入力プランを作成させる（message にテンプレ本文を渡す）
-            const plan = await planFormSubmission({
-              targetUrl: formUrl,
-              html,
-              message: messageText,
-              sender: {
-                company:
-                  sender?.sender_company || senderCompany || brandCompany,
-                postal_code: sender?.postal_code || "",
-                prefecture: sender?.sender_prefecture || "",
-                address: sender?.sender_address || "",
-                last_name: sender?.sender_last_name || senderName || "",
-                first_name: sender?.sender_first_name || "",
-                email: sender?.from_email || "",
-                phone: sender?.phone || "",
-                website: sender?.website || "",
-              },
-              recipient: {
-                company_name: recipientCompany,
-                website,
-                industry: recipientIndustry,
-                prefecture: recipientPref,
-              },
-            });
+            let plan: Awaited<ReturnType<typeof planFormSubmission>> | null =
+              null;
+
+            try {
+              plan = await planFormSubmission({
+                targetUrl: formUrl,
+                html,
+                message: messageText,
+                sender: {
+                  company:
+                    sender?.sender_company || senderCompany || brandCompany,
+                  postal_code: sender?.postal_code || "",
+                  prefecture: sender?.sender_prefecture || "",
+                  address: sender?.sender_address || "",
+                  last_name: sender?.sender_last_name || senderName || "",
+                  first_name: sender?.sender_first_name || "",
+                  email: sender?.from_email || "",
+                  phone: sender?.phone || "",
+                  website: sender?.website || "",
+                },
+                recipient: {
+                  company_name: recipientCompany,
+                  website,
+                  industry: recipientIndustry,
+                  prefecture: recipientPref,
+                },
+              });
+            } catch (e) {
+              console.error("[manual-send/form] planFormSubmission error", e);
+            }
 
             // reCAPTCHA/hCaptcha があった or プラン生成失敗
             if (!plan) {
               debugForThis.sentStatus = hasCaptcha ? "captcha" : "plan_error";
+
+              // ★ プランが無くても、フォーム構造だけは解析してデバッグ値を埋める
+              try {
+                const debugOnly = await collectFormDebugOnly(formUrl);
+                debugForThis.canAccessForm =
+                  debugOnly.canAccessForm ?? debugForThis.canAccessForm;
+                debugForThis.inputTotal =
+                  debugOnly.inputTotal ?? debugForThis.inputTotal;
+                debugForThis.inputFilled =
+                  debugOnly.inputFilled ?? debugForThis.inputFilled;
+                debugForThis.selectTotal =
+                  debugOnly.selectTotal ?? debugForThis.selectTotal;
+                debugForThis.selectFilled =
+                  debugOnly.selectFilled ?? debugForThis.selectFilled;
+                debugForThis.checkboxTotal =
+                  debugOnly.checkboxTotal ?? debugForThis.checkboxTotal;
+                debugForThis.checkboxFilled =
+                  debugOnly.checkboxFilled ?? debugForThis.checkboxFilled;
+                debugForThis.hasActionButton =
+                  debugOnly.hasActionButton ?? debugForThis.hasActionButton;
+              } catch (e2) {
+                console.error(
+                  "[manual-send/form] collectFormDebugOnly(plan=null) error",
+                  e2
+                );
+              }
+
               debugByProspect[String(r.id)] = debugForThis;
 
               await enqueueWaitlist(tenantId, {
@@ -708,7 +743,34 @@ export async function POST(req: NextRequest) {
               queued.push(String(r.id));
             }
           } catch (err) {
+            console.error("[manual-send/form] error", err);
             debugForThis.sentStatus = "error";
+
+            // ★ エラー時でもフォーム構造だけは解析しておく
+            try {
+              const debugOnly = await collectFormDebugOnly(formUrl);
+              debugForThis.canAccessForm =
+                debugOnly.canAccessForm ?? debugForThis.canAccessForm;
+              debugForThis.inputTotal =
+                debugOnly.inputTotal ?? debugForThis.inputTotal;
+              debugForThis.inputFilled =
+                debugOnly.inputFilled ?? debugForThis.inputFilled;
+              debugForThis.selectTotal =
+                debugOnly.selectTotal ?? debugForThis.selectTotal;
+              debugForThis.selectFilled =
+                debugOnly.selectFilled ?? debugForThis.selectFilled;
+              debugForThis.checkboxTotal =
+                debugOnly.checkboxTotal ?? debugForThis.checkboxTotal;
+              debugForThis.checkboxFilled =
+                debugOnly.checkboxFilled ?? debugForThis.checkboxFilled;
+              debugForThis.hasActionButton =
+                debugOnly.hasActionButton ?? debugForThis.hasActionButton;
+            } catch (e2) {
+              console.error(
+                "[manual-send/form] collectFormDebugOnly(error) error",
+                e2
+              );
+            }
 
             await enqueueWaitlist(tenantId, {
               table_name: String(table),

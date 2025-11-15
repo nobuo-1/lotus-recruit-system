@@ -252,13 +252,13 @@ export async function submitFormPlan(
 
   const debug: FormSubmitDebug = {
     canAccessForm: null,
-    inputTotal: null,
-    inputFilled: null,
-    selectTotal: null,
-    selectFilled: null,
-    checkboxTotal: null,
-    checkboxFilled: null,
-    hasActionButton: null,
+    inputTotal: 0,
+    inputFilled: 0,
+    selectTotal: 0,
+    selectFilled: 0,
+    checkboxTotal: 0,
+    checkboxFilled: 0,
+    hasActionButton: false,
     clickedConfirm: null,
     clickedSubmit: null,
   };
@@ -278,15 +278,6 @@ export async function submitFormPlan(
 
     // ここまで来れば一応フォームページにはアクセスできている
     debug.canAccessForm = true;
-
-    // カウント系は最低でも 0 にしておく（null のままにならないように）
-    debug.inputTotal = 0;
-    debug.inputFilled = 0;
-    debug.selectTotal = 0;
-    debug.selectFilled = 0;
-    debug.checkboxTotal = 0;
-    debug.checkboxFilled = 0;
-    debug.hasActionButton = false;
 
     // === 1. フィールド入力 ===
     const fieldEntries = Object.entries(plan.fields || {});
@@ -369,7 +360,7 @@ export async function submitFormPlan(
     // === 3. フォーム内（なければページ全体）の要素数・入力状況をカウント（デバッグ用） ===
     try {
       const rootLocator =
-        hasForm && hasForm > 0 ? formLocator : page.locator("body"); // form が無くてもページ全体でカウント
+        hasForm && hasForm > 0 ? formLocator : page.locator("body");
 
       // input / textarea
       const inputLocator = rootLocator.locator(
@@ -445,7 +436,6 @@ export async function submitFormPlan(
       debug.hasActionButton = hasActionButton;
     } catch (countErr) {
       console.error("[form-submit] count debug error", countErr);
-      // ここで例外が出ても、デバッグ値は 0 のまま維持する
     }
 
     // === 4. ボタンクリック（確認 → 送信） ===
@@ -531,14 +521,12 @@ export async function submitFormPlan(
     let clickedSubmitAny = false;
 
     try {
-      // 1回目: 「確認」ボタン優先（確認画面へ）
       const r1 = await clickOnce(true);
       if (r1.clicked) {
         if (r1.clickedConfirm) clickedConfirmAny = true;
         if (r1.clickedSubmit) clickedSubmitAny = true;
       }
 
-      // 2回目: 「送信」ボタン優先（確定送信）
       const r2 = await clickOnce(false);
       if (r2.clicked) {
         if (r2.clickedConfirm) clickedConfirmAny = true;
@@ -546,7 +534,6 @@ export async function submitFormPlan(
       }
     } catch (clickErr) {
       console.error("[form-submit] click error", clickErr);
-      // ボタン押下に失敗しても、ページ HTML は返す
     }
 
     debug.clickedConfirm = clickedConfirmAny;
@@ -579,8 +566,7 @@ export async function submitFormPlan(
         // ignore
       }
     }
-    // page 自体作れていない場合
-    debug.canAccessForm = false;
+    debug.canAccessForm = debug.canAccessForm ?? false;
     return {
       ok: false,
       status: 0,
@@ -588,6 +574,137 @@ export async function submitFormPlan(
       html: "",
       debug,
     };
+  } finally {
+    await browser.close();
+  }
+}
+
+/**
+ * ★ 送信はしないで、フォーム構造だけを Playwright で解析するデバッグ専用関数
+ * - plan が生成できなかったり、submitFormPlan でエラーになった時用
+ */
+export async function collectFormDebugOnly(
+  targetUrl: string
+): Promise<FormSubmitDebug> {
+  const pw = await import("playwright");
+  const chromium = (pw as any).chromium as typeof import("playwright").chromium;
+
+  const browser = await chromium.launch({ headless: true });
+  let page: import("playwright").Page | null = null;
+
+  const debug: FormSubmitDebug = {
+    canAccessForm: null,
+    inputTotal: 0,
+    inputFilled: 0,
+    selectTotal: 0,
+    selectFilled: 0,
+    checkboxTotal: 0,
+    checkboxFilled: 0,
+    hasActionButton: false,
+    clickedConfirm: null,
+    clickedSubmit: null,
+  };
+
+  try {
+    page = await browser.newPage({
+      viewport: { width: 1280, height: 720 },
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) LotusRecruitBot/1.0 Chrome/120.0.0.0 Safari/537.36",
+    });
+
+    console.log("[form-debug-only] goto", targetUrl);
+    await page.goto(targetUrl, {
+      waitUntil: "networkidle",
+      timeout: 30000,
+    });
+
+    debug.canAccessForm = true;
+
+    let formLocator = page.locator("form").first();
+    let hasForm = await formLocator.count();
+    if (!hasForm) {
+      formLocator = page.locator("body");
+      hasForm = 1;
+    }
+
+    const rootLocator = formLocator;
+
+    // input / textarea
+    const inputLocator = rootLocator.locator(
+      'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="image"]):not([type="reset"]), textarea'
+    );
+    const inputTotal = await inputLocator.count();
+    const inputFilledFlags = await inputLocator.evaluateAll((elements) => {
+      return elements.map((el) => {
+        const tag = (el as HTMLElement).tagName.toLowerCase();
+        if (tag === "textarea") {
+          const v = (el as HTMLTextAreaElement).value || "";
+          return v.trim().length > 0;
+        }
+        const type = (
+          (el as HTMLInputElement).getAttribute("type") || ""
+        ).toLowerCase();
+        if (type === "checkbox" || type === "radio") {
+          return (el as HTMLInputElement).checked;
+        }
+        const v = (el as HTMLInputElement).value || "";
+        return v.trim().length > 0;
+      });
+    });
+    const inputFilled = inputFilledFlags.filter(Boolean).length;
+
+    // select
+    const selectLocator = rootLocator.locator("select");
+    const selectTotal = await selectLocator.count();
+    const selectFilledFlags = await selectLocator.evaluateAll((elements) => {
+      return elements.map((el) => {
+        const v = (el as HTMLSelectElement).value || "";
+        return v.trim().length > 0;
+      });
+    });
+    const selectFilled = selectFilledFlags.filter(Boolean).length;
+
+    // checkbox
+    const checkboxLocator = rootLocator.locator('input[type="checkbox"]');
+    const checkboxTotal = await checkboxLocator.count();
+    const checkboxFilledFlags = await checkboxLocator.evaluateAll(
+      (elements) => {
+        return elements.map((el) => (el as HTMLInputElement).checked === true);
+      }
+    );
+    const checkboxFilled = checkboxFilledFlags.filter(Boolean).length;
+
+    // action ボタン有無
+    const buttonLocator = rootLocator.locator(
+      'button, input[type="submit"], input[type="button"]'
+    );
+    const buttonCount = await buttonLocator.count();
+    let hasActionButton = false;
+    for (let i = 0; i < buttonCount; i++) {
+      const el = buttonLocator.nth(i);
+      const text = (await el.innerText().catch(() => "")) || "";
+      const valueAttr = (await el.getAttribute("value")) || "";
+      const label = (text || valueAttr).trim();
+      if (!label) continue;
+      if (/送信|確認|submit|confirm/i.test(label)) {
+        hasActionButton = true;
+        break;
+      }
+    }
+
+    debug.inputTotal = inputTotal;
+    debug.inputFilled = inputFilled;
+    debug.selectTotal = selectTotal;
+    debug.selectFilled = selectFilled;
+    debug.checkboxTotal = checkboxTotal;
+    debug.checkboxFilled = checkboxFilled;
+    debug.hasActionButton = hasActionButton;
+
+    return debug;
+  } catch (e) {
+    console.error("[form-debug-only] error", e);
+    debug.canAccessForm = debug.canAccessForm ?? false;
+    return debug;
   } finally {
     await browser.close();
   }
