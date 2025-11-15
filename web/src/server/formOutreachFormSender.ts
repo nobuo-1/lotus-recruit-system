@@ -32,7 +32,7 @@ export type FormPlan = {
 
 // Playwright での送信時に収集するデバッグ情報
 export type FormSubmitDebug = {
-  canAccessForm: boolean | null; // ← これを追加
+  canAccessForm: boolean | null;
   inputTotal: number | null;
   inputFilled: number | null;
   selectTotal: number | null;
@@ -279,6 +279,15 @@ export async function submitFormPlan(
     // ここまで来れば一応フォームページにはアクセスできている
     debug.canAccessForm = true;
 
+    // カウント系は最低でも 0 にしておく（null のままにならないように）
+    debug.inputTotal = 0;
+    debug.inputFilled = 0;
+    debug.selectTotal = 0;
+    debug.selectFilled = 0;
+    debug.checkboxTotal = 0;
+    debug.checkboxFilled = 0;
+    debug.hasActionButton = false;
+
     // === 1. フィールド入力 ===
     const fieldEntries = Object.entries(plan.fields || {});
     let firstFieldSelector: string | null = null;
@@ -338,11 +347,15 @@ export async function submitFormPlan(
     }
 
     let formLocator = page.locator('form[data-lotus-target-form="1"]').first();
-    if (!(await formLocator.count())) {
+    let hasForm = await formLocator.count();
+
+    if (!hasForm) {
       // fallback: 最初の form
       const anyForm = page.locator("form").first();
-      if (await anyForm.count()) {
+      const anyCount = await anyForm.count();
+      if (anyCount) {
         formLocator = anyForm;
+        hasForm = anyCount;
         try {
           await anyForm.evaluate((f: any) =>
             f.setAttribute("data-lotus-target-form", "1")
@@ -353,10 +366,13 @@ export async function submitFormPlan(
       }
     }
 
-    // === 3. フォーム内の要素数・入力状況をカウント（デバッグ用） ===
-    if (await formLocator.count()) {
+    // === 3. フォーム内（なければページ全体）の要素数・入力状況をカウント（デバッグ用） ===
+    try {
+      const rootLocator =
+        hasForm && hasForm > 0 ? formLocator : page.locator("body"); // form が無くてもページ全体でカウント
+
       // input / textarea
-      const inputLocator = formLocator.locator(
+      const inputLocator = rootLocator.locator(
         'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="image"]):not([type="reset"]), textarea'
       );
       const inputTotal = await inputLocator.count();
@@ -380,7 +396,7 @@ export async function submitFormPlan(
       const inputFilled = inputFilledFlags.filter(Boolean).length;
 
       // select
-      const selectLocator = formLocator.locator("select");
+      const selectLocator = rootLocator.locator("select");
       const selectTotal = await selectLocator.count();
       const selectFilledFlags = await selectLocator.evaluateAll((elements) => {
         return elements.map((el) => {
@@ -391,7 +407,7 @@ export async function submitFormPlan(
       const selectFilled = selectFilledFlags.filter(Boolean).length;
 
       // checkbox
-      const checkboxLocator = formLocator.locator('input[type="checkbox"]');
+      const checkboxLocator = rootLocator.locator('input[type="checkbox"]');
       const checkboxTotal = await checkboxLocator.count();
       const checkboxFilledFlags = await checkboxLocator.evaluateAll(
         (elements) => {
@@ -403,7 +419,7 @@ export async function submitFormPlan(
       const checkboxFilled = checkboxFilledFlags.filter(Boolean).length;
 
       // action ボタン有無
-      const buttonLocator = formLocator.locator(
+      const buttonLocator = rootLocator.locator(
         'button, input[type="submit"], input[type="button"]'
       );
       const buttonCount = await buttonLocator.count();
@@ -427,15 +443,9 @@ export async function submitFormPlan(
       debug.checkboxTotal = checkboxTotal;
       debug.checkboxFilled = checkboxFilled;
       debug.hasActionButton = hasActionButton;
-    } else {
-      // form が 1つも見つからない場合も 0 で埋めておく
-      debug.inputTotal = 0;
-      debug.inputFilled = 0;
-      debug.selectTotal = 0;
-      debug.selectFilled = 0;
-      debug.checkboxTotal = 0;
-      debug.checkboxFilled = 0;
-      debug.hasActionButton = false;
+    } catch (countErr) {
+      console.error("[form-submit] count debug error", countErr);
+      // ここで例外が出ても、デバッグ値は 0 のまま維持する
     }
 
     // === 4. ボタンクリック（確認 → 送信） ===
@@ -520,26 +530,23 @@ export async function submitFormPlan(
     let clickedConfirmAny = false;
     let clickedSubmitAny = false;
 
-    // 1回目: 「確認」ボタン優先（確認画面へ）
     try {
+      // 1回目: 「確認」ボタン優先（確認画面へ）
       const r1 = await clickOnce(true);
       if (r1.clicked) {
         if (r1.clickedConfirm) clickedConfirmAny = true;
         if (r1.clickedSubmit) clickedSubmitAny = true;
       }
-    } catch {
-      // ignore
-    }
 
-    // 2回目: 「送信」ボタン優先（確定送信）
-    try {
+      // 2回目: 「送信」ボタン優先（確定送信）
       const r2 = await clickOnce(false);
       if (r2.clicked) {
         if (r2.clickedConfirm) clickedConfirmAny = true;
         if (r2.clickedSubmit) clickedSubmitAny = true;
       }
-    } catch {
-      // ignore
+    } catch (clickErr) {
+      console.error("[form-submit] click error", clickErr);
+      // ボタン押下に失敗しても、ページ HTML は返す
     }
 
     debug.clickedConfirm = clickedConfirmAny;
