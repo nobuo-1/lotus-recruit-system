@@ -10,6 +10,7 @@ import {
   judgeFormSubmissionResult,
   detectCaptchaFromHtml,
 } from "@/server/formOutreachFormSender";
+import type { FormPlan } from "@/server/formOutreachFormSender";
 
 export const runtime = "nodejs";
 
@@ -708,40 +709,15 @@ export async function POST(req: NextRequest) {
               console.warn("[form-debug] analyzeFormHtml error", e);
             }
 
-            // 2. ChatGPT にフォーム入力プランを作成させる（message にテンプレ本文を渡す）
-            const plan = await planFormSubmission({
-              targetUrl: formUrl,
-              html,
-              message: messageText,
-              sender: {
-                company:
-                  sender?.sender_company || senderCompany || brandCompany,
-                postal_code: sender?.postal_code || "",
-                prefecture: sender?.sender_prefecture || "",
-                address: sender?.sender_address || "",
-                last_name: sender?.sender_last_name || senderName || "",
-                first_name: sender?.sender_first_name || "",
-                email: sender?.from_email || "",
-                phone: sender?.phone || "",
-                website: sender?.website || "",
-              },
-              recipient: {
-                company_name: recipientCompany,
-                website,
-                industry: recipientIndustry,
-                prefecture: recipientPref,
-              },
-            });
-
-            // reCAPTCHA/hCaptcha があった or プラン生成失敗
-            if (!plan) {
-              debugForThis.sentStatus = hasCaptcha ? "captcha" : "plan_error";
+            // ★ CAPTCHA があればここで即スキップ（自動送信は完全に諦める）
+            if (hasCaptcha) {
+              debugForThis.sentStatus = "captcha";
               debugByProspect[String(r.id)] = debugForThis;
 
               await enqueueWaitlist(tenantId, {
                 table_name: String(table),
                 prospect_id: String(r.id),
-                reason: hasCaptcha ? "recaptcha" : "queue_form",
+                reason: "recaptcha",
                 payload: {
                   context: {
                     recipient_company: recipientCompany,
@@ -750,16 +726,49 @@ export async function POST(req: NextRequest) {
                     message: messageText,
                   },
                   form_url: formUrl,
-                  note: hasCaptcha
-                    ? "reCAPTCHA/hCaptcha が検出されたため、自動送信をスキップしました。"
-                    : "フォーム送信プランの生成に失敗しました。",
+                  note: "reCAPTCHA/hCaptcha が検出されたため、自動送信をスキップしました。",
                 },
               });
               queued.push(String(r.id));
               continue;
             }
 
-            // 3. 実際にフォーム送信（Playwright 経由）
+            // 2. ChatGPT にフォーム入力プランを作成させる
+            //    （失敗しても throw させず null のまま Playwright に進む）
+            let plan: FormPlan | null = null;
+            try {
+              plan = await planFormSubmission({
+                targetUrl: formUrl,
+                html,
+                message: messageText,
+                sender: {
+                  company:
+                    sender?.sender_company || senderCompany || brandCompany,
+                  postal_code: sender?.postal_code || "",
+                  prefecture: sender?.sender_prefecture || "",
+                  address: sender?.sender_address || "",
+                  last_name: sender?.sender_last_name || senderName || "",
+                  first_name: sender?.sender_first_name || "",
+                  email: sender?.from_email || "",
+                  phone: sender?.phone || "",
+                  website: sender?.website || "",
+                },
+                recipient: {
+                  company_name: recipientCompany,
+                  website,
+                  industry: recipientIndustry,
+                  prefecture: recipientPref,
+                },
+              });
+            } catch (e) {
+              console.warn(
+                "[form-plan] planFormSubmission error (ignored):",
+                e
+              );
+              plan = null;
+            }
+
+            // 3. 実際にフォーム送信（★ plan が null でも Playwright のヒューリスティックのみで送信を試す）
             const result = await submitFormPlan(formUrl, plan, cookieHeader);
 
             if (result.debug) {

@@ -161,12 +161,17 @@ function buildSystemPrompt(): string {
 /**
  * OpenAI に HTML + 文脈を渡して「どのフィールドに何を入れるか」のプランを作らせる
  * - reCAPTCHA / hCaptcha があるページは null を返して自動送信不可にする
+ * - どんなエラーでも throw せず、すべて null を返す
  */
 export async function planFormSubmission(
   ctx: FormSenderContext
 ): Promise<FormPlan | null> {
+  // ★ APIキーが無くてもフォーム送信自体は試したいので、throw しない
   if (!process.env.OPENAI_API_KEY) {
-    throw new Error("OPENAI_API_KEY is not set");
+    console.warn(
+      "[planFormSubmission] OPENAI_API_KEY is not set. Skip planning and fallback to heuristic only."
+    );
+    return null;
   }
 
   // HTML が長すぎるとトークンが厳しいので先頭だけを渡す
@@ -178,7 +183,7 @@ export async function planFormSubmission(
     console.log("[form-plan] captcha detected, skip auto submission:", {
       url: ctx.targetUrl,
     });
-    return null; // route.ts 側で waitlist 行き
+    return null; // route.ts 側では CAPTCHA の場合のみ自動送信を完全スキップ
   }
 
   const userPayload = {
@@ -191,50 +196,79 @@ export async function planFormSubmission(
 
   const system = buildSystemPrompt();
 
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: "gpt-4.1-mini",
-      temperature: 0,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: JSON.stringify(userPayload) },
-      ],
-    }),
-  });
-
-  if (!res.ok) {
-    throw new Error(`OpenAI API error: ${res.status} ${await res.text()}`);
-  }
-
-  const data = (await res.json()) as {
-    choices: { message?: { content?: string | null } }[];
-  };
-
-  const content = data.choices?.[0]?.message?.content ?? "";
-  if (!content) return null;
-
   try {
-    const parsed = JSON.parse(content) as FormPlan;
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4.1-mini",
+        temperature: 0,
+        // ★ JSON オブジェクトだけを返させる
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: JSON.stringify(userPayload) },
+        ],
+      }),
+    });
+
+    if (!res.ok) {
+      console.warn(
+        "[planFormSubmission] OpenAI API error:",
+        res.status,
+        await res.text().catch(() => "")
+      );
+      return null;
+    }
+
+    const data = (await res.json()) as {
+      choices: { message?: { content?: string | null } }[];
+    };
+
+    const content = data.choices?.[0]?.message?.content ?? "";
+    if (!content) return null;
+
+    let parsed: FormPlan;
+    try {
+      parsed = JSON.parse(content) as FormPlan;
+    } catch (e) {
+      console.warn(
+        "[planFormSubmission] JSON parse error:",
+        e,
+        "content:",
+        content
+      );
+      return null;
+    }
+
     if (
       !parsed ||
       !parsed.action ||
       !parsed.method ||
       typeof parsed.fields !== "object"
     ) {
+      console.warn(
+        "[planFormSubmission] invalid plan structure received:",
+        parsed
+      );
       return null;
     }
-    const methodUpper = parsed.method.toUpperCase() === "GET" ? "GET" : "POST";
+
+    const methodUpper =
+      parsed.method.toUpperCase() === "GET"
+        ? "GET"
+        : ("POST" as "GET" | "POST");
+
     return {
       method: methodUpper,
       action: parsed.action,
       fields: parsed.fields || {},
     };
-  } catch {
+  } catch (e) {
+    console.error("[planFormSubmission] unexpected error:", e);
     return null;
   }
 }
