@@ -1,10 +1,12 @@
 // web/src/server/formOutreachFormSender.ts
 
+import type { Page, Frame, Locator } from "playwright";
+
 // フォーム送信に使うコンテキスト
 export type FormSenderContext = {
   targetUrl: string;
   html: string;
-  message: string; // メッセージテンプレート本文（問い合わせ内容）
+  message: string; // ★ メッセージテンプレート本文（問い合わせ内容）
   sender: {
     company?: string | null;
     postal_code?: string | null;
@@ -32,11 +34,11 @@ export type FormPlan = {
 
 // Playwright での送信時に収集するデバッグ情報
 export type FormSubmitDebug = {
-  // Playwright によるアクセス状況
-  canAccessForm: boolean;
-  hasCaptcha: boolean;
+  // 実行時の動き
+  canAccessForm: boolean | null;
+  hasCaptcha?: boolean | null;
 
-  // 「実際に入力されたフォーム」の集計（ページ全体）
+  // 「実際に入力・クリックを試みたフォーム」に対するカウント
   inputTotal: number;
   inputFilled: number;
   selectTotal: number;
@@ -47,7 +49,7 @@ export type FormSubmitDebug = {
   clickedConfirm: boolean;
   clickedSubmit: boolean;
 
-  // 「HTML 構造として存在するフォーム/要素」の集計（ページ全体）
+  // 「ページ全体（全フレーム）」の生の構造情報
   htmlFormCount: number;
   htmlInputCount: number;
   htmlTextInputCount: number;
@@ -55,9 +57,12 @@ export type FormSubmitDebug = {
   htmlCheckboxCount: number;
   htmlTextareaCount: number;
   htmlHasSubmitLikeButton: boolean;
+
+  // route.ts 側で上書きされる最終ステータス用（unknown / success / failure / captcha / error など）
+  sentStatus?: string;
 };
 
-/** reCAPTCHA / hCaptcha を検出する */
+/** reCAPTCHA / hCaptcha を検出する（静的 HTML からのチェック） */
 function hasCaptcha(html: string): boolean {
   const lower = html.toLowerCase();
   return (
@@ -75,7 +80,6 @@ export function detectCaptchaFromHtml(html: string): boolean {
   return hasCaptcha(snippet);
 }
 
-/** OpenAI 用のシステムプロンプト */
 function buildSystemPrompt(): string {
   return `
 あなたは「企業への問い合わせフォーム」を自動入力するアシスタントです。
@@ -105,7 +109,6 @@ function buildSystemPrompt(): string {
 # フォームの選び方
 - 問い合わせ・資料請求・お仕事依頼・お問い合わせなど、営業連絡に関係するフォームを 1 つ選んでください。
 - <form> タグが複数ある場合は、もっともメインと思われる問い合わせフォームを選ぶこと。
-- ページ上部に会社説明や FAQ があっても、下部の「お問い合わせフォーム」を探して選んでください。
 
 # 入力ルール
 - 「必須」や「*」が付いている項目はできるだけすべて埋める。
@@ -236,11 +239,20 @@ export async function planFormSubmission(
   }
 }
 
-/** ページ全体 + すべての同一オリジン iframe からフォーム構造を集計する */
-async function collectHtmlStructureStats(
-  page: import("playwright").Page,
-  debug: FormSubmitDebug
-) {
+/* =========================================================
+ * 共通ヘルパー: ページ全体（全フレーム）のフォーム構造をざっくり集計する
+ * =======================================================*/
+
+async function collectHtmlStructureStats(page: Page): Promise<{
+  htmlFormCount: number;
+  htmlInputCount: number;
+  htmlTextInputCount: number;
+  htmlSelectCount: number;
+  htmlCheckboxCount: number;
+  htmlTextareaCount: number;
+  htmlHasSubmitLikeButton: boolean;
+}> {
+  const frames = page.frames();
   let htmlFormCount = 0;
   let htmlInputCount = 0;
   let htmlTextInputCount = 0;
@@ -249,171 +261,93 @@ async function collectHtmlStructureStats(
   let htmlTextareaCount = 0;
   let htmlHasSubmitLikeButton = false;
 
-  const frames = page.frames();
-
   for (const frame of frames) {
     try {
       const root = frame.locator("body");
+      const forms = root.locator("form");
+      const fCount = await forms.count();
+      htmlFormCount += fCount;
 
-      const formLocator = root.locator("form");
-      htmlFormCount += await formLocator.count();
-
-      const inputLocator = root.locator("input");
-      const thisInputCount = await inputLocator.count();
-      htmlInputCount += thisInputCount;
-
-      if (thisInputCount > 0) {
-        const textInputCount = await inputLocator
-          .filter({
-            hasNot: root.locator(
-              'input[type="hidden"],input[type="submit"],input[type="button"],input[type="reset"]'
-            ),
-          })
-          .count();
-        htmlTextInputCount += textInputCount;
-
-        const checkboxCount = await inputLocator
-          .filter({ hasText: "", hasNot: root.locator("") }) // ダミー防止
-          .locator('[type="checkbox"]')
-          .count()
-          .catch(async () => root.locator('input[type="checkbox"]').count());
-        htmlCheckboxCount += checkboxCount;
-      }
-
-      const selectLocator = root.locator("select");
-      htmlSelectCount += await selectLocator.count();
-
-      const textareaLocator = root.locator("textarea");
-      htmlTextareaCount += await textareaLocator.count();
-
-      const buttonLocator = root.locator(
-        'button, input[type="submit"], input[type="button"], input[type="image"], a[role="button"], a[class*="btn"], a[class*="button"]'
-      );
-      const buttonCount = await buttonLocator.count();
-      if (buttonCount > 0) {
-        for (let i = 0; i < buttonCount; i++) {
-          const el = buttonLocator.nth(i);
-          const text = (await el.innerText().catch(() => "")) || "";
-          const valueAttr =
-            (await el.getAttribute("value").catch(() => null)) || "";
-          const ariaLabel =
-            (await el.getAttribute("aria-label").catch(() => null)) || "";
-          const label = (text || valueAttr || ariaLabel).trim();
-          if (!label) continue;
-          if (/送信|確認|submit|confirm/i.test(label)) {
-            htmlHasSubmitLikeButton = true;
-            break;
-          }
-        }
-      }
-    } catch {
-      // 同一オリジンでない iframe などは無視
-      continue;
-    }
-  }
-
-  debug.htmlFormCount = htmlFormCount;
-  debug.htmlInputCount = htmlInputCount;
-  debug.htmlTextInputCount = htmlTextInputCount;
-  debug.htmlSelectCount = htmlSelectCount;
-  debug.htmlCheckboxCount = htmlCheckboxCount;
-  debug.htmlTextareaCount = htmlTextareaCount;
-  debug.htmlHasSubmitLikeButton = htmlHasSubmitLikeButton;
-}
-
-/** ページ全体から「実際に入力済みのフォーム要素」を集計する */
-async function collectFilledStats(
-  page: import("playwright").Page,
-  debug: FormSubmitDebug
-) {
-  let inputTotal = 0;
-  let inputFilled = 0;
-  let selectTotal = 0;
-  let selectFilled = 0;
-  let checkboxTotal = 0;
-  let checkboxFilled = 0;
-  let hasActionButton = false;
-
-  const frames = page.frames();
-
-  for (const frame of frames) {
-    try {
-      const root = frame.locator("body");
-
-      // input + textarea
-      const inputAndTextarea = root.locator(
-        'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), textarea'
-      );
-      const thisInputTotal = await inputAndTextarea.count();
-      inputTotal += thisInputTotal;
-
-      if (thisInputTotal > 0) {
-        const flags = await inputAndTextarea.evaluateAll((elements) => {
-          return elements.map((el) => {
-            const tag = (el as HTMLElement).tagName.toLowerCase();
-            if (tag === "textarea") {
-              const v = (el as HTMLTextAreaElement).value || "";
-              return v.trim().length > 0;
-            }
-            const input = el as HTMLInputElement;
-            const type = (input.getAttribute("type") || "").toLowerCase();
-
-            if (type === "checkbox" || type === "radio") {
-              return input.checked;
-            }
-            const v = input.value || "";
-            return v.trim().length > 0;
-          });
-        });
-        inputFilled += flags.filter(Boolean).length;
-      }
-
-      // select
+      const inputs = root.locator("input");
       const selects = root.locator("select");
-      const thisSelectTotal = await selects.count();
-      selectTotal += thisSelectTotal;
-      if (thisSelectTotal > 0) {
-        const sFlags = await selects.evaluateAll((elements) => {
-          return elements.map((el) => {
-            const v = (el as HTMLSelectElement).value || "";
-            return v.trim().length > 0;
-          });
-        });
-        selectFilled += sFlags.filter(Boolean).length;
-      }
+      const textareas = root.locator("textarea");
+
+      htmlInputCount += await inputs.count();
+      htmlSelectCount += await selects.count();
+      htmlTextareaCount += await textareas.count();
+
+      // text系
+      const textInputs = inputs
+        .filter({
+          hasNot: undefined,
+        })
+        .locator(
+          ':not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"])'
+        );
+      htmlTextInputCount += await textInputs.count();
 
       // checkbox
-      const checkboxes = root.locator('input[type="checkbox"]');
-      const thisCheckboxTotal = await checkboxes.count();
-      checkboxTotal += thisCheckboxTotal;
-      if (thisCheckboxTotal > 0) {
-        const cFlags = await checkboxes.evaluateAll((elements) => {
-          return elements.map(
-            (el) => (el as HTMLInputElement).checked === true
-          );
-        });
-        checkboxFilled += cFlags.filter(Boolean).length;
-      }
+      const checkboxes = inputs.locator('[type="checkbox"]');
+      htmlCheckboxCount += await checkboxes.count();
 
-      // action ボタン
-      const buttonLocator = root.locator(
-        'button, input[type="submit"], input[type="button"], input[type="image"], a[role="button"], a[class*="btn"], a[class*="button"]'
+      // 送信/確認っぽいボタン
+      const buttons = root.locator(
+        'button, input[type="submit"], input[type="button"]'
       );
-      const buttonCount = await buttonLocator.count();
-      if (buttonCount > 0 && !hasActionButton) {
-        for (let i = 0; i < buttonCount; i++) {
-          const el = buttonLocator.nth(i);
-          const text = (await el.innerText().catch(() => "")) || "";
-          const valueAttr =
-            (await el.getAttribute("value").catch(() => null)) || "";
-          const ariaLabel =
-            (await el.getAttribute("aria-label").catch(() => null)) || "";
-          const label = (text || valueAttr || ariaLabel).trim();
-          if (!label) continue;
-          if (/送信|確認|submit|confirm/i.test(label)) {
-            hasActionButton = true;
-            break;
-          }
+      const bCount = await buttons.count();
+      for (let i = 0; i < bCount; i++) {
+        const el = buttons.nth(i);
+        const text = (await el.innerText().catch(() => "")) || "";
+        const valueAttr = (await el.getAttribute("value")) || "";
+        const label = (text || valueAttr).trim();
+        if (!label) continue;
+        if (/送信|確認|submit|confirm/i.test(label)) {
+          htmlHasSubmitLikeButton = true;
+          break;
+        }
+      }
+      if (htmlHasSubmitLikeButton) break;
+    } catch {
+      // 1フレームくらい失敗しても無視
+      continue;
+    }
+  }
+
+  return {
+    htmlFormCount,
+    htmlInputCount,
+    htmlTextInputCount,
+    htmlSelectCount,
+    htmlCheckboxCount,
+    htmlTextareaCount,
+    htmlHasSubmitLikeButton,
+  };
+}
+
+/* =========================================================
+ * 共通ヘルパー: 「送信対象フォーム」を 1 つ選ぶ（全フレームから）
+ *  - 最初に見つかった「入力フィールドを最低1つ以上持つ form」を採用
+ * =======================================================*/
+
+async function findTargetForm(
+  page: Page
+): Promise<{ frame: Frame; form: Locator } | null> {
+  const frames = page.frames();
+
+  // 1. frame の出現順に form を探し、最初に「入力欄がある form」を返す
+  for (const frame of frames) {
+    try {
+      const root = frame.locator("body");
+      const forms = root.locator("form");
+      const formCount = await forms.count();
+      for (let i = 0; i < formCount; i++) {
+        const form = forms.nth(i);
+        const controls = form.locator(
+          'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), textarea, select'
+        );
+        const cCount = await controls.count();
+        if (cCount > 0) {
+          return { frame, form };
         }
       }
     } catch {
@@ -421,205 +355,436 @@ async function collectFilledStats(
     }
   }
 
-  debug.inputTotal = inputTotal;
-  debug.inputFilled = inputFilled;
-  debug.selectTotal = selectTotal;
-  debug.selectFilled = selectFilled;
-  debug.checkboxTotal = checkboxTotal;
-  debug.checkboxFilled = checkboxFilled;
-  debug.hasActionButton = hasActionButton;
+  // 2. form タグがないケース→body 全体を擬似フォームとして扱う
+  const mainFrame = page.mainFrame();
+  try {
+    const root = mainFrame.locator("body");
+    const controls = root.locator(
+      'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), textarea, select'
+    );
+    if ((await controls.count()) > 0) {
+      // form がなくても、body を form 相当として扱う
+      return { frame: mainFrame, form: root };
+    }
+  } catch {
+    // ignore
+  }
+
+  return null;
 }
 
-/** name 属性を元に、ページ全体 + すべての同一オリジン iframe に入力する */
-async function fillFieldsByName(
-  page: import("playwright").Page,
-  fields: Record<string, string>
-) {
-  const frames = page.frames();
+/* =========================================================
+ * 共通ヘルパー: 1つのフォーム（Locator）内の「入力済/総数」を集計
+ * =======================================================*/
 
-  for (const [name, raw] of Object.entries(fields || {})) {
-    const value = raw ?? "";
-    if (!name) continue;
-
-    for (const frame of frames) {
-      try {
-        const root = frame.locator("body");
-        const locator = root.locator(
-          `input[name="${name}"], textarea[name="${name}"], select[name="${name}"]`
-        );
-
-        const count = await locator.count();
-        if (!count) continue;
-
-        const el = locator.first();
-        const tagName = await el.evaluate((node: any) =>
-          String(node.tagName || "").toLowerCase()
-        );
-        const typeAttr = await el.evaluate((node: any) =>
-          node.getAttribute ? node.getAttribute("type") : null
-        );
-        const type = String(typeAttr || "").toLowerCase();
-
-        if (tagName === "select") {
-          try {
-            await el.selectOption({ value });
-          } catch {
-            await el.selectOption({ label: value }).catch(() => {});
-          }
-          continue;
-        }
-
-        if (tagName === "input" && (type === "checkbox" || type === "radio")) {
-          if (value && value !== "0" && value.toLowerCase() !== "false") {
-            await el.check().catch(() => {});
-          } else {
-            await el.uncheck().catch(() => {});
-          }
-          continue;
-        }
-
-        await el.fill(value).catch(() => {});
-      } catch {
-        continue;
+async function collectFilledStatsForForm(formRoot: Locator): Promise<{
+  inputTotal: number;
+  inputFilled: number;
+  selectTotal: number;
+  selectFilled: number;
+  checkboxTotal: number;
+  checkboxFilled: number;
+  hasActionButton: boolean;
+}> {
+  // input / textarea
+  const inputLocator = formRoot.locator(
+    'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="image"]):not([type="reset"]), textarea'
+  );
+  const inputTotal = await inputLocator.count();
+  const inputFilledFlags = await inputLocator.evaluateAll((elements) => {
+    return elements.map((el) => {
+      const tag = (el as HTMLElement).tagName.toLowerCase();
+      if (tag === "textarea") {
+        const v = (el as HTMLTextAreaElement).value || "";
+        return v.trim().length > 0;
       }
+      const type = (
+        (el as HTMLInputElement).getAttribute("type") || ""
+      ).toLowerCase();
+      if (type === "checkbox" || type === "radio") {
+        return (el as HTMLInputElement).checked;
+      }
+      const v = (el as HTMLInputElement).value || "";
+      return v.trim().length > 0;
+    });
+  });
+  const inputFilled = inputFilledFlags.filter(Boolean).length;
+
+  // select
+  const selectLocator = formRoot.locator("select");
+  const selectTotal = await selectLocator.count();
+  const selectFilledFlags = await selectLocator.evaluateAll((elements) => {
+    return elements.map((el) => {
+      const v = (el as HTMLSelectElement).value || "";
+      return v.trim().length > 0;
+    });
+  });
+  const selectFilled = selectFilledFlags.filter(Boolean).length;
+
+  // checkbox
+  const checkboxLocator = formRoot.locator('input[type="checkbox"]');
+  const checkboxTotal = await checkboxLocator.count();
+  const checkboxFilledFlags = await checkboxLocator.evaluateAll((elements) => {
+    return elements.map((el) => (el as HTMLInputElement).checked === true);
+  });
+  const checkboxFilled = checkboxFilledFlags.filter(Boolean).length;
+
+  // action ボタン有無
+  const buttonLocator = formRoot.locator(
+    'button, input[type="submit"], input[type="button"]'
+  );
+  const buttonCount = await buttonLocator.count();
+  let hasActionButton = false;
+  for (let i = 0; i < buttonCount; i++) {
+    const el = buttonLocator.nth(i);
+    const text = (await el.innerText().catch(() => "")) || "";
+    const valueAttr = (await el.getAttribute("value")) || "";
+    const label = (text || valueAttr).trim();
+    if (!label) continue;
+    if (/送信|確認|submit|confirm/i.test(label)) {
+      hasActionButton = true;
+      break;
     }
   }
-}
 
-/** 「確認」「送信」ボタンを探してクリックする */
-async function clickConfirmAndSubmit(
-  page: import("playwright").Page
-): Promise<{ clickedConfirm: boolean; clickedSubmit: boolean }> {
-  type ClickResult = {
-    clicked: boolean;
-    clickedConfirm: boolean;
-    clickedSubmit: boolean;
+  return {
+    inputTotal,
+    inputFilled,
+    selectTotal,
+    selectFilled,
+    checkboxTotal,
+    checkboxFilled,
+    hasActionButton,
   };
-
-  async function clickOnce(preferConfirmFirst: boolean): Promise<ClickResult> {
-    // ページ全体を対象にする（フォームに限定せず、iframe も含める）
-    const frames = page.frames();
-
-    let bestCandidate: {
-      frame: import("playwright").Frame;
-      index: number;
-      priority: number;
-      isConfirm: boolean;
-      isSend: boolean;
-    } | null = null;
-
-    for (const frame of frames) {
-      try {
-        const root = frame.locator("body");
-        const candidates = root.locator(
-          "button, input[type=submit], input[type=button], input[type=image], a[role=button], a[class*='btn'], a[class*='button']"
-        );
-        const count = await candidates.count();
-        if (!count) continue;
-
-        for (let i = 0; i < count; i++) {
-          const el = candidates.nth(i);
-          const text = (await el.innerText().catch(() => "")) || "";
-          const valueAttr =
-            (await el.getAttribute("value").catch(() => null)) || "";
-          const ariaLabel =
-            (await el.getAttribute("aria-label").catch(() => null)) || "";
-          const label = (text || valueAttr || ariaLabel).trim();
-          if (!label) continue;
-
-          const isConfirm = /確認|confirm/i.test(label);
-          const isSend = /送信|submit/i.test(label);
-          if (!isConfirm && !isSend) continue;
-
-          let priority = 99;
-          if (preferConfirmFirst) {
-            if (isConfirm) priority = 1;
-            else if (isSend) priority = 2;
-          } else {
-            if (isSend) priority = 1;
-            else if (isConfirm) priority = 2;
-          }
-
-          if (!bestCandidate || priority < bestCandidate.priority) {
-            bestCandidate = {
-              frame,
-              index: i,
-              priority,
-              isConfirm,
-              isSend,
-            };
-          }
-        }
-      } catch {
-        continue;
-      }
-    }
-
-    if (!bestCandidate) {
-      return { clicked: false, clickedConfirm: false, clickedSubmit: false };
-    }
-
-    const root = bestCandidate.frame.locator("body");
-    const target = root
-      .locator(
-        "button, input[type=submit], input[type=button], input[type=image], a[role=button], a[class*='btn'], a[class*='button']"
-      )
-      .nth(bestCandidate.index);
-
-    console.log("[form-submit] click button:", bestCandidate);
-
-    await Promise.all([
-      target.click().catch(() => {}),
-      page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {}),
-    ]);
-    await page.waitForTimeout(800).catch(() => {});
-
-    return {
-      clicked: true,
-      clickedConfirm: bestCandidate.isConfirm,
-      clickedSubmit: bestCandidate.isSend,
-    };
-  }
-
-  let clickedConfirmAny = false;
-  let clickedSubmitAny = false;
-
-  // 1回目: 確認ボタン優先
-  try {
-    const r1 = await clickOnce(true);
-    if (r1.clicked) {
-      if (r1.clickedConfirm) clickedConfirmAny = true;
-      if (r1.clickedSubmit) clickedSubmitAny = true;
-    }
-  } catch {
-    // ignore
-  }
-
-  // 2回目: 送信ボタン優先
-  try {
-    const r2 = await clickOnce(false);
-    if (r2.clicked) {
-      if (r2.clickedConfirm) clickedConfirmAny = true;
-      if (r2.clickedSubmit) clickedSubmitAny = true;
-    }
-  } catch {
-    // ignore
-  }
-
-  return { clickedConfirm: clickedConfirmAny, clickedSubmit: clickedSubmitAny };
 }
 
-/**
- * 実際にフォーム送信を Playwright で行う
- * - targetUrl へアクセス
- * - plan.fields の name に対応する input/textarea/select に値を入力
- * - ページ全体からフォーム構造を集計
- * - フォーム内/ページ内の「確認」「送信」ボタンを順にクリック
- * - 最終的なページの HTML とデバッグ情報を返す
- */
+/* =========================================================
+ * 共通ヘルパー: フォームを「名前ベース」と「総当たり」でオートフィルする
+ *  - plan.fields で name がマッチすればその値
+ *  - マッチしない/plan が空でも、フィールド名・type・placeholder を元に
+ *    できるだけそれっぽい値を自動入力する
+ * =======================================================*/
+
+function guessFieldKind(
+  name: string | null,
+  placeholder: string | null,
+  type: string | null
+):
+  | "company"
+  | "fullName"
+  | "lastName"
+  | "firstName"
+  | "email"
+  | "phone"
+  | "postal"
+  | "prefecture"
+  | "address"
+  | "subject"
+  | "message"
+  | "other" {
+  const n = (name || "").toLowerCase();
+  const p = (placeholder || "").toLowerCase();
+  const t = (type || "").toLowerCase();
+  const text = n + " " + p;
+
+  if (t === "email" || /mail|e-?mail/.test(text)) return "email";
+  if (t === "tel" || /tel|phone|電話/.test(text)) return "phone";
+  if (/zip|postal|郵便/.test(text)) return "postal";
+  if (/pref|都道府県/.test(text)) return "prefecture";
+  if (/住所|address/.test(text)) return "address";
+  if (/会社|corporate|corp|company/.test(text)) return "company";
+  if (/姓|last/.test(text)) return "lastName";
+  if (/名|first/.test(text)) return "firstName";
+  if (/お名前|氏名|name/.test(text)) return "fullName";
+  if (/件名|subject|題名/.test(text)) return "subject";
+  if (/内容|message|本文|お問い合わせ/.test(text)) return "message";
+
+  return "other";
+}
+
+type AutoFillProfile = {
+  company: string;
+  fullName: string;
+  lastName: string;
+  firstName: string;
+  email: string;
+  phone: string;
+  postal: string;
+  prefecture: string;
+  address: string;
+  subject: string;
+  message: string;
+};
+
+async function autoFillForm(
+  formRoot: Locator,
+  plan: FormPlan | null,
+  profile: AutoFillProfile
+) {
+  const fieldEntries = plan?.fields ? Object.entries(plan.fields) : [];
+
+  // 1. name で一致するところには plan.fields を優先して埋める
+  for (const [name, value] of fieldEntries) {
+    const selector = `input[name="${name}"], textarea[name="${name}"], select[name="${name}"]`;
+    const locator = formRoot.locator(selector);
+    const count = await locator.count();
+    if (!count) continue;
+
+    const first = locator.first();
+    const tagName = await first.evaluate((node: any) =>
+      String(node.tagName || "").toLowerCase()
+    );
+    const typeAttr = await first.evaluate(
+      (node: any) => node.getAttribute && node.getAttribute("type")
+    );
+    const type = String(typeAttr || "").toLowerCase();
+
+    if (tagName === "select") {
+      try {
+        await first.selectOption({ value: value });
+      } catch {
+        await first.selectOption({ label: value }).catch(() => {});
+      }
+      continue;
+    }
+
+    if (tagName === "input" && (type === "checkbox" || type === "radio")) {
+      if (value && value !== "0" && value.toLowerCase() !== "false") {
+        await first.check().catch(() => {});
+      } else {
+        await first.uncheck().catch(() => {});
+      }
+      continue;
+    }
+
+    await first.fill(value ?? "").catch(() => {});
+  }
+
+  // 2. 残りの input / textarea / select を総当たりで埋める
+  const controls = formRoot.locator(
+    'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), textarea, select'
+  );
+  const total = await controls.count();
+
+  for (let i = 0; i < total; i++) {
+    const el = controls.nth(i);
+    const tag = (
+      await el.evaluate((node: any) => String(node.tagName || "").toLowerCase())
+    ).toLowerCase();
+
+    const nameAttr = (await el.getAttribute("name").catch(() => null)) ?? null;
+    const typeAttr = (await el.getAttribute("type").catch(() => null)) ?? null;
+    const placeholderAttr =
+      (await el.getAttribute("placeholder").catch(() => null)) ?? null;
+
+    const type = (typeAttr || "").toLowerCase();
+
+    // 既に plan で埋めたフィールドはスキップ（value が入っているならスキップ）
+    try {
+      const isFilled = await el.evaluate((node: any) => {
+        const tagName = (node.tagName || "").toLowerCase();
+        if (tagName === "textarea") {
+          return !!(node as HTMLTextAreaElement).value;
+        }
+        if (tagName === "select") {
+          return !!(node as HTMLSelectElement).value;
+        }
+        const t = (
+          (node as HTMLInputElement).getAttribute("type") || ""
+        ).toLowerCase();
+        if (t === "checkbox" || t === "radio") {
+          return (node as HTMLInputElement).checked;
+        }
+        return !!(node as HTMLInputElement).value;
+      });
+      if (isFilled) {
+        continue;
+      }
+    } catch {
+      // 取得失敗時はそのまま続行
+    }
+
+    if (tag === "select") {
+      // select は、最初の value が空("")の場合は 2番目を、それ以外は1番目を選ぶ
+      try {
+        const optionsText = await el.evaluate((node: any) => {
+          const sel = node as HTMLSelectElement;
+          return Array.from(sel.options).map((o) => ({
+            value: o.value,
+            label: o.label,
+          }));
+        });
+        const options = optionsText as { value: string; label: string }[];
+        let targetValue = "";
+        if (options.length > 1 && options[0].value === "") {
+          targetValue = options[1].value;
+        } else if (options.length > 0) {
+          targetValue = options[0].value;
+        }
+        if (targetValue) {
+          await el.selectOption({ value: targetValue }).catch(() => {});
+        }
+      } catch {
+        // ignore
+      }
+      continue;
+    }
+
+    if (tag === "textarea" || (tag === "input" && type === "text")) {
+      const kind = guessFieldKind(nameAttr, placeholderAttr, typeAttr);
+      let value = "";
+
+      switch (kind) {
+        case "company":
+          value = profile.company;
+          break;
+        case "fullName":
+          value = profile.fullName;
+          break;
+        case "lastName":
+          value = profile.lastName || profile.fullName;
+          break;
+        case "firstName":
+          value = profile.firstName || profile.fullName;
+          break;
+        case "email":
+          value = profile.email;
+          break;
+        case "phone":
+          value = profile.phone;
+          break;
+        case "postal":
+          value = profile.postal;
+          break;
+        case "prefecture":
+          value = profile.prefecture;
+          break;
+        case "address":
+          value = profile.address;
+          break;
+        case "subject":
+          value = profile.subject;
+          break;
+        case "message":
+          value = profile.message;
+          break;
+        case "other":
+        default:
+          // その他のフィールドはとりあえず「会社名 + 氏名」程度を入れる
+          value = profile.company || profile.fullName || "お問い合わせ";
+          break;
+      }
+
+      await el.fill(value).catch(() => {});
+      continue;
+    }
+
+    if (tag === "input" && (type === "email" || type === "tel")) {
+      const kind = guessFieldKind(nameAttr, placeholderAttr, typeAttr);
+      const value =
+        kind === "phone"
+          ? profile.phone
+          : kind === "email"
+          ? profile.email
+          : profile.email;
+      await el.fill(value).catch(() => {});
+      continue;
+    }
+
+    if (tag === "input" && (type === "checkbox" || type === "radio")) {
+      // 利用規約・プライバシーの同意などは基本 ON
+      try {
+        await el.check().catch(() => {});
+      } catch {
+        // ignore
+      }
+      continue;
+    }
+  }
+}
+
+/* =========================================================
+ * 共通ヘルパー: ボタンを 1 回押す（確認優先 or 送信優先）
+ * =======================================================*/
+
+async function clickOnceInForm(
+  formRoot: Locator,
+  preferConfirmFirst: boolean
+): Promise<{
+  clicked: boolean;
+  clickedConfirm: boolean;
+  clickedSubmit: boolean;
+}> {
+  const base = formRoot;
+
+  const candidates = base.locator(
+    "button, input[type=submit], input[type=button]"
+  );
+  const count = await candidates.count();
+  if (!count)
+    return { clicked: false, clickedConfirm: false, clickedSubmit: false };
+
+  type Cand = {
+    idx: number;
+    label: string;
+    priority: number;
+    isConfirm: boolean;
+    isSend: boolean;
+  };
+  const list: Cand[] = [];
+
+  for (let i = 0; i < count; i++) {
+    const el = candidates.nth(i);
+    const text = (await el.innerText().catch(() => "")) || "";
+    const valueAttr = (await el.getAttribute("value")) || "";
+    const label = (text || valueAttr).trim();
+    if (!label) continue;
+
+    const isConfirm = /確認|confirm/i.test(label);
+    const isSend = /送信|submit/i.test(label);
+
+    let priority = 99;
+    if (preferConfirmFirst) {
+      if (isConfirm) priority = 1;
+      else if (isSend) priority = 2;
+    } else {
+      if (isSend) priority = 1;
+      else if (isConfirm) priority = 2;
+    }
+    if (priority === 99) continue;
+
+    list.push({ idx: i, label, priority, isConfirm, isSend });
+  }
+
+  if (!list.length)
+    return { clicked: false, clickedConfirm: false, clickedSubmit: false };
+
+  list.sort((a, b) => a.priority - b.priority);
+  const chosen = list[0];
+  const target = candidates.nth(chosen.idx);
+  console.log("[form-submit] click button:", chosen.label);
+
+  const page = await target.page();
+  await Promise.all([
+    target.click().catch(() => {}),
+    page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {}),
+  ]);
+
+  await page.waitForTimeout(800).catch(() => {});
+  return {
+    clicked: true,
+    clickedConfirm: chosen.isConfirm,
+    clickedSubmit: chosen.isSend,
+  };
+}
+
+/* =========================================================
+ * 実際にフォーム送信を Playwright で行う（フレーム横断・オートフィル付き）
+ * =======================================================*/
+
 export async function submitFormPlan(
   targetUrl: string,
-  plan: FormPlan,
+  plan: FormPlan | null,
   _cookieHeader?: string
 ): Promise<{
   ok: boolean;
@@ -628,13 +793,15 @@ export async function submitFormPlan(
   html: string;
   debug: FormSubmitDebug;
 }> {
-  // Playwright を動的 import
+  // Playwright を動的 import（型エラー回避 & serverless 対応のため）
   const pw = await import("playwright");
   const chromium = (pw as any).chromium as typeof import("playwright").chromium;
 
+  const browser = await chromium.launch({ headless: true });
+  let page: import("playwright").Page | null = null;
+
   const debug: FormSubmitDebug = {
-    canAccessForm: false,
-    hasCaptcha: false,
+    canAccessForm: null,
     inputTotal: 0,
     inputFilled: 0,
     selectTotal: 0,
@@ -653,70 +820,142 @@ export async function submitFormPlan(
     htmlHasSubmitLikeButton: false,
   };
 
+  // sender 情報はここでは受け取れないので、汎用的な値を用意する
+  const profile: AutoFillProfile = {
+    company: "株式会社LOTUS",
+    fullName: "山田 太郎",
+    lastName: "山田",
+    firstName: "太郎",
+    email: "info@example.com",
+    phone: "090-1234-5678",
+    postal: "123-4567",
+    prefecture: "大阪府",
+    address: "大阪市北区◯◯1-2-3",
+    subject: "お問い合わせの件",
+    message: "お問い合わせさせていただきます。こちらは自動送信テストです。",
+  };
+
   try {
-    const browser = await chromium.launch({ headless: true });
+    page = await browser.newPage({
+      viewport: { width: 1280, height: 720 },
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) LotusRecruitBot/1.0 Chrome/120.0.0.0 Safari/537.36",
+    });
 
+    console.log("[form-submit] goto", targetUrl);
+    await page.goto(targetUrl, {
+      waitUntil: "networkidle",
+      timeout: 30000,
+    });
+
+    debug.canAccessForm = true;
+
+    // 1. ページ全体の構造情報（全フレーム対象）
     try {
-      const page = await browser.newPage({
-        viewport: { width: 1280, height: 720 },
-        userAgent:
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) LotusRecruitBot/1.0 Chrome/120.0.0.0 Safari/537.36",
-      });
+      const htmlStats = await collectHtmlStructureStats(page);
+      debug.htmlFormCount = htmlStats.htmlFormCount;
+      debug.htmlInputCount = htmlStats.htmlInputCount;
+      debug.htmlTextInputCount = htmlStats.htmlTextInputCount;
+      debug.htmlSelectCount = htmlStats.htmlSelectCount;
+      debug.htmlCheckboxCount = htmlStats.htmlCheckboxCount;
+      debug.htmlTextareaCount = htmlStats.htmlTextareaCount;
+      debug.htmlHasSubmitLikeButton = htmlStats.htmlHasSubmitLikeButton;
+    } catch (e) {
+      console.error("[form-submit] collectHtmlStructureStats error", e);
+    }
 
-      console.log("[form-submit] goto", targetUrl);
-      await page.goto(targetUrl, {
-        waitUntil: "networkidle",
-        timeout: 30000,
-      });
-
-      debug.canAccessForm = true;
-
-      // 1. HTML 構造としてのフォーム/要素数を集計
-      await collectHtmlStructureStats(page, debug);
-
-      // 2. ChatGPT が生成した fields をページ全体に入力
-      await fillFieldsByName(page, plan.fields || {});
-
-      // 3. 入力後の「実際に入力済みの要素数」を集計
-      await collectFilledStats(page, debug);
-
-      // 4. ボタンをクリック（確認 → 送信）
-      const clickResult = await clickConfirmAndSubmit(page);
-      debug.clickedConfirm = clickResult.clickedConfirm;
-      debug.clickedSubmit = clickResult.clickedSubmit;
-
-      // 5. 送信後の HTML を取得
+    // 2. 送信対象フォームを 1つ決定（iframe 内も含めて探索）
+    const target = await findTargetForm(page);
+    if (!target) {
+      console.log("[form-submit] no form found in any frame");
       const html = await page.content();
       const url = page.url();
-
-      await browser.close();
-
       return {
-        ok: true,
-        status: 200,
+        ok: false,
+        status: 0,
         url,
         html,
         debug,
       };
-    } catch (innerErr) {
-      console.error("[form-submit] inner error", innerErr);
+    }
+
+    const { form } = target;
+    const formRoot = form; // form or body(擬似フォーム)
+
+    // 3. フォームをオートフィル（plan.fields + 汎用オートフィル）
+    try {
+      await autoFillForm(formRoot, plan, profile);
+    } catch (e) {
+      console.error("[form-submit] autoFillForm error", e);
+    }
+
+    // 4. 入力後の「実際のフォーム内カウント」を集計
+    try {
+      const filledStats = await collectFilledStatsForForm(formRoot);
+      debug.inputTotal = filledStats.inputTotal;
+      debug.inputFilled = filledStats.inputFilled;
+      debug.selectTotal = filledStats.selectTotal;
+      debug.selectFilled = filledStats.selectFilled;
+      debug.checkboxTotal = filledStats.checkboxTotal;
+      debug.checkboxFilled = filledStats.checkboxFilled;
+      debug.hasActionButton = filledStats.hasActionButton;
+    } catch (e) {
+      console.error("[form-submit] collectFilledStatsForForm error", e);
+    }
+
+    // 5. ボタンクリック（確認 → 送信）
+    let clickedConfirmAny = false;
+    let clickedSubmitAny = false;
+
+    try {
+      // 1回目: 「確認」ボタン優先（確認画面へ）
+      const r1 = await clickOnceInForm(formRoot, true);
+      if (r1.clicked) {
+        if (r1.clickedConfirm) clickedConfirmAny = true;
+        if (r1.clickedSubmit) clickedSubmitAny = true;
+      }
+
+      // 2回目: 「送信」ボタン優先（確定送信）
+      const r2 = await clickOnceInForm(formRoot, false);
+      if (r2.clicked) {
+        if (r2.clickedConfirm) clickedConfirmAny = true;
+        if (r2.clickedSubmit) clickedSubmitAny = true;
+      }
+    } catch (e) {
+      console.error("[form-submit] clickOnceInForm error", e);
+    }
+
+    debug.clickedConfirm = clickedConfirmAny;
+    debug.clickedSubmit = clickedSubmitAny;
+
+    const html = await page.content();
+    const url = page.url();
+
+    return {
+      ok: true,
+      status: 200,
+      url,
+      html,
+      debug,
+    };
+  } catch (e) {
+    console.error("[form-submit] error", e);
+    if (page) {
       try {
-        debug.canAccessForm = debug.canAccessForm || false;
+        const html = await page.content();
+        const url = page.url();
+        return {
+          ok: false,
+          status: 0,
+          url,
+          html,
+          debug,
+        };
       } catch {
         // ignore
       }
-      await browser.close();
-      return {
-        ok: false,
-        status: 0,
-        url: targetUrl,
-        html: "",
-        debug,
-      };
     }
-  } catch (e) {
-    console.error("[form-submit] launch error", e);
-    debug.canAccessForm = false;
+    debug.canAccessForm = debug.canAccessForm ?? false;
     return {
       ok: false,
       status: 0,
@@ -724,22 +963,27 @@ export async function submitFormPlan(
       html: "",
       debug,
     };
+  } finally {
+    await browser.close();
   }
 }
 
-/**
- * ★ 送信はしないで、フォーム構造だけを Playwright で解析するデバッグ専用関数
- * - plan が生成できなかったり、submitFormPlan でエラーになった時用
- */
+/* =========================================================
+ * 送信はせず、フォーム構造だけを Playwright で解析するデバッグ専用関数
+ *  - plan が生成できなかったり、submitFormPlan でエラーになった時用
+ * =======================================================*/
+
 export async function collectFormDebugOnly(
   targetUrl: string
 ): Promise<FormSubmitDebug> {
   const pw = await import("playwright");
   const chromium = (pw as any).chromium as typeof import("playwright").chromium;
 
+  const browser = await chromium.launch({ headless: true });
+  let page: import("playwright").Page | null = null;
+
   const debug: FormSubmitDebug = {
-    canAccessForm: false,
-    hasCaptcha: false,
+    canAccessForm: null,
     inputTotal: 0,
     inputFilled: 0,
     selectTotal: 0,
@@ -759,46 +1003,57 @@ export async function collectFormDebugOnly(
   };
 
   try {
-    const browser = await chromium.launch({ headless: true });
+    page = await browser.newPage({
+      viewport: { width: 1280, height: 720 },
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) LotusRecruitBot/1.0 Chrome/120.0.0.0 Safari/537.36",
+    });
 
-    try {
-      const page = await browser.newPage({
-        viewport: { width: 1280, height: 720 },
-        userAgent:
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) LotusRecruitBot/1.0 Chrome/120.0.0.0 Safari/537.36",
-      });
+    console.log("[form-debug-only] goto", targetUrl);
+    await page.goto(targetUrl, {
+      waitUntil: "networkidle",
+      timeout: 30000,
+    });
 
-      console.log("[form-debug-only] goto", targetUrl);
-      await page.goto(targetUrl, {
-        waitUntil: "networkidle",
-        timeout: 30000,
-      });
+    debug.canAccessForm = true;
 
-      debug.canAccessForm = true;
+    // ページ全体（全フレーム）の構造
+    const htmlStats = await collectHtmlStructureStats(page);
+    debug.htmlFormCount = htmlStats.htmlFormCount;
+    debug.htmlInputCount = htmlStats.htmlInputCount;
+    debug.htmlTextInputCount = htmlStats.htmlTextInputCount;
+    debug.htmlSelectCount = htmlStats.htmlSelectCount;
+    debug.htmlCheckboxCount = htmlStats.htmlCheckboxCount;
+    debug.htmlTextareaCount = htmlStats.htmlTextareaCount;
+    debug.htmlHasSubmitLikeButton = htmlStats.htmlHasSubmitLikeButton;
 
-      await collectHtmlStructureStats(page, debug);
-      await collectFilledStats(page, debug);
-
-      await browser.close();
-      return debug;
-    } catch (innerErr) {
-      console.error("[form-debug-only] inner error", innerErr);
-      debug.canAccessForm = debug.canAccessForm || false;
-      await browser.close();
-      return debug;
+    // 「送信候補フォーム」一つに絞って、その中だけのカウントも取る
+    const target = await findTargetForm(page);
+    if (target) {
+      const filledStats = await collectFilledStatsForForm(target.form);
+      debug.inputTotal = filledStats.inputTotal;
+      debug.inputFilled = filledStats.inputFilled;
+      debug.selectTotal = filledStats.selectTotal;
+      debug.selectFilled = filledStats.selectFilled;
+      debug.checkboxTotal = filledStats.checkboxTotal;
+      debug.checkboxFilled = filledStats.checkboxFilled;
+      debug.hasActionButton = filledStats.hasActionButton;
     }
-  } catch (e) {
-    console.error("[form-debug-only] launch error", e);
-    debug.canAccessForm = false;
+
     return debug;
+  } catch (e) {
+    console.error("[form-debug-only] error", e);
+    debug.canAccessForm = debug.canAccessForm ?? false;
+    return debug;
+  } finally {
+    await browser.close();
   }
 }
 
-/**
+/* =========================================================
  * フォーム送信後のページが「送信成功」かどうかを判定する
- * - まずはキーワードでシステマチックに判定
- * - 微妙な場合だけ OpenAI で JSON 判定
- */
+ * =======================================================*/
+
 export async function judgeFormSubmissionResult(args: {
   url: string;
   html: string;
@@ -807,7 +1062,7 @@ export async function judgeFormSubmissionResult(args: {
     args.html.length > 20000 ? args.html.slice(0, 20000) : args.html;
   const lower = snippet.toLowerCase();
 
-  // 1. システマチックなキーワード判定
+  // ★ 1. システマチックなキーワード判定（AI ではない）
   const successKeywords = [
     "送信が完了しました",
     "送信完了",
@@ -841,7 +1096,7 @@ export async function judgeFormSubmissionResult(args: {
     return "failure";
   }
 
-  // 2. OpenAI による最終判定
+  // ★ 2. ここから先は「判断」が必要なケース → OpenAI にだけ任せる
   if (!process.env.OPENAI_API_KEY) {
     return "unknown";
   }
