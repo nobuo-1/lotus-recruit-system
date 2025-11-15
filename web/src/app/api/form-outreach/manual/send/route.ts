@@ -8,6 +8,7 @@ import {
   planFormSubmission,
   submitFormPlan,
   judgeFormSubmissionResult,
+  detectCaptchaFromHtml,
 } from "@/server/formOutreachFormSender";
 
 export const runtime = "nodejs";
@@ -458,6 +459,9 @@ export async function POST(req: NextRequest) {
     const queued: string[] = [];
     const failed: string[] = [];
 
+    // ★ prospect_id ごとのフォーム送信デバッグ情報
+    const debugByProspect: Record<string, any> = {};
+
     for (const r of targets) {
       try {
         const recipientCompany = String(pickCompanyName(r) || "-");
@@ -526,7 +530,26 @@ export async function POST(req: NextRequest) {
           );
           ok.push(String(r.id));
         } else if (channel === "form") {
+          // ★ この prospect 専用のデバッグ器
+          const debugForThis: any = {
+            canAccessForm: false,
+            hasCaptcha: null,
+            inputTotal: null,
+            inputFilled: null,
+            selectTotal: null,
+            selectFilled: null,
+            checkboxTotal: null,
+            checkboxFilled: null,
+            hasActionButton: null,
+            clickedConfirm: null,
+            clickedSubmit: null,
+            sentStatus: "unknown",
+          };
+
           if (!formUrl) {
+            debugForThis.sentStatus = "no_form_url";
+            debugByProspect[String(r.id)] = debugForThis;
+
             await enqueueWaitlist(tenantId, {
               table_name: String(table),
               prospect_id: String(r.id),
@@ -538,6 +561,8 @@ export async function POST(req: NextRequest) {
                   recipient_industry: recipientIndustry,
                   message: messageText,
                 },
+                form_url: null,
+                note: "contact_form_url が空のため、自動フォーム送信できませんでした。",
               },
             });
             queued.push(String(r.id));
@@ -559,8 +584,14 @@ export async function POST(req: NextRequest) {
             if (!pageRes.ok) {
               throw new Error(`form page fetch error: ${pageRes.status}`);
             }
+
+            debugForThis.canAccessForm = true;
+
             const html = await pageRes.text();
             const cookieHeader = pageRes.headers.get("set-cookie") ?? undefined;
+
+            const hasCaptcha = detectCaptchaFromHtml(html);
+            debugForThis.hasCaptcha = hasCaptcha;
 
             // 2. ChatGPT にフォーム入力プランを作成させる（message にテンプレ本文を渡す）
             const plan = await planFormSubmission({
@@ -587,18 +618,65 @@ export async function POST(req: NextRequest) {
               },
             });
 
+            // reCAPTCHA/hCaptcha があった or プラン生成失敗
             if (!plan) {
-              throw new Error("form plan not generated");
+              debugForThis.sentStatus = hasCaptcha ? "captcha" : "plan_error";
+              debugByProspect[String(r.id)] = debugForThis;
+
+              await enqueueWaitlist(tenantId, {
+                table_name: String(table),
+                prospect_id: String(r.id),
+                reason: hasCaptcha ? "recaptcha" : "queue_form",
+                payload: {
+                  context: {
+                    recipient_company: recipientCompany,
+                    recipient_prefecture: recipientPref,
+                    recipient_industry: recipientIndustry,
+                    message: messageText,
+                  },
+                  form_url: formUrl,
+                  note: hasCaptcha
+                    ? "reCAPTCHA/hCaptcha が検出されたため、自動送信をスキップしました。"
+                    : "フォーム送信プランの生成に失敗しました。",
+                },
+              });
+              queued.push(String(r.id));
+              continue;
             }
 
             // 3. 実際にフォーム送信（Playwright 経由）
             const result = await submitFormPlan(formUrl, plan, cookieHeader);
+
+            if (result.debug) {
+              const d = result.debug;
+              debugForThis.canAccessForm =
+                d.canAccessForm ?? debugForThis.canAccessForm;
+              debugForThis.inputTotal = d.inputTotal ?? debugForThis.inputTotal;
+              debugForThis.inputFilled =
+                d.inputFilled ?? debugForThis.inputFilled;
+              debugForThis.selectTotal =
+                d.selectTotal ?? debugForThis.selectTotal;
+              debugForThis.selectFilled =
+                d.selectFilled ?? debugForThis.selectFilled;
+              debugForThis.checkboxTotal =
+                d.checkboxTotal ?? debugForThis.checkboxTotal;
+              debugForThis.checkboxFilled =
+                d.checkboxFilled ?? debugForThis.checkboxFilled;
+              debugForThis.hasActionButton =
+                d.hasActionButton ?? debugForThis.hasActionButton;
+              debugForThis.clickedConfirm =
+                d.clickedConfirm ?? debugForThis.clickedConfirm;
+              debugForThis.clickedSubmit =
+                d.clickedSubmit ?? debugForThis.clickedSubmit;
+            }
 
             // 4. 結果HTMLから「送信成功かどうか」を判定
             const judge = await judgeFormSubmissionResult({
               url: result.url,
               html: result.html,
             });
+
+            debugForThis.sentStatus = judge;
 
             if (judge === "success") {
               // 明らかに送信成功と判断できたときだけ form_sent を true にする
@@ -630,6 +708,8 @@ export async function POST(req: NextRequest) {
               queued.push(String(r.id));
             }
           } catch (err) {
+            debugForThis.sentStatus = "error";
+
             await enqueueWaitlist(tenantId, {
               table_name: String(table),
               prospect_id: String(r.id),
@@ -646,6 +726,8 @@ export async function POST(req: NextRequest) {
               },
             });
             queued.push(String(r.id));
+          } finally {
+            debugByProspect[String(r.id)] = debugForThis;
           }
         } else {
           failed.push(String(r.id));
@@ -680,7 +762,13 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    return NextResponse.json({ ok, queued, failed });
+    const responseBody: any = { ok, queued, failed };
+    // ★ フォーム送信モードのときだけ debug を返す（フロントのデバッグパネル用）
+    if (channel === "form") {
+      responseBody.debug = debugByProspect;
+    }
+
+    return NextResponse.json(responseBody);
   } catch (e: any) {
     return NextResponse.json(
       { error: String(e?.message || e) },

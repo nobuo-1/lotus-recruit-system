@@ -30,6 +30,20 @@ export type FormPlan = {
   fields: Record<string, string>;
 };
 
+/** Playwright 側で集計するフォーム送信デバッグ情報 */
+export type FormSubmitDebug = {
+  canAccessForm: boolean;
+  inputTotal: number;
+  inputFilled: number;
+  selectTotal: number;
+  selectFilled: number;
+  checkboxTotal: number;
+  checkboxFilled: number;
+  hasActionButton: boolean;
+  clickedConfirm: boolean;
+  clickedSubmit: boolean;
+};
+
 /** reCAPTCHA / hCaptcha を検出する（自動送信不可にするため） */
 function hasCaptcha(html: string): boolean {
   const lower = html.toLowerCase();
@@ -40,6 +54,12 @@ function hasCaptcha(html: string): boolean {
     lower.includes("hcaptcha") ||
     lower.includes("data-sitekey")
   );
+}
+
+/** HTML から reCAPTCHA/hCaptcha を検出するヘルパー（外部からも使う用） */
+export function detectCaptchaFromHtml(html: string): boolean {
+  const snippet = html.length > 20000 ? html.slice(0, 20000) : html;
+  return hasCaptcha(snippet);
 }
 
 function buildSystemPrompt(): string {
@@ -207,6 +227,7 @@ export async function planFormSubmission(
  * - plan.fields の name に対応する input/textarea/select に値を入力
  * - フォーム内の「確認」「送信」ボタンを順にクリック
  * - 最終的なページの HTML を返す
+ * - 併せて、入力欄数や押したボタンなどのデバッグ情報も返す
  *
  * @param targetUrl フォームページのURL（元ページ）
  * @param plan OpenAI が生成した送信プラン
@@ -216,13 +237,33 @@ export async function submitFormPlan(
   targetUrl: string,
   plan: FormPlan,
   _cookieHeader?: string
-): Promise<{ ok: boolean; status: number; url: string; html: string }> {
+): Promise<{
+  ok: boolean;
+  status: number;
+  url: string;
+  html: string;
+  debug: FormSubmitDebug;
+}> {
   // Playwright を動的 import（型エラー回避 & serverless 対応のため）
   const pw = await import("playwright");
   const chromium = (pw as any).chromium as typeof import("playwright").chromium;
 
   const browser = await chromium.launch({ headless: true });
   let page: any = null;
+
+  // デバッグ用初期値
+  const debug: FormSubmitDebug = {
+    canAccessForm: false,
+    inputTotal: 0,
+    inputFilled: 0,
+    selectTotal: 0,
+    selectFilled: 0,
+    checkboxTotal: 0,
+    checkboxFilled: 0,
+    hasActionButton: false,
+    clickedConfirm: false,
+    clickedSubmit: false,
+  };
 
   try {
     page = await browser.newPage({
@@ -236,6 +277,26 @@ export async function submitFormPlan(
       waitUntil: "networkidle",
       timeout: 30000,
     });
+
+    debug.canAccessForm = true;
+
+    // === 0. ページ全体の入力欄をざっくりカウント ===
+    try {
+      const normalInputs = await page
+        .locator(
+          'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"]):not([type="image"]):not([type="reset"])'
+        )
+        .count();
+      const textareas = await page.locator("textarea").count();
+      debug.inputTotal = normalInputs + textareas;
+
+      debug.selectTotal = await page.locator("select").count();
+      debug.checkboxTotal = await page
+        .locator('input[type="checkbox"]')
+        .count();
+    } catch {
+      // カウント失敗は無視
+    }
 
     // === 1. フィールド入力 ===
     const fieldEntries = Object.entries(plan.fields || {});
@@ -260,24 +321,46 @@ export async function submitFormPlan(
       const type = String(typeAttr || "").toLowerCase();
 
       if (tagName === "select") {
+        let filled = false;
         try {
           await locator.selectOption({ value: value });
+          filled = true;
         } catch {
-          await locator.selectOption({ label: value }).catch(() => {});
+          try {
+            await locator.selectOption({ label: value });
+            filled = true;
+          } catch {
+            // ignore
+          }
         }
+        if (filled) debug.selectFilled += 1;
         continue;
       }
 
       if (tagName === "input" && (type === "checkbox" || type === "radio")) {
         if (value && value !== "0" && value.toLowerCase() !== "false") {
-          await locator.check().catch(() => {});
+          try {
+            await locator.check();
+            debug.checkboxFilled += 1;
+          } catch {
+            // ignore
+          }
         } else {
-          await locator.uncheck().catch(() => {});
+          try {
+            await locator.uncheck();
+          } catch {
+            // ignore
+          }
         }
         continue;
       }
 
-      await locator.fill(value ?? "").catch(() => {});
+      try {
+        await locator.fill(value ?? "");
+        debug.inputFilled += 1;
+      } catch {
+        // ignore
+      }
     }
 
     // === 2. 対象フォームをマーキング ===
@@ -309,6 +392,10 @@ export async function submitFormPlan(
     }
 
     // ボタン候補: フォーム内の button / submit / button型 input を全て見てテキストで判定
+    let hasActionButton = false;
+    let clickedConfirm = false;
+    let clickedSubmit = false;
+
     async function clickOnce(preferConfirmFirst: boolean): Promise<boolean> {
       const candidates = page.locator(
         'form[data-lotus-target-form="1"] button, ' +
@@ -347,8 +434,17 @@ export async function submitFormPlan(
 
       if (!list.length) return false;
       list.sort((a, b) => a.priority - b.priority);
-      const target = candidates.nth(list[0].idx);
-      console.log("[form-submit] click button:", list[0].label);
+      const chosen = list[0];
+      const target = candidates.nth(chosen.idx);
+
+      hasActionButton = true;
+      if (/確認/.test(chosen.label)) {
+        clickedConfirm = true;
+      } else if (/送信/.test(chosen.label)) {
+        clickedSubmit = true;
+      }
+
+      console.log("[form-submit] click button:", chosen.label);
 
       await Promise.all([
         target.click().catch(() => {}),
@@ -367,6 +463,10 @@ export async function submitFormPlan(
     // 2回目: 「送信」ボタン優先（確定送信）
     await clickOnce(false).catch(() => {});
 
+    debug.hasActionButton = hasActionButton;
+    debug.clickedConfirm = clickedConfirm;
+    debug.clickedSubmit = clickedSubmit;
+
     const html = await page.content();
     const url = page.url();
 
@@ -375,6 +475,7 @@ export async function submitFormPlan(
       status: 200,
       url,
       html,
+      debug,
     };
   } catch (e) {
     console.error("[form-submit] error", e);
@@ -386,6 +487,7 @@ export async function submitFormPlan(
           status: 0,
           url: page.url(),
           html,
+          debug,
         };
       } catch {
         // ignore
@@ -396,6 +498,7 @@ export async function submitFormPlan(
       status: 0,
       url: targetUrl,
       html: "",
+      debug,
     };
   } finally {
     await browser.close();

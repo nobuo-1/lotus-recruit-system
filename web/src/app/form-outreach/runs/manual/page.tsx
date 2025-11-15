@@ -11,6 +11,7 @@ import {
   ArrowUpDown,
   ArrowUp,
   ArrowDown,
+  Bug,
 } from "lucide-react";
 
 const PAGE_SIZE = 10;
@@ -97,6 +98,14 @@ type TemplateRow = {
   created_at: string | null;
 };
 
+/** フォーム送信デバッグ用（API の debug フィールドをそのまま保持） */
+type FormDebugItem = {
+  prospectId: string;
+  companyName: string;
+  formUrl?: string | null;
+  data: any; // { canAccessForm, inputTotal, inputFilled, ... } を想定
+};
+
 function ellipsize(u?: string | null, max = 54) {
   const s = u || "";
   if (s.length <= max) return s;
@@ -121,6 +130,40 @@ function channelOf(row: AnyRow): "form" | "email" | "both" | "-" {
   return "-";
 }
 
+/** 〇/×/− のバッジ */
+function StatusBadge(props: {
+  value: boolean | null | undefined;
+  label?: string;
+}) {
+  const { value, label } = props;
+  if (value === true) {
+    return (
+      <span className="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-xs text-emerald-700 border border-emerald-200">
+        〇{label ? `：${label}` : ""}
+      </span>
+    );
+  }
+  if (value === false) {
+    return (
+      <span className="inline-flex items-center rounded-full bg-red-50 px-2 py-0.5 text-xs text-red-700 border border-red-200">
+        ×{label ? `：${label}` : ""}
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center rounded-full bg-neutral-50 px-2 py-0.5 text-xs text-neutral-500 border border-neutral-200">
+      －{label ? `：${label}` : ""}
+    </span>
+  );
+}
+
+/** N/M 完了 表示用 */
+function ratioText(done?: number | null, total?: number | null) {
+  if (total == null) return "―";
+  if (done == null) return `? / ${total}`;
+  return `${done} / ${total}`;
+}
+
 export default function ManualRunsPage() {
   const router = useRouter();
 
@@ -134,7 +177,7 @@ export default function ManualRunsPage() {
     "all" | "form" | "email" | "both"
   >("all");
 
-  // ★ 送信済みフラグ用フィルタ
+  // 送信済みフラグ用フィルタ
   const [emailSentFilter, setEmailSentFilter] = useState<
     "all" | "sent" | "unsent"
   >("all");
@@ -160,12 +203,17 @@ export default function ManualRunsPage() {
   const [unknownPlaceholder, setUnknownPlaceholder] =
     useState("メッセージをご確認ください");
 
-  // ★ 送信モード（メール or フォーム）
+  // 送信モード（メール or フォーム）
   const [sendMode, setSendMode] = useState<"email" | "form">("email");
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const allChecked =
     rows.length > 0 && rows.every((r) => selected.has((r as any).id));
+
+  // ★ フォーム送信デバッグ情報
+  const [debugItems, setDebugItems] = useState<FormDebugItem[]>([]);
+  const [showDebugPanel, setShowDebugPanel] = useState<boolean>(true);
+  const [lastRawResponse, setLastRawResponse] = useState<any>(null);
 
   useEffect(() => {
     (async () => {
@@ -178,7 +226,9 @@ export default function ManualRunsPage() {
         });
         const tj = await tr.json();
         if (tr.ok) setTemplates(tj.rows ?? []);
-      } catch {}
+      } catch {
+        // ignore
+      }
     })();
   }, []);
 
@@ -221,13 +271,14 @@ export default function ManualRunsPage() {
         });
       }
 
-      // ★ フラグフィルタ（メール/フォーム送信）
+      // メール送信フラグフィルタ
       if (emailSentFilter === "sent") {
         arr = arr.filter((r) => !!(r as any).email_sent);
       } else if (emailSentFilter === "unsent") {
         arr = arr.filter((r) => !(r as any).email_sent);
       }
 
+      // フォーム送信フラグフィルタ
       if (formSentFilter === "sent") {
         arr = arr.filter((r) => !!(r as any).form_sent);
       } else if (formSentFilter === "unsent") {
@@ -236,7 +287,7 @@ export default function ManualRunsPage() {
 
       setRows(arr);
       setTotal(Number(j.total || arr.length || 0));
-      // ★ 修正2: ページを跨いでも選択解除しないので、ここで setSelected() しない
+      // 選択状態は維持（ページ跨いでもそのまま）
     } catch (e: any) {
       setRows([]);
       setTotal(0);
@@ -290,11 +341,16 @@ export default function ManualRunsPage() {
   };
 
   const [executing, setExecuting] = useState(false);
+
   const handleExecute = async () => {
     setMsg("");
+    setDebugItems([]);
+    setLastRawResponse(null);
+
     if (!tenantId) return;
     if (selected.size === 0) return setMsg("対象の企業を選択してください。");
     if (!selectedTemplateId) return setMsg("テンプレートを選択してください。");
+
     setExecuting(true);
     try {
       const r = await fetch("/api/form-outreach/manual/send", {
@@ -304,7 +360,7 @@ export default function ManualRunsPage() {
           "x-tenant-id": tenantId,
         },
         body: JSON.stringify({
-          channel: sendMode, // ★ メール or フォーム
+          channel: sendMode, // メール or フォーム
           table: DATASET_TO_TABLE[dataset],
           template_id: selectedTemplateId,
           prospect_ids: Array.from(selected),
@@ -312,13 +368,42 @@ export default function ManualRunsPage() {
         }),
       });
       const j = await r.json();
+      setLastRawResponse(j);
+
       if (!r.ok) throw new Error(j?.error || "manual send failed");
+
       setMsg(
         `成功:${j.ok?.length || 0} / 待機:${j.queued?.length || 0} / 失敗:${
           j.failed?.length || 0
         }`
       );
-      router.push("/form-outreach/schedules");
+
+      // ★ フォーム営業モードのときだけデバッグ情報を拾う想定
+      if (sendMode === "form" && j.debug) {
+        const debugMap = j.debug as Record<string, any>;
+        const list: FormDebugItem[] = [];
+
+        for (const id of Array.from(selected)) {
+          const row = rows.find((r) => (r as any).id === id) as AnyRow | null;
+          const companyName = row ? pickCompanyName(row) : id;
+          const formUrl = (row as any)?.contact_form_url ?? null;
+          const data = debugMap?.[id] ?? null;
+
+          list.push({
+            prospectId: id,
+            companyName,
+            formUrl,
+            data,
+          });
+        }
+        setDebugItems(list);
+        setShowDebugPanel(true);
+      }
+
+      // メールモードのときは従来どおり実行ログへ遷移
+      if (sendMode === "email") {
+        router.push("/form-outreach/schedules");
+      }
     } catch (e: any) {
       setMsg(String(e?.message || e));
     } finally {
@@ -336,15 +421,14 @@ export default function ManualRunsPage() {
               メッセージ手動送信
             </h1>
             <p className="text-sm text-neutral-500">
-              3テーブル切替 / 検索 /
-              10件ページング。テンプレ選択→送信モード選択→「実行」で送信。
+              3テーブル切替 / 検索 / 10件ページング。
+              テンプレ選択→送信モード選択→「実行」で送信。
             </p>
             <p className="text-xs text-neutral-500 mt-1">
               テナント: <span className="font-mono">{tenantId ?? "-"}</span>
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            {/* ★ 修正4: フォーム営業トップ */}
             <Link
               href="/form-outreach"
               className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
@@ -356,6 +440,12 @@ export default function ManualRunsPage() {
               className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
             >
               待機リスト
+            </Link>
+            <Link
+              href="/form-outreach/schedules"
+              className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
+            >
+              実行ログ
             </Link>
             <Link
               href="/form-outreach/templates"
@@ -420,7 +510,7 @@ export default function ManualRunsPage() {
               </select>
             </div>
 
-            {/* ★ メール送信フラグ */}
+            {/* メール送信フラグ */}
             <div>
               <label className="block text-xs text-neutral-600 mb-1">
                 メール送信
@@ -440,7 +530,7 @@ export default function ManualRunsPage() {
               </select>
             </div>
 
-            {/* ★ フォーム送信フラグ */}
+            {/* フォーム送信フラグ */}
             <div>
               <label className="block text-xs text-neutral-600 mb-1">
                 フォーム送信
@@ -505,10 +595,10 @@ export default function ManualRunsPage() {
             テンプレートを選択
           </button>
           <span className="inline-flex items-center rounded-full border border-neutral-300 bg-white px-3 py-1 text-xs font-medium text-neutral-700">
-            {selectedTemplate?.name || "未選択"}
+            {selectedTemplate?.name || "テンプレ未選択"}
           </span>
 
-          {/* ★ 送信モード */}
+          {/* 送信モード */}
           <div className="ml-3 inline-flex items-center gap-4 text-sm">
             <label className="inline-flex items-center gap-2">
               <input
@@ -593,7 +683,7 @@ export default function ManualRunsPage() {
                       取得日時{sortIcon("created_at")}
                     </button>
                   </th>
-                  {/* ★ 送信状況列 */}
+                  {/* 送信状況列 */}
                   <th className="px-3 py-3 text-left">送信状況</th>
                   <th className="px-3 py-3 text-left">チャンネル</th>
                 </tr>
@@ -737,11 +827,224 @@ export default function ManualRunsPage() {
           </div>
         </section>
 
+        {/* メッセージ */}
         {msg && (
           <pre className="mt-3 whitespace-pre-wrap text-xs text-red-600">
             {msg}
           </pre>
         )}
+
+        {/* ★ フォーム送信デバッグパネル */}
+        <section className="mt-6 rounded-2xl border border-amber-200 bg-amber-50/60 px-4 py-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <div className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-amber-100 border border-amber-300">
+                <Bug className="h-4 w-4 text-amber-700" />
+              </div>
+              <div>
+                <div className="text-sm font-semibold text-amber-900">
+                  フォーム送信デバッグ
+                </div>
+                <p className="text-xs text-amber-800">
+                  「営業フォームで送る」で実行したときの各ステップ
+                  （アクセス・入力欄数・reCAPTCHA・送信成否など）を可視化します。
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => setShowDebugPanel((v) => !v)}
+              className="text-xs rounded-lg border border-amber-300 bg-amber-100 px-2 py-1 hover:bg-amber-200"
+            >
+              {showDebugPanel ? "折りたたむ" : "展開する"}
+            </button>
+          </div>
+
+          {showDebugPanel && (
+            <div className="mt-3 space-y-3">
+              {debugItems.length === 0 && (
+                <p className="text-xs text-amber-800">
+                  まだフォーム送信デバッグ情報はありません。
+                  <br />
+                  「営業フォームで送る」を選択して実行し、サーバー側の
+                  /api/form-outreach/manual/send がレスポンスに{" "}
+                  <code className="rounded bg-amber-100 px-1">debug</code>{" "}
+                  フィールド （各 prospect_id
+                  ごとにステータスを持つオブジェクト）を返すと、
+                  ここに各段階が表示されます。
+                </p>
+              )}
+
+              {debugItems.map((item) => {
+                const d = item.data || {};
+                // サーバー側のキー名に多少ゆらぎがあっても拾えるように冗長に読む
+                const canAccessForm =
+                  d.canAccessForm ?? d.form_accessible ?? d.page_ok;
+                const hasCaptcha =
+                  d.hasCaptcha ?? d.captchaDetected ?? d.captcha;
+                const hasActionButton =
+                  d.hasActionButton ??
+                  d.hasConfirmOrSubmit ??
+                  d.hasSubmitButton;
+                const clickedConfirm =
+                  d.clickedConfirm ?? d.confirmClicked ?? null;
+                const clickedSubmit =
+                  d.clickedSubmit ?? d.submitClicked ?? null;
+                const sentStatus =
+                  d.sentStatus ?? d.result ?? d.judge ?? d.status ?? null;
+
+                const inputTotal =
+                  d.inputTotal ?? d.inputs_total ?? d.input_count ?? null;
+                const inputFilled =
+                  d.inputFilled ?? d.inputs_filled ?? d.filled_inputs ?? null;
+
+                const selectTotal =
+                  d.selectTotal ?? d.selects_total ?? d.select_count ?? null;
+                const selectFilled =
+                  d.selectFilled ??
+                  d.selects_filled ??
+                  d.filled_selects ??
+                  null;
+
+                const checkboxTotal =
+                  d.checkboxTotal ??
+                  d.checkboxes_total ??
+                  d.checkbox_count ??
+                  null;
+                const checkboxFilled =
+                  d.checkboxFilled ??
+                  d.checkboxes_filled ??
+                  d.filled_checkboxes ??
+                  null;
+
+                let sentLabel: string;
+                if (sentStatus === "success") sentLabel = "送信成功";
+                else if (sentStatus === "failure") sentLabel = "送信失敗";
+                else if (sentStatus === "unknown") sentLabel = "判定不明";
+                else sentLabel = "―";
+
+                return (
+                  <div
+                    key={item.prospectId}
+                    className="rounded-xl border border-amber-200 bg-white/80 px-3 py-3"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <div className="text-sm font-semibold text-neutral-900">
+                          {item.companyName}
+                        </div>
+                        <div className="text-[10px] text-neutral-500">
+                          ID: {item.prospectId}
+                        </div>
+                        {item.formUrl && (
+                          <a
+                            href={item.formUrl}
+                            target="_blank"
+                            className="text-xs text-indigo-700 hover:underline break-all"
+                          >
+                            フォームURL: {item.formUrl}
+                          </a>
+                        )}
+                      </div>
+                      <div className="text-xs text-neutral-600">
+                        最終判定:{" "}
+                        <span className="font-semibold">{sentLabel}</span>
+                      </div>
+                    </div>
+
+                    <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
+                      {/* 左カラム：アクセス・reCAPTCHA・ボタン */}
+                      <div className="space-y-1.5 text-xs">
+                        <div>
+                          <span className="font-semibold">
+                            フォームにアクセスできたか：
+                          </span>{" "}
+                          <StatusBadge value={canAccessForm} />
+                        </div>
+                        <div>
+                          <span className="font-semibold">
+                            reCAPTCHA / hCaptcha 検知：
+                          </span>{" "}
+                          <StatusBadge value={hasCaptcha} />
+                        </div>
+                        <div>
+                          <span className="font-semibold">
+                            送信 / 確認ボタンがあったか：
+                          </span>{" "}
+                          <StatusBadge value={hasActionButton} />
+                        </div>
+                        <div>
+                          <span className="font-semibold">
+                            確認ボタンを押せたか：
+                          </span>{" "}
+                          <StatusBadge value={clickedConfirm} />
+                        </div>
+                        <div>
+                          <span className="font-semibold">
+                            送信ボタンを押せたか：
+                          </span>{" "}
+                          <StatusBadge value={clickedSubmit} />
+                        </div>
+                      </div>
+
+                      {/* 右カラム：入力欄カウント */}
+                      <div className="space-y-1.5 text-xs">
+                        <div>
+                          <span className="font-semibold">インプット欄：</span>{" "}
+                          {ratioText(inputFilled, inputTotal)}{" "}
+                          <span className="text-[10px] text-neutral-500">
+                            （入力済 / 総数）
+                          </span>
+                        </div>
+                        <div>
+                          <span className="font-semibold">
+                            選択（select）欄：
+                          </span>{" "}
+                          {ratioText(selectFilled, selectTotal)}{" "}
+                          <span className="text-[10px] text-neutral-500">
+                            （入力済 / 総数）
+                          </span>
+                        </div>
+                        <div>
+                          <span className="font-semibold">
+                            チェックボックス：
+                          </span>{" "}
+                          {ratioText(checkboxFilled, checkboxTotal)}{" "}
+                          <span className="text-[10px] text-neutral-500">
+                            （オンにできた数 / 総数）
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 生の debug JSON（必要なときだけ開く） */}
+                    {item.data && (
+                      <details className="mt-2 text-[11px] text-neutral-600">
+                        <summary className="cursor-pointer select-none">
+                          生のデバッグデータを表示
+                        </summary>
+                        <pre className="mt-1 max-h-48 overflow-auto rounded bg-neutral-900 px-2 py-1 text-[10px] text-neutral-50">
+                          {JSON.stringify(item.data, null, 2)}
+                        </pre>
+                      </details>
+                    )}
+                  </div>
+                );
+              })}
+
+              {/* 最後にレスポンス全体の JSON を確認できるようにする */}
+              {lastRawResponse && (
+                <details className="mt-2 text-[11px] text-neutral-700">
+                  <summary className="cursor-pointer select-none">
+                    /api/form-outreach/manual/send のレスポンス全体
+                  </summary>
+                  <pre className="mt-1 max-h-64 overflow-auto rounded bg-neutral-900 px-2 py-1 text-[10px] text-neutral-50">
+                    {JSON.stringify(lastRawResponse, null, 2)}
+                  </pre>
+                </details>
+              )}
+            </div>
+          )}
+        </section>
       </main>
 
       {/* テンプレ選択モーダル */}
