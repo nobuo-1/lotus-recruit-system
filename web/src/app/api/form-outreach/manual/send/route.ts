@@ -9,7 +9,6 @@ import {
   submitFormPlan,
   judgeFormSubmissionResult,
   detectCaptchaFromHtml,
-  collectFormDebugOnly, // ★ 追加
 } from "@/server/formOutreachFormSender";
 
 export const runtime = "nodejs";
@@ -137,6 +136,82 @@ function replaceAllKeys(src: string, dict: Record<string, string>) {
     out = out.replace(re, v);
   }
   return out;
+}
+
+/* ========= HTML だけからの粗いフォーム解析（デバッグ用） ========= */
+
+type HtmlFormRoughStats = {
+  formCount: number;
+  inputCount: number; // hidden / submit なども含む全 input
+  textInputCount: number; // hidden / submit / button / image / reset を除外した input
+  checkboxCount: number;
+  selectCount: number;
+  textareaCount: number;
+  hasSubmitLikeButton: boolean;
+};
+
+/**
+ * Playwright が動かなくても、HTML だけから
+ * - form タグの数
+ * - input/select/checkbox/textarea の数
+ * - 「送信っぽいボタン」がありそうか
+ * をざっくり取るヘルパー
+ */
+function analyzeFormHtml(html: string): HtmlFormRoughStats {
+  const lower = html.toLowerCase();
+
+  const formCount = (lower.match(/<form\b/g) || []).length;
+
+  const inputTagRegex = /<input\b[^>]*>/gi;
+  let inputMatch: RegExpExecArray | null;
+  let inputCount = 0;
+  let textInputCount = 0;
+  let checkboxCount = 0;
+
+  while ((inputMatch = inputTagRegex.exec(html)) !== null) {
+    inputCount++;
+    const tag = inputMatch[0];
+    const typeMatch = tag.match(/type\s*=\s*["']?([^"'\s>]+)/i);
+    const type = (typeMatch?.[1] || "").toLowerCase();
+
+    if (type === "checkbox") {
+      checkboxCount++;
+      continue;
+    }
+
+    // 通常のテキスト系 input
+    if (
+      type !== "hidden" &&
+      type !== "submit" &&
+      type !== "button" &&
+      type !== "image" &&
+      type !== "reset"
+    ) {
+      textInputCount++;
+    }
+  }
+
+  const selectCount = (lower.match(/<select\b[^>]*>/g) || []).length;
+  const textareaCount = (lower.match(/<textarea\b[^>]*>/g) || []).length;
+
+  // 「送信 / 確認 / submit / confirm」っぽいラベルがあり、
+  // かつボタン系タグがページに存在していれば true
+  const hasAnyButtonTag =
+    /<(button|input)\b[^>]*(type\s*=\s*["']?(submit|button)["']?)?[^>]*>/i.test(
+      lower
+    );
+  const hasSubmitWord =
+    /送信|確認|submit|confirm/.test(lower) && hasAnyButtonTag;
+
+  return {
+    formCount,
+    inputCount,
+    textInputCount,
+    checkboxCount,
+    selectCount,
+    textareaCount,
+    hasSubmitLikeButton: hasSubmitWord,
+  };
 }
 
 /* ========= Loaders (REST or SDK fallback) ========= */
@@ -535,6 +610,7 @@ export async function POST(req: NextRequest) {
           const debugForThis: any = {
             canAccessForm: false,
             hasCaptcha: null,
+            // Playwright / HTML 解析共通のメトリクス
             inputTotal: null,
             inputFilled: null,
             selectTotal: null,
@@ -544,6 +620,14 @@ export async function POST(req: NextRequest) {
             hasActionButton: null,
             clickedConfirm: null,
             clickedSubmit: null,
+            // HTML 粗解析用
+            htmlFormCount: null,
+            htmlInputCount: null,
+            htmlTextInputCount: null,
+            htmlSelectCount: null,
+            htmlCheckboxCount: null,
+            htmlTextareaCount: null,
+            htmlHasSubmitLikeButton: null,
             sentStatus: "unknown",
           };
 
@@ -594,68 +678,64 @@ export async function POST(req: NextRequest) {
             const hasCaptcha = detectCaptchaFromHtml(html);
             debugForThis.hasCaptcha = hasCaptcha;
 
-            // 2. ChatGPT にフォーム入力プランを作成させる（message にテンプレ本文を渡す）
-            let plan: Awaited<ReturnType<typeof planFormSubmission>> | null =
-              null;
-
+            // 1-2. HTML だけから粗いフォーム構造を解析（Playwright 以前のステップ）
             try {
-              plan = await planFormSubmission({
-                targetUrl: formUrl,
-                html,
-                message: messageText,
-                sender: {
-                  company:
-                    sender?.sender_company || senderCompany || brandCompany,
-                  postal_code: sender?.postal_code || "",
-                  prefecture: sender?.sender_prefecture || "",
-                  address: sender?.sender_address || "",
-                  last_name: sender?.sender_last_name || senderName || "",
-                  first_name: sender?.sender_first_name || "",
-                  email: sender?.from_email || "",
-                  phone: sender?.phone || "",
-                  website: sender?.website || "",
-                },
-                recipient: {
-                  company_name: recipientCompany,
-                  website,
-                  industry: recipientIndustry,
-                  prefecture: recipientPref,
-                },
-              });
+              const rough = analyzeFormHtml(html);
+
+              debugForThis.htmlFormCount = rough.formCount;
+              debugForThis.htmlInputCount = rough.inputCount;
+              debugForThis.htmlTextInputCount = rough.textInputCount;
+              debugForThis.htmlSelectCount = rough.selectCount;
+              debugForThis.htmlCheckboxCount = rough.checkboxCount;
+              debugForThis.htmlTextareaCount = rough.textareaCount;
+              debugForThis.htmlHasSubmitLikeButton = rough.hasSubmitLikeButton;
+
+              // もし後段の Playwright がコケても、最低限ここから数値が見えるようにする
+              if (debugForThis.inputTotal == null) {
+                debugForThis.inputTotal = rough.textInputCount;
+              }
+              if (debugForThis.selectTotal == null) {
+                debugForThis.selectTotal = rough.selectCount;
+              }
+              if (debugForThis.checkboxTotal == null) {
+                debugForThis.checkboxTotal = rough.checkboxCount;
+              }
+              if (debugForThis.hasActionButton == null) {
+                debugForThis.hasActionButton = rough.hasSubmitLikeButton;
+              }
             } catch (e) {
-              console.error("[manual-send/form] planFormSubmission error", e);
+              // 粗解析に失敗しても致命的ではないので握りつぶす
+              console.warn("[form-debug] analyzeFormHtml error", e);
             }
+
+            // 2. ChatGPT にフォーム入力プランを作成させる（message にテンプレ本文を渡す）
+            const plan = await planFormSubmission({
+              targetUrl: formUrl,
+              html,
+              message: messageText,
+              sender: {
+                company:
+                  sender?.sender_company || senderCompany || brandCompany,
+                postal_code: sender?.postal_code || "",
+                prefecture: sender?.sender_prefecture || "",
+                address: sender?.sender_address || "",
+                last_name: sender?.sender_last_name || senderName || "",
+                first_name: sender?.sender_first_name || "",
+                email: sender?.from_email || "",
+                phone: sender?.phone || "",
+                website: sender?.website || "",
+              },
+              recipient: {
+                company_name: recipientCompany,
+                website,
+                industry: recipientIndustry,
+                prefecture: recipientPref,
+              },
+            });
 
             // reCAPTCHA/hCaptcha があった or プラン生成失敗
             if (!plan) {
               debugForThis.sentStatus = hasCaptcha ? "captcha" : "plan_error";
-
-              // ★ プランが無くても、フォーム構造だけは解析してデバッグ値を埋める
-              try {
-                const debugOnly = await collectFormDebugOnly(formUrl);
-                debugForThis.canAccessForm =
-                  debugOnly.canAccessForm ?? debugForThis.canAccessForm;
-                debugForThis.inputTotal =
-                  debugOnly.inputTotal ?? debugForThis.inputTotal;
-                debugForThis.inputFilled =
-                  debugOnly.inputFilled ?? debugForThis.inputFilled;
-                debugForThis.selectTotal =
-                  debugOnly.selectTotal ?? debugForThis.selectTotal;
-                debugForThis.selectFilled =
-                  debugOnly.selectFilled ?? debugForThis.selectFilled;
-                debugForThis.checkboxTotal =
-                  debugOnly.checkboxTotal ?? debugForThis.checkboxTotal;
-                debugForThis.checkboxFilled =
-                  debugOnly.checkboxFilled ?? debugForThis.checkboxFilled;
-                debugForThis.hasActionButton =
-                  debugOnly.hasActionButton ?? debugForThis.hasActionButton;
-              } catch (e2) {
-                console.error(
-                  "[manual-send/form] collectFormDebugOnly(plan=null) error",
-                  e2
-                );
-              }
-
               debugByProspect[String(r.id)] = debugForThis;
 
               await enqueueWaitlist(tenantId, {
@@ -683,26 +763,35 @@ export async function POST(req: NextRequest) {
             const result = await submitFormPlan(formUrl, plan, cookieHeader);
 
             if (result.debug) {
-              const d = result.debug;
-              debugForThis.canAccessForm =
-                d.canAccessForm ?? debugForThis.canAccessForm;
-              debugForThis.inputTotal = d.inputTotal ?? debugForThis.inputTotal;
-              debugForThis.inputFilled =
-                d.inputFilled ?? debugForThis.inputFilled;
-              debugForThis.selectTotal =
-                d.selectTotal ?? debugForThis.selectTotal;
-              debugForThis.selectFilled =
-                d.selectFilled ?? debugForThis.selectFilled;
-              debugForThis.checkboxTotal =
-                d.checkboxTotal ?? debugForThis.checkboxTotal;
-              debugForThis.checkboxFilled =
-                d.checkboxFilled ?? debugForThis.checkboxFilled;
-              debugForThis.hasActionButton =
-                d.hasActionButton ?? debugForThis.hasActionButton;
-              debugForThis.clickedConfirm =
-                d.clickedConfirm ?? debugForThis.clickedConfirm;
-              debugForThis.clickedSubmit =
-                d.clickedSubmit ?? debugForThis.clickedSubmit;
+              const d = result.debug as any;
+              // Playwright 側で得られた情報で上書き（あれば）
+              if (typeof d.inputTotal === "number") {
+                debugForThis.inputTotal = d.inputTotal;
+              }
+              if (typeof d.inputFilled === "number") {
+                debugForThis.inputFilled = d.inputFilled;
+              }
+              if (typeof d.selectTotal === "number") {
+                debugForThis.selectTotal = d.selectTotal;
+              }
+              if (typeof d.selectFilled === "number") {
+                debugForThis.selectFilled = d.selectFilled;
+              }
+              if (typeof d.checkboxTotal === "number") {
+                debugForThis.checkboxTotal = d.checkboxTotal;
+              }
+              if (typeof d.checkboxFilled === "number") {
+                debugForThis.checkboxFilled = d.checkboxFilled;
+              }
+              if (typeof d.hasActionButton === "boolean") {
+                debugForThis.hasActionButton = d.hasActionButton;
+              }
+              if (typeof d.clickedConfirm === "boolean") {
+                debugForThis.clickedConfirm = d.clickedConfirm;
+              }
+              if (typeof d.clickedSubmit === "boolean") {
+                debugForThis.clickedSubmit = d.clickedSubmit;
+              }
             }
 
             // 4. 結果HTMLから「送信成功かどうか」を判定
@@ -743,34 +832,7 @@ export async function POST(req: NextRequest) {
               queued.push(String(r.id));
             }
           } catch (err) {
-            console.error("[manual-send/form] error", err);
             debugForThis.sentStatus = "error";
-
-            // ★ エラー時でもフォーム構造だけは解析しておく
-            try {
-              const debugOnly = await collectFormDebugOnly(formUrl);
-              debugForThis.canAccessForm =
-                debugOnly.canAccessForm ?? debugForThis.canAccessForm;
-              debugForThis.inputTotal =
-                debugOnly.inputTotal ?? debugForThis.inputTotal;
-              debugForThis.inputFilled =
-                debugOnly.inputFilled ?? debugForThis.inputFilled;
-              debugForThis.selectTotal =
-                debugOnly.selectTotal ?? debugForThis.selectTotal;
-              debugForThis.selectFilled =
-                debugOnly.selectFilled ?? debugForThis.selectFilled;
-              debugForThis.checkboxTotal =
-                debugOnly.checkboxTotal ?? debugForThis.checkboxTotal;
-              debugForThis.checkboxFilled =
-                debugOnly.checkboxFilled ?? debugForThis.checkboxFilled;
-              debugForThis.hasActionButton =
-                debugOnly.hasActionButton ?? debugForThis.hasActionButton;
-            } catch (e2) {
-              console.error(
-                "[manual-send/form] collectFormDebugOnly(error) error",
-                e2
-              );
-            }
 
             await enqueueWaitlist(tenantId, {
               table_name: String(table),
