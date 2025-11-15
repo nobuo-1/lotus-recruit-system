@@ -161,14 +161,11 @@ function buildSystemPrompt(): string {
 /**
  * OpenAI に HTML + 文脈を渡して「どのフィールドに何を入れるか」のプランを作らせる
  * - reCAPTCHA / hCaptcha があるページは null を返して自動送信不可にする
+ * - それ以外のエラー・パース失敗時は「空のプラン」を返し、Playwright の汎用オートフィルで送信を試みる
  */
 export async function planFormSubmission(
   ctx: FormSenderContext
 ): Promise<FormPlan | null> {
-  if (!process.env.OPENAI_API_KEY) {
-    throw new Error("OPENAI_API_KEY is not set");
-  }
-
   // HTML が長すぎるとトークンが厳しいので先頭だけを渡す
   const htmlSnippet =
     ctx.html.length > 20000 ? ctx.html.slice(0, 20000) : ctx.html;
@@ -181,6 +178,20 @@ export async function planFormSubmission(
     return null; // route.ts 側で waitlist 行き
   }
 
+  // ★ フォールバック用：OpenAI が使えなくてもフォーム送信までは進めるようにする
+  const fallbackPlan: FormPlan = {
+    method: "POST",
+    action: ctx.targetUrl,
+    fields: {}, // フィールド名は Playwright 側の総当たりオートフィルに任せる
+  };
+
+  if (!process.env.OPENAI_API_KEY) {
+    console.warn(
+      "[form-plan] OPENAI_API_KEY is not set, using fallback empty plan"
+    );
+    return fallbackPlan;
+  }
+
   const userPayload = {
     targetUrl: ctx.targetUrl,
     html: htmlSnippet,
@@ -191,51 +202,67 @@ export async function planFormSubmission(
 
   const system = buildSystemPrompt();
 
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: "gpt-4.1-mini",
-      temperature: 0,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: JSON.stringify(userPayload) },
-      ],
-    }),
-  });
-
-  if (!res.ok) {
-    throw new Error(`OpenAI API error: ${res.status} ${await res.text()}`);
-  }
-
-  const data = (await res.json()) as {
-    choices: { message?: { content?: string | null } }[];
-  };
-
-  const content = data.choices?.[0]?.message?.content ?? "";
-  if (!content) return null;
-
   try {
-    const parsed = JSON.parse(content) as FormPlan;
-    if (
-      !parsed ||
-      !parsed.action ||
-      !parsed.method ||
-      typeof parsed.fields !== "object"
-    ) {
-      return null;
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4.1-mini",
+        temperature: 0,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: JSON.stringify(userPayload) },
+        ],
+      }),
+    });
+
+    if (!res.ok) {
+      console.error(
+        "[form-plan] OpenAI API error:",
+        res.status,
+        await res.text()
+      );
+      return fallbackPlan;
     }
-    const methodUpper = parsed.method.toUpperCase() === "GET" ? "GET" : "POST";
-    return {
-      method: methodUpper,
-      action: parsed.action,
-      fields: parsed.fields || {},
+
+    const data = (await res.json()) as {
+      choices: { message?: { content?: string | null } }[];
     };
-  } catch {
-    return null;
+
+    const content = data.choices?.[0]?.message?.content ?? "";
+    if (!content) {
+      console.warn("[form-plan] empty content from OpenAI, use fallback plan");
+      return fallbackPlan;
+    }
+
+    try {
+      const parsed = JSON.parse(content) as FormPlan;
+      if (
+        !parsed ||
+        !parsed.action ||
+        !parsed.method ||
+        typeof parsed.fields !== "object"
+      ) {
+        console.warn("[form-plan] invalid JSON structure, use fallback plan");
+        return fallbackPlan;
+      }
+      const methodUpper =
+        parsed.method.toUpperCase() === "GET" ? "GET" : "POST";
+      return {
+        method: methodUpper,
+        action: parsed.action,
+        fields: parsed.fields || {},
+      };
+    } catch (e) {
+      console.warn("[form-plan] JSON.parse error, use fallback plan", e);
+      return fallbackPlan;
+    }
+  } catch (e) {
+    console.error("[form-plan] OpenAI call failed, use fallback plan", e);
+    return fallbackPlan;
   }
 }
 
@@ -277,13 +304,9 @@ async function collectHtmlStructureStats(page: Page): Promise<{
       htmlTextareaCount += await textareas.count();
 
       // text系
-      const textInputs = inputs
-        .filter({
-          hasNot: undefined,
-        })
-        .locator(
-          ':not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"])'
-        );
+      const textInputs = inputs.locator(
+        ':not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"])'
+      );
       htmlTextInputCount += await textInputs.count();
 
       // checkbox
@@ -327,6 +350,7 @@ async function collectHtmlStructureStats(page: Page): Promise<{
 /* =========================================================
  * 共通ヘルパー: 「送信対象フォーム」を 1 つ選ぶ（全フレームから）
  *  - 最初に見つかった「入力フィールドを最低1つ以上持つ form」を採用
+ *  - form タグが無い場合は body 全体を擬似フォームとして扱う
  * =======================================================*/
 
 async function findTargetForm(
@@ -572,14 +596,20 @@ async function autoFillForm(
       await el.evaluate((node: any) => String(node.tagName || "").toLowerCase())
     ).toLowerCase();
 
-    const nameAttr = (await el.getAttribute("name").catch(() => null)) ?? null;
-    const typeAttr = (await el.getAttribute("type").catch(() => null)) ?? null;
+    const nameAttr =
+      ((await el.getAttribute("name").catch(() => null)) as string | null) ??
+      null;
+    const typeAttr =
+      ((await el.getAttribute("type").catch(() => null)) as string | null) ??
+      null;
     const placeholderAttr =
-      (await el.getAttribute("placeholder").catch(() => null)) ?? null;
+      ((await el.getAttribute("placeholder").catch(() => null)) as
+        | string
+        | null) ?? null;
 
     const type = (typeAttr || "").toLowerCase();
 
-    // 既に plan で埋めたフィールドはスキップ（value が入っているならスキップ）
+    // 既に値が入っているフィールドはスキップ
     try {
       const isFilled = await el.evaluate((node: any) => {
         const tagName = (node.tagName || "").toLowerCase();
@@ -597,30 +627,28 @@ async function autoFillForm(
         }
         return !!(node as HTMLInputElement).value;
       });
-      if (isFilled) {
-        continue;
-      }
+      if (isFilled) continue;
     } catch {
-      // 取得失敗時はそのまま続行
+      // ignore
     }
 
     if (tag === "select") {
-      // select は、最初の value が空("")の場合は 2番目を、それ以外は1番目を選ぶ
       try {
-        const optionsText = await el.evaluate((node: any) => {
+        const options = (await el.evaluate((node: any) => {
           const sel = node as HTMLSelectElement;
           return Array.from(sel.options).map((o) => ({
             value: o.value,
             label: o.label,
           }));
-        });
-        const options = optionsText as { value: string; label: string }[];
+        })) as { value: string; label: string }[];
+
         let targetValue = "";
         if (options.length > 1 && options[0].value === "") {
           targetValue = options[1].value;
         } else if (options.length > 0) {
           targetValue = options[0].value;
         }
+
         if (targetValue) {
           await el.selectOption({ value: targetValue }).catch(() => {});
         }
@@ -670,7 +698,6 @@ async function autoFillForm(
           break;
         case "other":
         default:
-          // その他のフィールドはとりあえず「会社名 + 氏名」程度を入れる
           value = profile.company || profile.fullName || "お問い合わせ";
           break;
       }
@@ -686,6 +713,8 @@ async function autoFillForm(
           ? profile.phone
           : kind === "email"
           ? profile.email
+          : type === "tel"
+          ? profile.phone
           : profile.email;
       await el.fill(value).catch(() => {});
       continue;
@@ -705,9 +734,11 @@ async function autoFillForm(
 
 /* =========================================================
  * 共通ヘルパー: ボタンを 1 回押す（確認優先 or 送信優先）
+ *  - ★ Page を引数で受け取るようにし、Locator.page() を使わない
  * =======================================================*/
 
 async function clickOnceInForm(
+  page: Page,
   formRoot: Locator,
   preferConfirmFirst: boolean
 ): Promise<{
@@ -764,13 +795,13 @@ async function clickOnceInForm(
   const target = candidates.nth(chosen.idx);
   console.log("[form-submit] click button:", chosen.label);
 
-  const page = await target.page();
   await Promise.all([
     target.click().catch(() => {}),
     page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {}),
   ]);
 
-  await page.waitForTimeout(800).catch(() => {});
+  // SPA などで画面が切り替わる時間を少し待つ
+  await page.waitForTimeout(1200).catch(() => {});
   return {
     clicked: true,
     clickedConfirm: chosen.isConfirm,
@@ -848,6 +879,9 @@ export async function submitFormPlan(
       timeout: 30000,
     });
 
+    // SPA の初期レンダリング用に少し余分に待つ
+    await page.waitForTimeout(1500).catch(() => {});
+
     debug.canAccessForm = true;
 
     // 1. ページ全体の構造情報（全フレーム対象）
@@ -909,14 +943,14 @@ export async function submitFormPlan(
 
     try {
       // 1回目: 「確認」ボタン優先（確認画面へ）
-      const r1 = await clickOnceInForm(formRoot, true);
+      const r1 = await clickOnceInForm(page, formRoot, true);
       if (r1.clicked) {
         if (r1.clickedConfirm) clickedConfirmAny = true;
         if (r1.clickedSubmit) clickedSubmitAny = true;
       }
 
       // 2回目: 「送信」ボタン優先（確定送信）
-      const r2 = await clickOnceInForm(formRoot, false);
+      const r2 = await clickOnceInForm(page, formRoot, false);
       if (r2.clicked) {
         if (r2.clickedConfirm) clickedConfirmAny = true;
         if (r2.clickedSubmit) clickedSubmitAny = true;
@@ -1014,6 +1048,8 @@ export async function collectFormDebugOnly(
       waitUntil: "networkidle",
       timeout: 30000,
     });
+
+    await page.waitForTimeout(1500).catch(() => {});
 
     debug.canAccessForm = true;
 
