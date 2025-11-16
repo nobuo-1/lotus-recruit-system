@@ -1,5 +1,7 @@
 // web/src/server/formOutreachFormSender.ts
+
 import type { Page, Frame, Locator } from "playwright";
+
 // フォーム送信に使うコンテキスト
 export type FormSenderContext = {
   targetUrl: string;
@@ -350,9 +352,16 @@ async function collectHtmlStructureStats(page: Page): Promise<{
 
 /* =========================================================
  * 共通ヘルパー: 「送信対象フォーム」を 1 つ選ぶ（全フレームから）
- *  - ① 入力欄付き <form> を優先
- *  - ② それが無ければ、入力欄を持つ <body>（= 擬似フォーム）を採用
- *  - ③ どちらも無ければ null
+ *
+ * ここが重要ポイント。
+ *  - 以前は「 form 内に入力フィールドが最低 1 つあること」を条件にしていたが、
+ *    サイトによっては input が form 外にあったり、JS で後から差し込まれたりして
+ *    取りこぼしが出ていた。
+ *
+ * 方針:
+ *  1. まず全フレームから <form> を全部集めて、「お問い合わせっぽいもの」を優先的に選ぶ
+ *  2. <form> が 1 つも無い場合は、もっとも input / textarea / select が多いフレームの <body> を擬似フォーム扱い
+ *  3. それでもダメなら mainFrame の <body> を最後の手段として返す
  * =======================================================*/
 
 async function findTargetForm(
@@ -360,29 +369,82 @@ async function findTargetForm(
 ): Promise<{ frame: Frame; form: Locator } | null> {
   const frames = page.frames();
 
-  // 1. まずは「入力欄を1つ以上持つ <form>」を全フレームから探す
+  // 1. まずはすべての <form> 候補を集める
+  type Candidate = {
+    frame: Frame;
+    form: Locator;
+    score: number;
+  };
+  const candidates: Candidate[] = [];
+
   for (const frame of frames) {
     try {
       const root = frame.locator("body");
       const forms = root.locator("form");
       const formCount = await forms.count();
       for (let i = 0; i < formCount; i++) {
-        const form = forms.nth(i);
-        const controls = form.locator(
-          'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), textarea, select'
-        );
-        const cCount = await controls.count();
-        if (cCount > 0) {
-          return { frame, form };
+        const f = forms.nth(i);
+        let score = 0;
+
+        try {
+          const info = await f
+            .evaluate((node: any) => {
+              const el = node as HTMLFormElement;
+              return {
+                id: el.id || "",
+                name: (el as any).name || "",
+                action: el.getAttribute("action") || "",
+                text: (el.innerText || "").slice(0, 300),
+              };
+            })
+            .catch(() => null);
+
+          if (info) {
+            const text =
+              info.id + " " + info.name + " " + info.action + " " + info.text ||
+              "";
+            const lower = text.toLowerCase();
+
+            // お問い合わせっぽいキーワードには加点
+            if (
+              /contact|toiawase|お問い合わせ|お問合せ|問合せ|資料請求|お申し込み|お申込み/.test(
+                lower
+              )
+            ) {
+              score += 20;
+            }
+            // action に contact が入っていたらさらに加点
+            if (info.action && /contact|inquiry|toiawase/i.test(info.action)) {
+              score += 10;
+            }
+          }
+        } catch {
+          // 評価に失敗しても候補としては残す
         }
+
+        // スコアが 0 のフォームも「とりあえず候補」として扱う
+        candidates.push({ frame, form: f, score });
       }
     } catch {
       continue;
     }
   }
 
-  // 2. <form> 内に入力欄が無い場合でも、
-  //    「body 直下（またはその子孫）に入力欄があるフレーム」を擬似フォームとして扱う
+  // 1-2. お問い合わせらしいフォームがあればそれを使う
+  if (candidates.length > 0) {
+    candidates.sort((a, b) => b.score - a.score);
+    const chosen = candidates[0];
+    console.log(
+      "[findTargetForm] choose <form> candidate with score",
+      chosen.score
+    );
+    return { frame: chosen.frame, form: chosen.form };
+  }
+
+  // 2. <form> がない場合: 各フレームごとに「入力フィールド数」を数えて最大のものを選ぶ
+  let bestFrame: Frame | null = null;
+  let bestCount = 0;
+
   for (const frame of frames) {
     try {
       const root = frame.locator("body");
@@ -390,30 +452,33 @@ async function findTargetForm(
         'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), textarea, select'
       );
       const cCount = await controls.count();
-      if (cCount > 0) {
-        // このフレームの body 全体をフォームルートとして扱う
-        return { frame, form: root };
+      if (cCount > bestCount) {
+        bestCount = cCount;
+        bestFrame = frame;
       }
     } catch {
       continue;
     }
   }
 
-  // 3. 念のため mainFrame だけでも再チェック
-  try {
-    const mainFrame = page.mainFrame();
-    const root = mainFrame.locator("body");
-    const controls = root.locator(
-      'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), textarea, select'
+  if (bestFrame && bestCount > 0) {
+    console.log(
+      "[findTargetForm] no <form> tag, fallback to body of frame with controls:",
+      bestFrame.url()
     );
-    if ((await controls.count()) > 0) {
-      return { frame: mainFrame, form: root };
-    }
-  } catch {
-    // ignore
+    return { frame: bestFrame, form: bestFrame.locator("body") };
   }
 
-  return null;
+  // 3. それでも何もなければ mainFrame.body を最後の手段として返す
+  try {
+    const mainFrame = page.mainFrame();
+    console.log(
+      "[findTargetForm] fallback to mainFrame body (no forms / controls found)"
+    );
+    return { frame: mainFrame, form: mainFrame.locator("body") };
+  } catch {
+    return null;
+  }
 }
 
 /* =========================================================
@@ -804,7 +869,6 @@ async function clickOnceInFormOrPage(
       page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {}),
     ]);
 
-    // JS による画面書き換えを待つ
     await page.waitForTimeout(800).catch(() => {});
     return {
       clicked: true,
@@ -824,7 +888,6 @@ async function clickOnceInFormOrPage(
 
 /* =========================================================
  * 実際にフォーム送信を Playwright で行う（フレーム横断・オートフィル付き）
- *  - 「絶対に throw しない」で route 側に返す
  * =======================================================*/
 
 export async function submitFormPlan(
@@ -838,6 +901,12 @@ export async function submitFormPlan(
   html: string;
   debug: FormSubmitDebug;
 }> {
+  const pw = await import("playwright");
+  const chromium = (pw as any).chromium as typeof import("playwright").chromium;
+
+  const browser = await chromium.launch({ headless: true });
+  let page: import("playwright").Page | null = null;
+
   const debug: FormSubmitDebug = {
     canAccessForm: null,
     inputTotal: 0,
@@ -858,7 +927,7 @@ export async function submitFormPlan(
     htmlHasSubmitLikeButton: false,
   };
 
-  // 汎用的なデフォルトプロファイル（必要なら route 側で差し込みに寄せてもOK）
+  // 汎用的なデフォルトプロファイル（必要なら route 側でプラン生成時の sender を埋める運用も可）
   const profile: AutoFillProfile = {
     company: "株式会社LOTUS",
     fullName: "山田 太郎",
@@ -873,16 +942,7 @@ export async function submitFormPlan(
     message: "お問い合わせさせていただきます。こちらは自動送信テストです。",
   };
 
-  let browser: import("playwright").Browser | null = null;
-  let page: import("playwright").Page | null = null;
-
   try {
-    const pw = await import("playwright");
-    const chromium = (pw as any)
-      .chromium as typeof import("playwright").chromium;
-
-    browser = await chromium.launch({ headless: true });
-
     page = await browser.newPage({
       viewport: { width: 1280, height: 720 },
       userAgent:
@@ -895,8 +955,8 @@ export async function submitFormPlan(
       timeout: 30000,
     });
 
-    // JS による動的レンダリングを少し長めに待つ（フォーム埋め込み系対策）
-    await page.waitForTimeout(4000).catch(() => {});
+    // JS による動的レンダリングを待つ
+    await page.waitForTimeout(2000).catch(() => {});
 
     debug.canAccessForm = true;
 
@@ -915,7 +975,8 @@ export async function submitFormPlan(
     }
 
     // 2. 送信対象フォームを 1つ決定（iframe 内も含めて探索）
-    const target = await findTargetForm(page);
+    let target = await findTargetForm(page);
+
     if (!target) {
       console.log("[form-submit] no form or inputs found in any frame");
       const html = await page.content();
@@ -929,7 +990,7 @@ export async function submitFormPlan(
       };
     }
 
-    const { form } = target;
+    let { form } = target;
     const formRoot = form;
 
     // 3. フォームをオートフィル（plan.fields + 汎用オートフィル）
@@ -958,12 +1019,14 @@ export async function submitFormPlan(
     let clickedSubmitAny = false;
 
     try {
+      // 確認画面があるフォームを想定して 2 回まで試行
       const r1 = await clickOnceInFormOrPage(page, formRoot, true);
       if (r1.clicked) {
         if (r1.clickedConfirm) clickedConfirmAny = true;
         if (r1.clickedSubmit) clickedSubmitAny = true;
       }
 
+      // 画面遷移や DOM 変化を少し待つ
       await page.waitForTimeout(1200).catch(() => {});
 
       const r2 = await clickOnceInFormOrPage(page, formRoot, false);
@@ -1014,20 +1077,23 @@ export async function submitFormPlan(
       debug,
     };
   } finally {
-    if (browser) {
-      await browser.close().catch(() => {});
-    }
+    await browser.close();
   }
 }
 
 /* =========================================================
  * 送信はせず、フォーム構造だけを Playwright で解析するデバッグ専用関数
- *  - こちらも「絶対に throw しない」
  * =======================================================*/
 
 export async function collectFormDebugOnly(
   targetUrl: string
 ): Promise<FormSubmitDebug> {
+  const pw = await import("playwright");
+  const chromium = (pw as any).chromium as typeof import("playwright").chromium;
+
+  const browser = await chromium.launch({ headless: true });
+  let page: import("playwright").Page | null = null;
+
   const debug: FormSubmitDebug = {
     canAccessForm: null,
     inputTotal: 0,
@@ -1048,16 +1114,7 @@ export async function collectFormDebugOnly(
     htmlHasSubmitLikeButton: false,
   };
 
-  let browser: import("playwright").Browser | null = null;
-  let page: import("playwright").Page | null = null;
-
   try {
-    const pw = await import("playwright");
-    const chromium = (pw as any)
-      .chromium as typeof import("playwright").chromium;
-
-    browser = await chromium.launch({ headless: true });
-
     page = await browser.newPage({
       viewport: { width: 1280, height: 720 },
       userAgent:
@@ -1070,7 +1127,7 @@ export async function collectFormDebugOnly(
       timeout: 30000,
     });
 
-    await page.waitForTimeout(4000).catch(() => {});
+    await page.waitForTimeout(2000).catch(() => {});
 
     debug.canAccessForm = true;
 
@@ -1101,9 +1158,7 @@ export async function collectFormDebugOnly(
     debug.canAccessForm = debug.canAccessForm ?? false;
     return debug;
   } finally {
-    if (browser) {
-      await browser.close().catch(() => {});
-    }
+    await browser.close();
   }
 }
 
