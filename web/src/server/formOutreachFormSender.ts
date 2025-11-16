@@ -352,8 +352,9 @@ async function collectHtmlStructureStats(page: Page): Promise<{
 
 /* =========================================================
  * 共通ヘルパー: 「送信対象フォーム」を 1 つ選ぶ（全フレームから）
- *  - 最初に見つかった「入力フィールドを最低1つ以上持つ form」を採用
- *  - form が存在しない場合は body を擬似フォームとして扱う
+ *  - ① 入力欄付き <form> を優先
+ *  - ② それが無ければ、入力欄を持つ <body>（= 擬似フォーム）を採用
+ *  - ③ どちらも無ければ null
  * =======================================================*/
 
 async function findTargetForm(
@@ -361,6 +362,7 @@ async function findTargetForm(
 ): Promise<{ frame: Frame; form: Locator } | null> {
   const frames = page.frames();
 
+  // 1. まずは「入力欄を1つ以上持つ <form>」を全フレームから探す
   for (const frame of frames) {
     try {
       const root = frame.locator("body");
@@ -381,8 +383,27 @@ async function findTargetForm(
     }
   }
 
-  const mainFrame = page.mainFrame();
+  // 2. <form> 内に入力欄が無い場合でも、
+  //    「body 直下（またはその子孫）に入力欄があるフレーム」を擬似フォームとして扱う
+  for (const frame of frames) {
+    try {
+      const root = frame.locator("body");
+      const controls = root.locator(
+        'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), textarea, select'
+      );
+      const cCount = await controls.count();
+      if (cCount > 0) {
+        // このフレームの body 全体をフォームルートとして扱う
+        return { frame, form: root };
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  // 3. 念のため mainFrame だけでも再チェック（理論上は 2. で十分なはずだが保険）
   try {
+    const mainFrame = page.mainFrame();
     const root = mainFrame.locator("body");
     const controls = root.locator(
       'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), textarea, select'
@@ -785,6 +806,7 @@ async function clickOnceInFormOrPage(
       page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {}),
     ]);
 
+    // JS による画面書き換えを待つ
     await page.waitForTimeout(800).catch(() => {});
     return {
       clicked: true,
@@ -803,65 +825,7 @@ async function clickOnceInFormOrPage(
 }
 
 /* =========================================================
- * HTTP 経由で FormPlan を直接送信するヘルパー
- * =======================================================*/
-
-async function submitFormByHttp(
-  targetUrl: string,
-  plan: FormPlan,
-  cookieHeader?: string
-): Promise<{ url: string; html: string; status: number }> {
-  const method = plan.method.toUpperCase() === "GET" ? "GET" : "POST";
-
-  const actionUrl = new URL(
-    plan.action || targetUrl,
-    targetUrl // 相対パスなら targetUrl 基準で解決
-  );
-
-  const params = new URLSearchParams();
-  for (const [k, v] of Object.entries(plan.fields || {})) {
-    params.append(k, v ?? "");
-  }
-
-  let finalUrl = actionUrl.toString();
-  let body: string | undefined;
-
-  if (method === "GET") {
-    const qs = params.toString();
-    if (qs) {
-      const sep = actionUrl.search ? "&" : "?";
-      finalUrl = actionUrl.toString() + sep + qs;
-    }
-  } else {
-    body = params.toString();
-  }
-
-  const res = await fetch(finalUrl, {
-    method,
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) LotusRecruitBot/1.0 Chrome/120.0.0.0 Safari/537.36",
-      "Content-Type": "application/x-www-form-urlencoded",
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      Referer: targetUrl,
-      ...(cookieHeader ? { Cookie: cookieHeader } : {}),
-    },
-    body,
-  });
-
-  const html = await res.text();
-  const url = (res as any).url || finalUrl;
-
-  return {
-    url,
-    html,
-    status: res.status,
-  };
-}
-
-/* =========================================================
- * 実際にフォーム送信を Playwright / HTTP で行う
- *  - まず HTTP 送信 (FormPlan) を試し、ダメなら Playwright にフォールバック
+ * 実際にフォーム送信を Playwright で行う（フレーム横断・オートフィル付き）
  * =======================================================*/
 
 export async function submitFormPlan(
@@ -875,6 +839,12 @@ export async function submitFormPlan(
   html: string;
   debug: FormSubmitDebug;
 }> {
+  const pw = await import("playwright");
+  const chromium = (pw as any).chromium as typeof import("playwright").chromium;
+
+  const browser = await chromium.launch({ headless: true });
+  let page: import("playwright").Page | null = null;
+
   const debug: FormSubmitDebug = {
     canAccessForm: null,
     inputTotal: 0,
@@ -895,7 +865,7 @@ export async function submitFormPlan(
     htmlHasSubmitLikeButton: false,
   };
 
-  // 0. 汎用的なデフォルトプロファイル（Playwright オートフィル用）
+  // 汎用的なデフォルトプロファイル
   const profile: AutoFillProfile = {
     company: "株式会社LOTUS",
     fullName: "山田 太郎",
@@ -910,39 +880,6 @@ export async function submitFormPlan(
     message: "お問い合わせさせていただきます。こちらは自動送信テストです。",
   };
 
-  // 1. FormPlan がある場合は、まず HTTP で直接送信してみる
-  if (plan) {
-    try {
-      const httpRes = await submitFormByHttp(
-        targetUrl,
-        plan,
-        _cookieHeader ?? undefined
-      );
-      debug.canAccessForm = true;
-
-      return {
-        ok: httpRes.status >= 200 && httpRes.status < 400,
-        status: httpRes.status,
-        url: httpRes.url,
-        html: httpRes.html,
-        debug,
-      };
-    } catch (e) {
-      console.error(
-        "[form-submit] HTTP submit failed, fallback to Playwright:",
-        e
-      );
-      // ここで落ちても Playwright で再チャレンジする
-    }
-  }
-
-  // 2. Playwright でのブラウザ操作による送信（従来ロジック）
-  const pw = await import("playwright");
-  const chromium = (pw as any).chromium as typeof import("playwright").chromium;
-
-  const browser = await chromium.launch({ headless: true });
-  let page: import("playwright").Page | undefined;
-
   try {
     page = await browser.newPage({
       viewport: { width: 1280, height: 720 },
@@ -956,12 +893,12 @@ export async function submitFormPlan(
       timeout: 30000,
     });
 
-    // JS による動的レンダリングを待つ
-    await page.waitForTimeout(3000).catch(() => {});
+    // JS による動的レンダリングを少し長めに待つ（フォーム埋め込み系対策）
+    await page.waitForTimeout(4000).catch(() => {});
 
     debug.canAccessForm = true;
 
-    // 2-1. ページ全体の構造情報（全フレーム対象）
+    // 1. ページ全体の構造情報（全フレーム対象）
     try {
       const htmlStats = await collectHtmlStructureStats(page);
       debug.htmlFormCount = htmlStats.htmlFormCount;
@@ -975,7 +912,7 @@ export async function submitFormPlan(
       console.error("[form-submit] collectHtmlStructureStats error", e);
     }
 
-    // 2-2. 送信対象フォームを 1つ決定（iframe 内も含めて探索）
+    // 2. 送信対象フォームを 1つ決定（iframe 内も含めて探索）
     const target = await findTargetForm(page);
     if (!target) {
       console.log("[form-submit] no form or inputs found in any frame");
@@ -993,14 +930,14 @@ export async function submitFormPlan(
     const { form } = target;
     const formRoot = form;
 
-    // 2-3. フォームをオートフィル（plan.fields + 汎用オートフィル）
+    // 3. フォームをオートフィル（plan.fields + 汎用オートフィル）
     try {
       await autoFillForm(formRoot, plan, profile);
     } catch (e) {
       console.error("[form-submit] autoFillForm error", e);
     }
 
-    // 2-4. 入力後のフォーム内カウント
+    // 4. 入力後のフォーム内カウント
     try {
       const filledStats = await collectFilledStatsForForm(formRoot);
       debug.inputTotal = filledStats.inputTotal;
@@ -1014,7 +951,7 @@ export async function submitFormPlan(
       console.error("[form-submit] collectFilledStatsForForm error", e);
     }
 
-    // 2-5. ボタンクリック（確認 → 送信）
+    // 5. ボタンクリック（確認 → 送信）
     let clickedConfirmAny = false;
     let clickedSubmitAny = false;
 
@@ -1092,7 +1029,7 @@ export async function collectFormDebugOnly(
   const chromium = (pw as any).chromium as typeof import("playwright").chromium;
 
   const browser = await chromium.launch({ headless: true });
-  let page: import("playwright").Page | undefined;
+  let page: import("playwright").Page | null = null;
 
   const debug: FormSubmitDebug = {
     canAccessForm: null,
@@ -1127,7 +1064,7 @@ export async function collectFormDebugOnly(
       timeout: 30000,
     });
 
-    await page.waitForTimeout(3000).catch(() => {});
+    await page.waitForTimeout(4000).catch(() => {});
 
     debug.canAccessForm = true;
 
