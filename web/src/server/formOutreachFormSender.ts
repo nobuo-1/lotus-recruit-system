@@ -6,7 +6,7 @@ import type { Page, Frame, Locator } from "playwright";
 export type FormSenderContext = {
   targetUrl: string;
   html: string;
-  message: string; // ★ メッセージテンプレート本文（問い合わせ内容）
+  message: string; // 問い合わせ本文（テンプレートから作られた最終テキスト）
   sender: {
     company?: string | null;
     postal_code?: string | null;
@@ -80,197 +80,38 @@ export function detectCaptchaFromHtml(html: string): boolean {
   return hasCaptcha(snippet);
 }
 
-function buildSystemPrompt(): string {
-  return `
-あなたは「企業への問い合わせフォーム」を自動入力するアシスタントです。
-
-# 目的
-- HTML から問い合わせフォームを特定し、送信者情報・メッセージを使って、実際に送信できるようなフィールド名と値の一覧を作成します。
-
-# 入力データ
-- targetUrl: フォームページのURL
-- html: フォームを含むHTML
-- sender: 送信者の会社名・住所・氏名・メールアドレスなど
-- recipient: 相手企業の社名・サイトURL・業種・都道府県など
-- message: メッセージテンプレートの本文（問い合わせの本文として使う）
-
-# 必ず守ること
-- 出力フォーマットは **必ず JSON** だけにしてください。余計な文章を絶対に含めないでください。
-- JSON 形式:
-  {
-    "method": "GET" または "POST",
-    "action": "フォーム送信先URL（空または相対ならそのまま）",
-    "fields": {
-      "<input name>": "<送信する値>",
-      ...
-    }
-  }
-
-# フォームの選び方
-- 問い合わせ・資料請求・お仕事依頼・お問い合わせなど、営業連絡に関係するフォームを 1 つ選んでください。
-- <form> タグが複数ある場合は、もっともメインと思われる問い合わせフォームを選ぶこと。
-
-# 入力ルール
-- 「必須」や「*」が付いている項目はできるだけすべて埋める。
-- type="hidden" も含め、重要そうな hidden フィールドは可能な限り HTML から name / value を読み取り、そのまま fields に含める。
-- text, textarea:
-  - 問い合わせ内容やご質問の欄には、基本的に **message** をそのまま入力する。
-- select, radio, checkbox:
-  - ラベルや placeholder を見て、**もっとも自然な選択肢**を選ぶ。
-  - 「その他」がある場合、情報がはっきりしないときは「その他」を選ぶ。
-- プライバシーポリシーや利用規約の同意チェック:
-  - 「同意する」「同意しました」などのチェックを **必ずオン** にする。
-  - value が "1" や "on", "yes" などの場合はそれを使用する。
-- 確認用入力（メールアドレス再入力など）がある場合:
-  - 同じ値をもう一度 fields に含める。
-
-# 名前・住所などの扱い
-- 氏名が「姓」「名」に分かれている場合:
-  - sender.last_name, sender.first_name を使い分ける。
-- 「会社名」は sender.company を使う。
-- 「郵便番号」「都道府県」「住所」は sender.postal_code, sender.prefecture, sender.address を使う。
-
-# メールアドレス
-- メールアドレス欄には sender.email を設定する。
-- 確認欄があれば、同じメールアドレスを設定する。
-
-# 産業・業種など
-- 「業種」「業界」には recipient.industry を優先して設定する。
-
-# 出力例
-{
-  "method": "POST",
-  "action": "/contact/confirm",
-  "fields": {
-    "company": "株式会社LOTUS",
-    "last_name": "山田",
-    "first_name": "太郎",
-    "email": "sales@example.com",
-    "email_confirm": "sales@example.com",
-    "postal": "123-4567",
-    "pref": "大阪府",
-    "address": "大阪市北区...",
-    "agree_privacy": "1",
-    "inquiry": "message の内容をここに入れる",
-    "category": "その他"
-  }
-}
-`;
-}
-
 /**
- * OpenAI に HTML + 文脈を渡して「どのフィールドに何を入れるか」のプランを作らせる
- * - reCAPTCHA / hCaptcha があるページは null を返して自動送信不可にする
- * - どんなエラーでも throw せず、すべて null を返す
+ * ★ 役割をシンプルにする：
+ * - reCAPTCHA / hCaptcha が HTML に含まれているかだけを見る
+ * - CAPTCHA があれば null を返して「自動送信しない」というシグナルにする
+ * - それ以外は固定の Plan を返し、実際の入力内容は submitFormPlan() 側のロジックで決定する
+ *
+ * → これにより、AI による「フォーム構造解析＋入力値決定」をやめて、
+ *    フォーム選択・入力・クリックはすべて決定論的なコード側に寄せる。
  */
 export async function planFormSubmission(
   ctx: FormSenderContext
 ): Promise<FormPlan | null> {
-  // ★ APIキーが無くてもフォーム送信自体は試したいので、throw しない
-  if (!process.env.OPENAI_API_KEY) {
-    console.warn(
-      "[planFormSubmission] OPENAI_API_KEY is not set. Skip planning and fallback to heuristic only."
+  const htmlSnippet =
+    ctx.html.length > 20000 ? ctx.html.slice(0, 20000) : ctx.html;
+
+  // CAPTCHA があれば、この時点で自動送信対象外
+  if (hasCaptcha(htmlSnippet)) {
+    console.log(
+      "[planFormSubmission] captcha detected, skip auto submission:",
+      ctx.targetUrl
     );
     return null;
   }
 
-  // HTML が長すぎるとトークンが厳しいので先頭だけを渡す
-  const htmlSnippet =
-    ctx.html.length > 20000 ? ctx.html.slice(0, 20000) : ctx.html;
-
-  // reCAPTCHA / hCaptcha があれば、この時点で自動送信不可として null を返す
-  if (hasCaptcha(htmlSnippet)) {
-    console.log("[form-plan] captcha detected, skip auto submission:", {
-      url: ctx.targetUrl,
-    });
-    return null; // route.ts 側では CAPTCHA の場合のみ自動送信を完全スキップ
-  }
-
-  const userPayload = {
-    targetUrl: ctx.targetUrl,
-    html: htmlSnippet,
-    message: ctx.message,
-    sender: ctx.sender,
-    recipient: ctx.recipient,
+  // それ以外は固定の Plan を返す。
+  // method / action / fields の中身は実際の送信にはほぼ影響させず、
+  // submitFormPlan() でフォーム探索＆入力＆クリックを行う。
+  return {
+    method: "POST",
+    action: "",
+    fields: {},
   };
-
-  const system = buildSystemPrompt();
-
-  try {
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4.1-mini",
-        temperature: 0,
-        // ★ JSON オブジェクトだけを返させる
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: JSON.stringify(userPayload) },
-        ],
-      }),
-    });
-
-    if (!res.ok) {
-      console.warn(
-        "[planFormSubmission] OpenAI API error:",
-        res.status,
-        await res.text().catch(() => "")
-      );
-      return null;
-    }
-
-    const data = (await res.json()) as {
-      choices: { message?: { content?: string | null } }[];
-    };
-
-    const content = data.choices?.[0]?.message?.content ?? "";
-    if (!content) return null;
-
-    let parsed: FormPlan;
-    try {
-      parsed = JSON.parse(content) as FormPlan;
-    } catch (e) {
-      console.warn(
-        "[planFormSubmission] JSON parse error:",
-        e,
-        "content:",
-        content
-      );
-      return null;
-    }
-
-    if (
-      !parsed ||
-      !parsed.action ||
-      !parsed.method ||
-      typeof parsed.fields !== "object"
-    ) {
-      console.warn(
-        "[planFormSubmission] invalid plan structure received:",
-        parsed
-      );
-      return null;
-    }
-
-    const methodUpper =
-      parsed.method.toUpperCase() === "GET"
-        ? "GET"
-        : ("POST" as "GET" | "POST");
-
-    return {
-      method: methodUpper,
-      action: parsed.action,
-      fields: parsed.fields || {},
-    };
-  } catch (e) {
-    console.error("[planFormSubmission] unexpected error:", e);
-    return null;
-  }
 }
 
 /* =========================================================
@@ -352,16 +193,8 @@ async function collectHtmlStructureStats(page: Page): Promise<{
 
 /* =========================================================
  * 共通ヘルパー: 「送信対象フォーム」を 1 つ選ぶ（全フレームから）
- *
- * ここが重要ポイント。
- *  - 以前は「 form 内に入力フィールドが最低 1 つあること」を条件にしていたが、
- *    サイトによっては input が form 外にあったり、JS で後から差し込まれたりして
- *    取りこぼしが出ていた。
- *
- * 方針:
- *  1. まず全フレームから <form> を全部集めて、「お問い合わせっぽいもの」を優先的に選ぶ
- *  2. <form> が 1 つも無い場合は、もっとも input / textarea / select が多いフレームの <body> を擬似フォーム扱い
- *  3. それでもダメなら mainFrame の <body> を最後の手段として返す
+ *  - 最初に見つかった「入力フィールドを最低1つ以上持つ form」を採用
+ *  - form が存在しない場合は body を擬似フォームとして扱う
  * =======================================================*/
 
 async function findTargetForm(
@@ -369,116 +202,40 @@ async function findTargetForm(
 ): Promise<{ frame: Frame; form: Locator } | null> {
   const frames = page.frames();
 
-  // 1. まずはすべての <form> 候補を集める
-  type Candidate = {
-    frame: Frame;
-    form: Locator;
-    score: number;
-  };
-  const candidates: Candidate[] = [];
-
   for (const frame of frames) {
     try {
       const root = frame.locator("body");
       const forms = root.locator("form");
       const formCount = await forms.count();
       for (let i = 0; i < formCount; i++) {
-        const f = forms.nth(i);
-        let score = 0;
-
-        try {
-          const info = await f
-            .evaluate((node: any) => {
-              const el = node as HTMLFormElement;
-              return {
-                id: el.id || "",
-                name: (el as any).name || "",
-                action: el.getAttribute("action") || "",
-                text: (el.innerText || "").slice(0, 300),
-              };
-            })
-            .catch(() => null);
-
-          if (info) {
-            const text =
-              info.id + " " + info.name + " " + info.action + " " + info.text ||
-              "";
-            const lower = text.toLowerCase();
-
-            // お問い合わせっぽいキーワードには加点
-            if (
-              /contact|toiawase|お問い合わせ|お問合せ|問合せ|資料請求|お申し込み|お申込み/.test(
-                lower
-              )
-            ) {
-              score += 20;
-            }
-            // action に contact が入っていたらさらに加点
-            if (info.action && /contact|inquiry|toiawase/i.test(info.action)) {
-              score += 10;
-            }
-          }
-        } catch {
-          // 評価に失敗しても候補としては残す
+        const form = forms.nth(i);
+        const controls = form.locator(
+          'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), textarea, select'
+        );
+        const cCount = await controls.count();
+        if (cCount > 0) {
+          return { frame, form };
         }
-
-        // スコアが 0 のフォームも「とりあえず候補」として扱う
-        candidates.push({ frame, form: f, score });
       }
     } catch {
       continue;
     }
   }
 
-  // 1-2. お問い合わせらしいフォームがあればそれを使う
-  if (candidates.length > 0) {
-    candidates.sort((a, b) => b.score - a.score);
-    const chosen = candidates[0];
-    console.log(
-      "[findTargetForm] choose <form> candidate with score",
-      chosen.score
-    );
-    return { frame: chosen.frame, form: chosen.form };
-  }
-
-  // 2. <form> がない場合: 各フレームごとに「入力フィールド数」を数えて最大のものを選ぶ
-  let bestFrame: Frame | null = null;
-  let bestCount = 0;
-
-  for (const frame of frames) {
-    try {
-      const root = frame.locator("body");
-      const controls = root.locator(
-        'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), textarea, select'
-      );
-      const cCount = await controls.count();
-      if (cCount > bestCount) {
-        bestCount = cCount;
-        bestFrame = frame;
-      }
-    } catch {
-      continue;
-    }
-  }
-
-  if (bestFrame && bestCount > 0) {
-    console.log(
-      "[findTargetForm] no <form> tag, fallback to body of frame with controls:",
-      bestFrame.url()
-    );
-    return { frame: bestFrame, form: bestFrame.locator("body") };
-  }
-
-  // 3. それでも何もなければ mainFrame.body を最後の手段として返す
+  const mainFrame = page.mainFrame();
   try {
-    const mainFrame = page.mainFrame();
-    console.log(
-      "[findTargetForm] fallback to mainFrame body (no forms / controls found)"
+    const root = mainFrame.locator("body");
+    const controls = root.locator(
+      'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), textarea, select'
     );
-    return { frame: mainFrame, form: mainFrame.locator("body") };
+    if ((await controls.count()) > 0) {
+      return { frame: mainFrame, form: root };
+    }
   } catch {
-    return null;
+    // ignore
   }
+
+  return null;
 }
 
 /* =========================================================
@@ -888,6 +645,8 @@ async function clickOnceInFormOrPage(
 
 /* =========================================================
  * 実際にフォーム送信を Playwright で行う（フレーム横断・オートフィル付き）
+ *  - フォーム構造解析 & 入力 & クリックはすべて決定論的
+ *  - AI は一切使わない（AI は後段の judgeFormSubmissionResult のみ）
  * =======================================================*/
 
 export async function submitFormPlan(
@@ -905,10 +664,10 @@ export async function submitFormPlan(
   const chromium = (pw as any).chromium as typeof import("playwright").chromium;
 
   const browser = await chromium.launch({ headless: true });
-  let page: import("playwright").Page | null = null;
 
   const debug: FormSubmitDebug = {
     canAccessForm: null,
+    hasCaptcha: null,
     inputTotal: 0,
     inputFilled: 0,
     selectTotal: 0,
@@ -925,9 +684,10 @@ export async function submitFormPlan(
     htmlCheckboxCount: 0,
     htmlTextareaCount: 0,
     htmlHasSubmitLikeButton: false,
+    sentStatus: "unknown",
   };
 
-  // 汎用的なデフォルトプロファイル（必要なら route 側でプラン生成時の sender を埋める運用も可）
+  // 汎用プロファイル（決定論的な入力値）
   const profile: AutoFillProfile = {
     company: "株式会社LOTUS",
     fullName: "山田 太郎",
@@ -943,7 +703,7 @@ export async function submitFormPlan(
   };
 
   try {
-    page = await browser.newPage({
+    const page = await browser.newPage({
       viewport: { width: 1280, height: 720 },
       userAgent:
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) LotusRecruitBot/1.0 Chrome/120.0.0.0 Safari/537.36",
@@ -975,12 +735,12 @@ export async function submitFormPlan(
     }
 
     // 2. 送信対象フォームを 1つ決定（iframe 内も含めて探索）
-    let target = await findTargetForm(page);
-
+    const target = await findTargetForm(page);
     if (!target) {
       console.log("[form-submit] no form or inputs found in any frame");
       const html = await page.content();
       const url = page.url();
+      debug.sentStatus = "no_form";
       return {
         ok: false,
         status: 0,
@@ -990,7 +750,7 @@ export async function submitFormPlan(
       };
     }
 
-    let { form } = target;
+    const { form } = target;
     const formRoot = form;
 
     // 3. フォームをオートフィル（plan.fields + 汎用オートフィル）
@@ -1044,6 +804,9 @@ export async function submitFormPlan(
     const html = await page.content();
     const url = page.url();
 
+    // ここではまだ成功/失敗は判定しない（judgeFormSubmissionResult に委譲）
+    debug.sentStatus = "unknown";
+
     return {
       ok: true,
       status: 200,
@@ -1053,22 +816,8 @@ export async function submitFormPlan(
     };
   } catch (e) {
     console.error("[form-submit] error", e);
-    if (page) {
-      try {
-        const html = await page.content();
-        const url = page.url();
-        return {
-          ok: false,
-          status: 0,
-          url,
-          html,
-          debug,
-        };
-      } catch {
-        // ignore
-      }
-    }
     debug.canAccessForm = debug.canAccessForm ?? false;
+    debug.sentStatus = "error";
     return {
       ok: false,
       status: 0,
@@ -1083,6 +832,7 @@ export async function submitFormPlan(
 
 /* =========================================================
  * 送信はせず、フォーム構造だけを Playwright で解析するデバッグ専用関数
+ *  - こちらも AI は使わず、純粋に構造だけを見る
  * =======================================================*/
 
 export async function collectFormDebugOnly(
@@ -1092,10 +842,10 @@ export async function collectFormDebugOnly(
   const chromium = (pw as any).chromium as typeof import("playwright").chromium;
 
   const browser = await chromium.launch({ headless: true });
-  let page: import("playwright").Page | null = null;
 
   const debug: FormSubmitDebug = {
     canAccessForm: null,
+    hasCaptcha: null,
     inputTotal: 0,
     inputFilled: 0,
     selectTotal: 0,
@@ -1112,10 +862,11 @@ export async function collectFormDebugOnly(
     htmlCheckboxCount: 0,
     htmlTextareaCount: 0,
     htmlHasSubmitLikeButton: false,
+    sentStatus: "unknown",
   };
 
   try {
-    page = await browser.newPage({
+    const page = await browser.newPage({
       viewport: { width: 1280, height: 720 },
       userAgent:
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) LotusRecruitBot/1.0 Chrome/120.0.0.0 Safari/537.36",
@@ -1156,6 +907,7 @@ export async function collectFormDebugOnly(
   } catch (e) {
     console.error("[form-debug-only] error", e);
     debug.canAccessForm = debug.canAccessForm ?? false;
+    debug.sentStatus = "error";
     return debug;
   } finally {
     await browser.close();
@@ -1164,7 +916,8 @@ export async function collectFormDebugOnly(
 
 /* =========================================================
  * フォーム送信後のページが「送信成功」かどうかを判定する
- *  - キーワードの誤判定を減らしつつ、成功パターンも拡張
+ *  - まずはキーワードで判定（決定論的）
+ *  - 決めきれない場合のみ AI による最終判定（temperature:0 / JSON 固定）
  * =======================================================*/
 
 export async function judgeFormSubmissionResult(args: {
@@ -1175,7 +928,7 @@ export async function judgeFormSubmissionResult(args: {
     args.html.length > 20000 ? args.html.slice(0, 20000) : args.html;
   const lower = snippet.toLowerCase();
 
-  // 1. システマチックなキーワード判定
+  // 1. システマチックなキーワード判定（AI 不使用）
   const successKeywords = [
     "送信が完了しました",
     "送信が完了いたしました",
@@ -1183,6 +936,7 @@ export async function judgeFormSubmissionResult(args: {
     "送信が正常に完了",
     "お問い合わせを受け付けました",
     "お問い合わせを受け付け致しました",
+    "お問い合わせありがとうございました",
     "お問い合わせありがとうございます",
     "ありがとうございました",
     "送信いただきありがとうございました",
@@ -1213,7 +967,7 @@ export async function judgeFormSubmissionResult(args: {
     return "failure";
   }
 
-  // 2. ここから先は AI による最終判定
+  // 2. ここから先は AI による最終判定（「成功/失敗/不明」だけを決める）
   if (!process.env.OPENAI_API_KEY) {
     return "unknown";
   }
@@ -1262,6 +1016,7 @@ export async function judgeFormSubmissionResult(args: {
       body: JSON.stringify({
         model: "gpt-4.1-mini",
         temperature: 0,
+        response_format: { type: "json_object" },
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: JSON.stringify(user) },
@@ -1270,6 +1025,7 @@ export async function judgeFormSubmissionResult(args: {
     });
 
     if (!res.ok) {
+      // API 側が失敗したらキーワード判定にフォールバック
       return hasSuccess ? "success" : hasError ? "failure" : "unknown";
     }
 
@@ -1277,7 +1033,9 @@ export async function judgeFormSubmissionResult(args: {
       choices: { message?: { content?: string | null } }[];
     };
     const content = data.choices?.[0]?.message?.content ?? "";
-    if (!content) return "unknown";
+    if (!content) {
+      return hasSuccess ? "success" : hasError ? "failure" : "unknown";
+    }
 
     const parsed = JSON.parse(content) as {
       status?: "success" | "failure" | "unknown";
@@ -1288,7 +1046,9 @@ export async function judgeFormSubmissionResult(args: {
       return parsed.status;
     }
     return "unknown";
-  } catch {
+  } catch (e) {
+    console.error("[judgeFormSubmissionResult] error", e);
+    // 通信エラー時もキーワード判定にフォールバック
     return hasSuccess ? "success" : hasError ? "failure" : "unknown";
   }
 }
