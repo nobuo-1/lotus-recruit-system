@@ -401,7 +401,7 @@ async function findTargetForm(
     }
   }
 
-  // 3. 念のため mainFrame だけでも再チェック（理論上は 2. で十分なはずだが保険）
+  // 3. 念のため mainFrame だけでも再チェック
   try {
     const mainFrame = page.mainFrame();
     const root = mainFrame.locator("body");
@@ -826,6 +826,7 @@ async function clickOnceInFormOrPage(
 
 /* =========================================================
  * 実際にフォーム送信を Playwright で行う（フレーム横断・オートフィル付き）
+ *  - 「絶対に throw しない」で route 側に返す
  * =======================================================*/
 
 export async function submitFormPlan(
@@ -839,12 +840,6 @@ export async function submitFormPlan(
   html: string;
   debug: FormSubmitDebug;
 }> {
-  const pw = await import("playwright");
-  const chromium = (pw as any).chromium as typeof import("playwright").chromium;
-
-  const browser = await chromium.launch({ headless: true });
-  let page: import("playwright").Page | null = null;
-
   const debug: FormSubmitDebug = {
     canAccessForm: null,
     inputTotal: 0,
@@ -865,7 +860,7 @@ export async function submitFormPlan(
     htmlHasSubmitLikeButton: false,
   };
 
-  // 汎用的なデフォルトプロファイル
+  // 汎用的なデフォルトプロファイル（必要なら route 側で差し込みに寄せてもOK）
   const profile: AutoFillProfile = {
     company: "株式会社LOTUS",
     fullName: "山田 太郎",
@@ -880,7 +875,16 @@ export async function submitFormPlan(
     message: "お問い合わせさせていただきます。こちらは自動送信テストです。",
   };
 
+  let browser: import("playwright").Browser | null = null;
+  let page: import("playwright").Page | null = null;
+
   try {
+    const pw = await import("playwright");
+    const chromium = (pw as any)
+      .chromium as typeof import("playwright").chromium;
+
+    browser = await chromium.launch({ headless: true });
+
     page = await browser.newPage({
       viewport: { width: 1280, height: 720 },
       userAgent:
@@ -956,14 +960,12 @@ export async function submitFormPlan(
     let clickedSubmitAny = false;
 
     try {
-      // 確認画面があるフォームを想定して 2 回まで試行
       const r1 = await clickOnceInFormOrPage(page, formRoot, true);
       if (r1.clicked) {
         if (r1.clickedConfirm) clickedConfirmAny = true;
         if (r1.clickedSubmit) clickedSubmitAny = true;
       }
 
-      // 画面遷移や DOM 変化を少し待つ
       await page.waitForTimeout(1200).catch(() => {});
 
       const r2 = await clickOnceInFormOrPage(page, formRoot, false);
@@ -1014,23 +1016,20 @@ export async function submitFormPlan(
       debug,
     };
   } finally {
-    await browser.close();
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
   }
 }
 
 /* =========================================================
  * 送信はせず、フォーム構造だけを Playwright で解析するデバッグ専用関数
+ *  - こちらも「絶対に throw しない」
  * =======================================================*/
 
 export async function collectFormDebugOnly(
   targetUrl: string
 ): Promise<FormSubmitDebug> {
-  const pw = await import("playwright");
-  const chromium = (pw as any).chromium as typeof import("playwright").chromium;
-
-  const browser = await chromium.launch({ headless: true });
-  let page: import("playwright").Page | null = null;
-
   const debug: FormSubmitDebug = {
     canAccessForm: null,
     inputTotal: 0,
@@ -1051,7 +1050,16 @@ export async function collectFormDebugOnly(
     htmlHasSubmitLikeButton: false,
   };
 
+  let browser: import("playwright").Browser | null = null;
+  let page: import("playwright").Page | null = null;
+
   try {
+    const pw = await import("playwright");
+    const chromium = (pw as any)
+      .chromium as typeof import("playwright").chromium;
+
+    browser = await chromium.launch({ headless: true });
+
     page = await browser.newPage({
       viewport: { width: 1280, height: 720 },
       userAgent:
@@ -1095,7 +1103,9 @@ export async function collectFormDebugOnly(
     debug.canAccessForm = debug.canAccessForm ?? false;
     return debug;
   } finally {
-    await browser.close();
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
   }
 }
 
