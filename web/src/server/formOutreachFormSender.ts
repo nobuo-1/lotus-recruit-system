@@ -1,7 +1,5 @@
 // web/src/server/formOutreachFormSender.ts
-
 import type { Page, Frame, Locator } from "playwright";
-
 // フォーム送信に使うコンテキスト
 export type FormSenderContext = {
   targetUrl: string;
