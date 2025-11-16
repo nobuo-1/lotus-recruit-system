@@ -87,13 +87,6 @@ export default function EmailLanding() {
           </p>
         </div>
 
-        {/* 機能メニュー */}
-        <header className="mb-3">
-          <h2 className="text-2xl md:text-[24px] font-semibold text-neutral-900">
-            機能メニュー
-          </h2>
-        </header>
-
         <div className="mb-6 rounded-2xl border border-neutral-200 p-5">
           <div className="grid grid-cols-1 gap-7 md:grid-cols-3">
             {/* メール */}

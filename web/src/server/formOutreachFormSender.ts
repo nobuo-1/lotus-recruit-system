@@ -34,31 +34,27 @@ export type FormPlan = {
 
 // Playwright での送信時に収集するデバッグ情報
 export type FormSubmitDebug = {
-  // 実行時の動き
   canAccessForm: boolean | null;
   hasCaptcha?: boolean | null;
 
-  // 「実際に入力・クリックを試みたフォーム」に対するカウント
-  inputTotal: number;
-  inputFilled: number;
-  selectTotal: number;
-  selectFilled: number;
-  checkboxTotal: number;
-  checkboxFilled: number;
-  hasActionButton: boolean;
-  clickedConfirm: boolean;
-  clickedSubmit: boolean;
+  inputTotal: number | null;
+  inputFilled: number | null;
+  selectTotal: number | null;
+  selectFilled: number | null;
+  checkboxTotal: number | null;
+  checkboxFilled: number | null;
+  hasActionButton: boolean | null;
+  clickedConfirm: boolean | null;
+  clickedSubmit: boolean | null;
 
-  // 「ページ全体（全フレーム）」の生の構造情報
-  htmlFormCount: number;
-  htmlInputCount: number;
-  htmlTextInputCount: number;
-  htmlSelectCount: number;
-  htmlCheckboxCount: number;
-  htmlTextareaCount: number;
-  htmlHasSubmitLikeButton: boolean;
+  htmlFormCount: number | null;
+  htmlInputCount: number | null;
+  htmlTextInputCount: number | null;
+  htmlSelectCount: number | null;
+  htmlCheckboxCount: number | null;
+  htmlTextareaCount: number | null;
+  htmlHasSubmitLikeButton: boolean | null;
 
-  // route.ts 側で上書きされる最終ステータス用（unknown / success / failure / captcha / error など）
   sentStatus?: string;
 };
 
@@ -81,13 +77,8 @@ export function detectCaptchaFromHtml(html: string): boolean {
 }
 
 /**
- * ★ 役割をシンプルにする：
- * - reCAPTCHA / hCaptcha が HTML に含まれているかだけを見る
- * - CAPTCHA があれば null を返して「自動送信しない」というシグナルにする
- * - それ以外は固定の Plan を返し、実際の入力内容は submitFormPlan() 側のロジックで決定する
- *
- * → これにより、AI による「フォーム構造解析＋入力値決定」をやめて、
- *    フォーム選択・入力・クリックはすべて決定論的なコード側に寄せる。
+ * AI の役割は「送るか／送らないか」の最上流判断だけに限定
+ * → ここでは CAPTCHA の有無だけを見て、送信対象かどうかを決める
  */
 export async function planFormSubmission(
   ctx: FormSenderContext
@@ -104,9 +95,7 @@ export async function planFormSubmission(
     return null;
   }
 
-  // それ以外は固定の Plan を返す。
-  // method / action / fields の中身は実際の送信にはほぼ影響させず、
-  // submitFormPlan() でフォーム探索＆入力＆クリックを行う。
+  // それ以外は固定の Plan を返す。実際の入力・クリックは submitFormPlan 側で決定的に処理
   return {
     method: "POST",
     action: "",
@@ -193,8 +182,6 @@ async function collectHtmlStructureStats(page: Page): Promise<{
 
 /* =========================================================
  * 共通ヘルパー: 「送信対象フォーム」を 1 つ選ぶ（全フレームから）
- *  - 最初に見つかった「入力フィールドを最低1つ以上持つ form」を採用
- *  - form が存在しない場合は body を擬似フォームとして扱う
  * =======================================================*/
 
 async function findTargetForm(
@@ -202,6 +189,7 @@ async function findTargetForm(
 ): Promise<{ frame: Frame; form: Locator } | null> {
   const frames = page.frames();
 
+  // ① 各フレーム内の <form> を優先
   for (const frame of frames) {
     try {
       const root = frame.locator("body");
@@ -222,8 +210,9 @@ async function findTargetForm(
     }
   }
 
-  const mainFrame = page.mainFrame();
+  // ② <form> がなければ、メインフレームの body を疑似フォームとみなす
   try {
+    const mainFrame = page.mainFrame();
     const root = mainFrame.locator("body");
     const controls = root.locator(
       'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), textarea, select'
@@ -418,7 +407,7 @@ async function autoFillForm(
     await first.fill(value ?? "").catch(() => {});
   }
 
-  // 2. 残りを総当たりで埋める
+  // 2. 残りを総当たりで埋める（決定的ルール）
   const controls = formRoot.locator(
     'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), textarea, select'
   );
@@ -558,95 +547,99 @@ async function autoFillForm(
 }
 
 /* =========================================================
- * 共通ヘルパー: ボタンを 1 回押す（確認優先 or 送信優先）
- *  - formRoot 内にボタンが無ければページ全体からも探す
+ * 新ヘルパー: ページ全体から「確認 → 送信」の順にボタンを探して押す
+ *  - フォーム単位ではなく、毎回 page 全体の DOM をスキャン
+ *  - DOM 変化に強くする & エラーを局所化
  * =======================================================*/
 
-async function clickOnceInFormOrPage(
-  page: Page,
-  formRoot: Locator,
-  preferConfirmFirst: boolean
-): Promise<{
-  clicked: boolean;
+type ClickSequenceResult = {
   clickedConfirm: boolean;
   clickedSubmit: boolean;
-}> {
-  async function pickAndClick(base: Locator) {
-    const candidates = base.locator(
-      "button, input[type=submit], input[type=button], a[role='button'], a.button, a.btn"
-    );
-    const count = await candidates.count();
-    if (!count) {
-      return { clicked: false, clickedConfirm: false, clickedSubmit: false };
-    }
+};
 
-    type Cand = {
-      idx: number;
-      label: string;
-      priority: number;
-      isConfirm: boolean;
-      isSend: boolean;
-    };
-    const list: Cand[] = [];
+async function clickConfirmAndSubmitButtons(
+  page: Page
+): Promise<ClickSequenceResult> {
+  let clickedConfirm = false;
+  let clickedSubmit = false;
+
+  // 1. 確認ボタン（あれば 1 回押す）
+  try {
+    const body = page.locator("body");
+    const buttons = body.locator(
+      "button, input[type=submit], input[type=button], a[role=button], a.button, a.btn"
+    );
+    const count = await buttons.count();
+    const candidates: { idx: number; label: string }[] = [];
 
     for (let i = 0; i < count; i++) {
-      const el = candidates.nth(i);
+      const el = buttons.nth(i);
       const text = (await el.innerText().catch(() => "")) || "";
       const valueAttr = (await el.getAttribute("value")) || "";
       const label = (text || valueAttr).trim();
       if (!label) continue;
-
-      const isConfirm = /確認|confirm/i.test(label);
-      const isSend = /送信|submit/i.test(label);
-
-      let priority = 99;
-      if (preferConfirmFirst) {
-        if (isConfirm) priority = 1;
-        else if (isSend) priority = 2;
-      } else {
-        if (isSend) priority = 1;
-        else if (isConfirm) priority = 2;
+      if (/確認|confirm/i.test(label)) {
+        candidates.push({ idx: i, label });
       }
-      if (priority === 99) continue;
-
-      list.push({ idx: i, label, priority, isConfirm, isSend });
     }
 
-    if (!list.length) {
-      return { clicked: false, clickedConfirm: false, clickedSubmit: false };
+    if (candidates.length > 0) {
+      const target = buttons.nth(candidates[0].idx);
+      console.log("[form-submit] click confirm button:", candidates[0].label);
+      await Promise.all([
+        target.click().catch(() => {}),
+        page
+          .waitForLoadState("networkidle", { timeout: 15000 })
+          .catch(() => {}),
+      ]);
+      await page.waitForTimeout(1000).catch(() => {});
+      clickedConfirm = true;
     }
-
-    list.sort((a, b) => a.priority - b.priority);
-    const chosen = list[0];
-    const target = candidates.nth(chosen.idx);
-    console.log("[form-submit] click button:", chosen.label);
-
-    await Promise.all([
-      target.click().catch(() => {}),
-      page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {}),
-    ]);
-
-    await page.waitForTimeout(800).catch(() => {});
-    return {
-      clicked: true,
-      clickedConfirm: chosen.isConfirm,
-      clickedSubmit: chosen.isSend,
-    };
+  } catch (e) {
+    console.error("[clickConfirmAndSubmitButtons] confirm step error", e);
   }
 
-  // 1. まずはフォーム内で探す
-  const r1 = await pickAndClick(formRoot);
-  if (r1.clicked) return r1;
+  // 2. 送信ボタン（あれば 1 回押す）— 確認ボタン押下後に再スキャン
+  try {
+    const body = page.locator("body");
+    const buttons = body.locator(
+      "button, input[type=submit], input[type=button], a[role=button], a.button, a.btn"
+    );
+    const count = await buttons.count();
+    const candidates: { idx: number; label: string }[] = [];
 
-  // 2. 見つからなければページ全体から探す
-  const r2 = await pickAndClick(page.locator("body"));
-  return r2;
+    for (let i = 0; i < count; i++) {
+      const el = buttons.nth(i);
+      const text = (await el.innerText().catch(() => "")) || "";
+      const valueAttr = (await el.getAttribute("value")) || "";
+      const label = (text || valueAttr).trim();
+      if (!label) continue;
+      if (/送信|submit/i.test(label)) {
+        candidates.push({ idx: i, label });
+      }
+    }
+
+    if (candidates.length > 0) {
+      const target = buttons.nth(candidates[0].idx);
+      console.log("[form-submit] click submit button:", candidates[0].label);
+      await Promise.all([
+        target.click().catch(() => {}),
+        page
+          .waitForLoadState("networkidle", { timeout: 15000 })
+          .catch(() => {}),
+      ]);
+      await page.waitForTimeout(1000).catch(() => {});
+      clickedSubmit = true;
+    }
+  } catch (e) {
+    console.error("[clickConfirmAndSubmitButtons] submit step error", e);
+  }
+
+  return { clickedConfirm, clickedSubmit };
 }
 
 /* =========================================================
- * 実際にフォーム送信を Playwright で行う（フレーム横断・オートフィル付き）
- *  - フォーム構造解析 & 入力 & クリックはすべて決定論的
- *  - AI は一切使わない（AI は後段の judgeFormSubmissionResult のみ）
+ * 実際にフォーム送信を Playwright で行う
  * =======================================================*/
 
 export async function submitFormPlan(
@@ -668,26 +661,25 @@ export async function submitFormPlan(
   const debug: FormSubmitDebug = {
     canAccessForm: null,
     hasCaptcha: null,
-    inputTotal: 0,
-    inputFilled: 0,
-    selectTotal: 0,
-    selectFilled: 0,
-    checkboxTotal: 0,
-    checkboxFilled: 0,
-    hasActionButton: false,
-    clickedConfirm: false,
-    clickedSubmit: false,
-    htmlFormCount: 0,
-    htmlInputCount: 0,
-    htmlTextInputCount: 0,
-    htmlSelectCount: 0,
-    htmlCheckboxCount: 0,
-    htmlTextareaCount: 0,
-    htmlHasSubmitLikeButton: false,
+    inputTotal: null,
+    inputFilled: null,
+    selectTotal: null,
+    selectFilled: null,
+    checkboxTotal: null,
+    checkboxFilled: null,
+    hasActionButton: null,
+    clickedConfirm: null,
+    clickedSubmit: null,
+    htmlFormCount: null,
+    htmlInputCount: null,
+    htmlTextInputCount: null,
+    htmlSelectCount: null,
+    htmlCheckboxCount: null,
+    htmlTextareaCount: null,
+    htmlHasSubmitLikeButton: null,
     sentStatus: "unknown",
   };
 
-  // 汎用プロファイル（決定論的な入力値）
   const profile: AutoFillProfile = {
     company: "株式会社LOTUS",
     fullName: "山田 太郎",
@@ -715,12 +707,12 @@ export async function submitFormPlan(
       timeout: 30000,
     });
 
-    // JS による動的レンダリングを待つ
-    await page.waitForTimeout(2000).catch(() => {});
+    // JS による動的レンダリング待ち（少し長め）
+    await page.waitForTimeout(5000).catch(() => {});
 
     debug.canAccessForm = true;
 
-    // 1. ページ全体の構造情報（全フレーム対象）
+    // 1. ページ全体の構造情報
     try {
       const htmlStats = await collectHtmlStructureStats(page);
       debug.htmlFormCount = htmlStats.htmlFormCount;
@@ -734,7 +726,7 @@ export async function submitFormPlan(
       console.error("[form-submit] collectHtmlStructureStats error", e);
     }
 
-    // 2. 送信対象フォームを 1つ決定（iframe 内も含めて探索）
+    // 2. 送信対象フォームを 1つ決定
     const target = await findTargetForm(page);
     if (!target) {
       console.log("[form-submit] no form or inputs found in any frame");
@@ -753,7 +745,7 @@ export async function submitFormPlan(
     const { form } = target;
     const formRoot = form;
 
-    // 3. フォームをオートフィル（plan.fields + 汎用オートフィル）
+    // 3. フォームをオートフィル
     try {
       await autoFillForm(formRoot, plan, profile);
     } catch (e) {
@@ -774,28 +766,15 @@ export async function submitFormPlan(
       console.error("[form-submit] collectFilledStatsForForm error", e);
     }
 
-    // 5. ボタンクリック（確認 → 送信）
+    // 5. ボタンを押す（確認 → 送信）
     let clickedConfirmAny = false;
     let clickedSubmitAny = false;
-
     try {
-      // 確認画面があるフォームを想定して 2 回まで試行
-      const r1 = await clickOnceInFormOrPage(page, formRoot, true);
-      if (r1.clicked) {
-        if (r1.clickedConfirm) clickedConfirmAny = true;
-        if (r1.clickedSubmit) clickedSubmitAny = true;
-      }
-
-      // 画面遷移や DOM 変化を少し待つ
-      await page.waitForTimeout(1200).catch(() => {});
-
-      const r2 = await clickOnceInFormOrPage(page, formRoot, false);
-      if (r2.clicked) {
-        if (r2.clickedConfirm) clickedConfirmAny = true;
-        if (r2.clickedSubmit) clickedSubmitAny = true;
-      }
+      const clickResult = await clickConfirmAndSubmitButtons(page);
+      clickedConfirmAny = clickResult.clickedConfirm;
+      clickedSubmitAny = clickResult.clickedSubmit;
     } catch (e) {
-      console.error("[form-submit] clickOnceInFormOrPage error", e);
+      console.error("[form-submit] clickConfirmAndSubmitButtons error", e);
     }
 
     debug.clickedConfirm = clickedConfirmAny;
@@ -804,7 +783,6 @@ export async function submitFormPlan(
     const html = await page.content();
     const url = page.url();
 
-    // ここではまだ成功/失敗は判定しない（judgeFormSubmissionResult に委譲）
     debug.sentStatus = "unknown";
 
     return {
@@ -831,8 +809,7 @@ export async function submitFormPlan(
 }
 
 /* =========================================================
- * 送信はせず、フォーム構造だけを Playwright で解析するデバッグ専用関数
- *  - こちらも AI は使わず、純粋に構造だけを見る
+ * 送信せずにフォーム構造だけ取得するデバッグ用
  * =======================================================*/
 
 export async function collectFormDebugOnly(
@@ -846,22 +823,22 @@ export async function collectFormDebugOnly(
   const debug: FormSubmitDebug = {
     canAccessForm: null,
     hasCaptcha: null,
-    inputTotal: 0,
-    inputFilled: 0,
-    selectTotal: 0,
-    selectFilled: 0,
-    checkboxTotal: 0,
-    checkboxFilled: 0,
-    hasActionButton: false,
-    clickedConfirm: false,
-    clickedSubmit: false,
-    htmlFormCount: 0,
-    htmlInputCount: 0,
-    htmlTextInputCount: 0,
-    htmlSelectCount: 0,
-    htmlCheckboxCount: 0,
-    htmlTextareaCount: 0,
-    htmlHasSubmitLikeButton: false,
+    inputTotal: null,
+    inputFilled: null,
+    selectTotal: null,
+    selectFilled: null,
+    checkboxTotal: null,
+    checkboxFilled: null,
+    hasActionButton: null,
+    clickedConfirm: null,
+    clickedSubmit: null,
+    htmlFormCount: null,
+    htmlInputCount: null,
+    htmlTextInputCount: null,
+    htmlSelectCount: null,
+    htmlCheckboxCount: null,
+    htmlTextareaCount: null,
+    htmlHasSubmitLikeButton: null,
     sentStatus: "unknown",
   };
 
@@ -878,7 +855,7 @@ export async function collectFormDebugOnly(
       timeout: 30000,
     });
 
-    await page.waitForTimeout(2000).catch(() => {});
+    await page.waitForTimeout(5000).catch(() => {});
 
     debug.canAccessForm = true;
 
@@ -915,9 +892,9 @@ export async function collectFormDebugOnly(
 }
 
 /* =========================================================
- * フォーム送信後のページが「送信成功」かどうかを判定する
- *  - まずはキーワードで判定（決定論的）
- *  - 決めきれない場合のみ AI による最終判定（temperature:0 / JSON 固定）
+ * フォーム送信後ページの「成功/失敗/不明」判定
+ *  - まずはルールベース
+ *  - 決めきれないときだけ AI を 1 回呼ぶ（temperature:0）
  * =======================================================*/
 
 export async function judgeFormSubmissionResult(args: {
@@ -928,7 +905,6 @@ export async function judgeFormSubmissionResult(args: {
     args.html.length > 20000 ? args.html.slice(0, 20000) : args.html;
   const lower = snippet.toLowerCase();
 
-  // 1. システマチックなキーワード判定（AI 不使用）
   const successKeywords = [
     "送信が完了しました",
     "送信が完了いたしました",
@@ -967,7 +943,6 @@ export async function judgeFormSubmissionResult(args: {
     return "failure";
   }
 
-  // 2. ここから先は AI による最終判定（「成功/失敗/不明」だけを決める）
   if (!process.env.OPENAI_API_KEY) {
     return "unknown";
   }
@@ -994,7 +969,7 @@ export async function judgeFormSubmissionResult(args: {
 - 広告や外部サイトへのリダイレクトなど
 
 # 出力形式
-- 必ず JSON だけを返してください（余計な文字は一切禁止）
+- 必ず JSON だけを返してください
   {
     "status": "success" または "failure" または "unknown",
     "reason": "簡単な理由（日本語文字列）"
@@ -1025,7 +1000,6 @@ export async function judgeFormSubmissionResult(args: {
     });
 
     if (!res.ok) {
-      // API 側が失敗したらキーワード判定にフォールバック
       return hasSuccess ? "success" : hasError ? "failure" : "unknown";
     }
 
@@ -1048,7 +1022,6 @@ export async function judgeFormSubmissionResult(args: {
     return "unknown";
   } catch (e) {
     console.error("[judgeFormSubmissionResult] error", e);
-    // 通信エラー時もキーワード判定にフォールバック
     return hasSuccess ? "success" : hasError ? "failure" : "unknown";
   }
 }
