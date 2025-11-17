@@ -25,6 +25,17 @@ type ConflictRow = {
   detected_at: string | null;
 };
 
+type AutomationProgress = {
+  status?: "idle" | "running" | "completed" | "error";
+  label?: string | null;
+  last_run_started_at?: string | null;
+  last_run_finished_at?: string | null;
+  today_target_count?: number | null;
+  today_processed_count?: number | null;
+  queue_size?: number | null;
+  error_message?: string | null;
+};
+
 /** Cookie から tenant_id を取得（x-tenant-id 優先） */
 function getTenantIdFromCookie(): string | null {
   if (typeof document === "undefined") return null;
@@ -64,6 +75,10 @@ export default function AutomationPage() {
   const [draft, setDraft] = useState<Settings>(settings);
 
   const [conflicts, setConflicts] = useState<ConflictRow[]>([]);
+
+  // 自動実行の進捗
+  const [progress, setProgress] = useState<AutomationProgress | null>(null);
+  const [progressLoading, setProgressLoading] = useState(false);
 
   // ▼ テナントID取得
   useEffect(() => {
@@ -116,6 +131,59 @@ export default function AutomationPage() {
     };
 
     load();
+  }, [tenantId]);
+
+  // ▼ 自動実行の進捗ロード & ポーリング
+  useEffect(() => {
+    if (!tenantId) return;
+
+    let timer: ReturnType<typeof setInterval> | undefined;
+
+    const fetchProgress = async () => {
+      try {
+        setProgressLoading(true);
+        const res = await fetch("/api/form-outreach/automation/progress", {
+          headers: { "x-tenant-id": tenantId },
+          cache: "no-store",
+        });
+
+        if (!res.ok) {
+          // 404などの場合は進捗表示を非表示にするだけ
+          setProgress(null);
+          return;
+        }
+
+        const j = await res.json().catch(() => ({}));
+        const p = (j?.progress ?? j) as Partial<AutomationProgress>;
+
+        setProgress((prev) => ({
+          status: p.status ?? prev?.status ?? "idle",
+          label: p.label ?? prev?.label ?? null,
+          last_run_started_at:
+            p.last_run_started_at ?? prev?.last_run_started_at ?? null,
+          last_run_finished_at:
+            p.last_run_finished_at ?? prev?.last_run_finished_at ?? null,
+          today_target_count:
+            p.today_target_count ?? prev?.today_target_count ?? null,
+          today_processed_count:
+            p.today_processed_count ?? prev?.today_processed_count ?? null,
+          queue_size: p.queue_size ?? prev?.queue_size ?? null,
+          error_message: p.error_message ?? prev?.error_message ?? null,
+        }));
+      } catch (e) {
+        // 進捗のエラーは画面下部には出さず、コンソールに留める
+        console.error("Failed to load automation progress:", e);
+      } finally {
+        setProgressLoading(false);
+      }
+    };
+
+    fetchProgress();
+    timer = setInterval(fetchProgress, 10_000); // 10秒ごとに更新
+
+    return () => {
+      if (timer) clearInterval(timer);
+    };
   }, [tenantId]);
 
   const openModal = () => {
@@ -224,6 +292,36 @@ export default function AutomationPage() {
     return parts.join(" / ");
   }, [settings]);
 
+  const progressPercent = useMemo(() => {
+    if (
+      !progress ||
+      progress.today_target_count == null ||
+      progress.today_target_count <= 0 ||
+      progress.today_processed_count == null
+    ) {
+      return null;
+    }
+    const p =
+      (progress.today_processed_count / progress.today_target_count) * 100;
+    return Math.max(0, Math.min(100, Math.round(p)));
+  }, [progress]);
+
+  const statusLabel = useMemo(() => {
+    if (!progress || !progress.status) return "状態: 不明";
+    switch (progress.status) {
+      case "idle":
+        return "状態: 待機中";
+      case "running":
+        return "状態: 実行中";
+      case "completed":
+        return "状態: 完了";
+      case "error":
+        return "状態: エラー";
+      default:
+        return `状態: ${progress.status}`;
+    }
+  }, [progress]);
+
   return (
     <>
       <AppHeader showBack />
@@ -273,6 +371,110 @@ export default function AutomationPage() {
             </div>
           </div>
         </div>
+
+        {/* 自動実行の進捗カード */}
+        {tenantId && (
+          <section className="mb-4 rounded-2xl border border-neutral-200 bg-white p-4">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <div className="text-sm font-medium text-neutral-800">
+                  自動実行の進捗
+                </div>
+                <p className="mt-1 text-xs text-neutral-500">
+                  今日分の自動処理の進み具合を表示します。
+                </p>
+              </div>
+              {progressLoading && (
+                <span className="text-[11px] text-neutral-400">更新中…</span>
+              )}
+            </div>
+
+            {progress ? (
+              <div className="mt-3 space-y-3">
+                {/* 進捗バー */}
+                {progressPercent != null ? (
+                  <div>
+                    <div className="flex items-center justify-between text-xs text-neutral-600 mb-1">
+                      <span>{statusLabel}</span>
+                      <span>
+                        {progress.today_processed_count ?? 0} /{" "}
+                        {progress.today_target_count ?? 0} 件
+                      </span>
+                    </div>
+                    <div className="h-2 w-full overflow-hidden rounded-full bg-neutral-100">
+                      <div
+                        className="h-2 rounded-full bg-indigo-500 transition-[width]"
+                        style={{ width: `${progressPercent}%` }}
+                      />
+                    </div>
+                    <div className="mt-1 text-right text-[11px] text-neutral-500">
+                      {progressPercent}% 完了
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mt-2 text-xs text-neutral-500">
+                    {statusLabel}
+                    {progress.label ? `（${progress.label}）` : ""}
+                  </div>
+                )}
+
+                {/* 実行時間などの詳細 */}
+                <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-neutral-600 md:grid-cols-4">
+                  <div>
+                    <dt className="text-neutral-400">最終実行開始</dt>
+                    <dd>{formatTsJST(progress.last_run_started_at)}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-neutral-400">最終実行終了</dt>
+                    <dd>{formatTsJST(progress.last_run_finished_at)}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-neutral-400">今日の対象件数</dt>
+                    <dd>
+                      {progress.today_target_count != null
+                        ? `${progress.today_target_count} 件`
+                        : "-"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-neutral-400">今日の処理済み件数</dt>
+                    <dd>
+                      {progress.today_processed_count != null
+                        ? `${progress.today_processed_count} 件`
+                        : "-"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-neutral-400">キューの残り</dt>
+                    <dd>
+                      {progress.queue_size != null
+                        ? `${progress.queue_size} 件`
+                        : "-"}
+                    </dd>
+                  </div>
+                </dl>
+
+                {progress.error_message && (
+                  <div className="mt-2 rounded-lg border border-rose-100 bg-rose-50 px-3 py-2 text-[11px] text-rose-700">
+                    <div className="font-medium">エラー情報</div>
+                    <div className="mt-0.5 whitespace-pre-wrap">
+                      {progress.error_message}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="mt-3 text-xs text-neutral-500">
+                まだ自動実行の履歴がないか、進捗情報の取得ができていません。
+                バックエンド側で
+                <code className="mx-1 rounded bg-neutral-100 px-1 py-0.5 text-[10px]">
+                  /api/form-outreach/automation/progress
+                </code>
+                のエンドポイントを実装してください。
+              </div>
+            )}
+          </section>
+        )}
 
         {/* 被り候補 */}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden">
