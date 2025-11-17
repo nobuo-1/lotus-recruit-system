@@ -4,8 +4,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import AppHeader from "@/components/AppHeader";
 
-const TENANT_ID = "175b1a9d-3f85-482d-9323-68a44d214424";
-
 type Settings = {
   auto_company_list: boolean;
   auto_send_messages: boolean;
@@ -27,9 +25,25 @@ type ConflictRow = {
   detected_at: string | null;
 };
 
+/** Cookie から tenant_id を取得（x-tenant-id 優先） */
+function getTenantIdFromCookie(): string | null {
+  if (typeof document === "undefined") return null;
+  try {
+    // x-tenant-id / tenant_id の両方を許容
+    const m =
+      document.cookie.match(/(?:^|;\s*)x-tenant-id=([^;]+)/) ||
+      document.cookie.match(/(?:^|;\s*)tenant_id=([^;]+)/);
+    return m ? decodeURIComponent(m[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
 export default function AutomationPage() {
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(false);
+
+  const [tenantId, setTenantId] = useState<string | null>(null);
 
   // 画面表示用の「現在設定」
   const [settings, setSettings] = useState<Settings>({
@@ -51,12 +65,27 @@ export default function AutomationPage() {
 
   const [conflicts, setConflicts] = useState<ConflictRow[]>([]);
 
+  // ▼ テナントID取得
   useEffect(() => {
+    const tid = getTenantIdFromCookie();
+    if (!tid) {
+      setMsg(
+        "テナントID（UUID）が見つかりません。ログイン後、または x-tenant-id クッキー/ヘッダを設定してください。"
+      );
+      return;
+    }
+    setTenantId(tid);
+  }, []);
+
+  // ▼ 設定・被り候補のロード（テナントIDが取れてから）
+  useEffect(() => {
+    if (!tenantId) return;
+
     const load = async () => {
       setMsg("");
       try {
         const res = await fetch("/api/form-outreach/automation/settings", {
-          headers: { "x-tenant-id": TENANT_ID },
+          headers: { "x-tenant-id": tenantId },
           cache: "no-store",
         });
         if (res.ok) {
@@ -72,7 +101,7 @@ export default function AutomationPage() {
         }
 
         const rc = await fetch("/api/form-outreach/conflicts", {
-          headers: { "x-tenant-id": TENANT_ID },
+          headers: { "x-tenant-id": tenantId },
           cache: "no-store",
         });
         if (rc.ok) {
@@ -85,8 +114,9 @@ export default function AutomationPage() {
         setMsg(String(e?.message || e));
       }
     };
+
     load();
-  }, []);
+  }, [tenantId]);
 
   const openModal = () => {
     setDraft(settings); // 現在設定を引き継ぐ
@@ -96,6 +126,12 @@ export default function AutomationPage() {
 
   const save = async () => {
     if (loading) return;
+    if (!tenantId) {
+      setMsg(
+        "テナントIDが取得できませんでした。ログイン状態や x-tenant-id クッキーを確認してください。"
+      );
+      return;
+    }
     setLoading(true);
     setMsg("");
     try {
@@ -103,7 +139,7 @@ export default function AutomationPage() {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          "x-tenant-id": TENANT_ID,
+          "x-tenant-id": tenantId,
         },
         body: JSON.stringify({ settings: draft }),
       });
