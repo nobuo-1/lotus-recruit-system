@@ -40,7 +40,6 @@ type AutomationProgress = {
 function getTenantIdFromCookie(): string | null {
   if (typeof document === "undefined") return null;
   try {
-    // x-tenant-id / tenant_id の両方を許容
     const m =
       document.cookie.match(/(?:^|;\s*)x-tenant-id=([^;]+)/) ||
       document.cookie.match(/(?:^|;\s*)tenant_id=([^;]+)/);
@@ -171,7 +170,6 @@ export default function AutomationPage() {
           error_message: p.error_message ?? prev?.error_message ?? null,
         }));
       } catch (e) {
-        // 進捗のエラーは画面下部には出さず、コンソールに留める
         console.error("Failed to load automation progress:", e);
       } finally {
         setProgressLoading(false);
@@ -394,7 +392,7 @@ export default function AutomationPage() {
                 {/* 進捗バー */}
                 {progressPercent != null ? (
                   <div>
-                    <div className="flex items-center justify-between text-xs text-neutral-600 mb-1">
+                    <div className="mb-1 flex items-center justify-between text-xs text-neutral-600">
                       <span>{statusLabel}</span>
                       <span>
                         {progress.today_processed_count ?? 0} /{" "}
@@ -477,8 +475,8 @@ export default function AutomationPage() {
         )}
 
         {/* 被り候補 */}
-        <section className="rounded-2xl border border-neutral-200 overflow-hidden">
-          <div className="px-4 py-3 border-b border-neutral-200 bg-neutral-50 text-sm font-medium text-neutral-800">
+        <section className="overflow-hidden rounded-2xl border border-neutral-200">
+          <div className="border-b border-neutral-200 bg-neutral-50 px-4 py-3 text-sm font-medium text-neutral-800">
             クライアントと被っている可能性のある企業
           </div>
           <table className="min-w-[900px] w-full text-sm">
@@ -500,7 +498,7 @@ export default function AutomationPage() {
                       <a
                         href={c.website}
                         target="_blank"
-                        className="text-indigo-700 hover:underline break-all"
+                        className="break-all text-indigo-700 hover:underline"
                       >
                         {c.website}
                       </a>
@@ -852,32 +850,28 @@ function weekdayLabel(d?: number) {
   return d && map[d] ? map[d] : "毎週月曜";
 }
 
-// JST(日本時間)で YYYY-MM-DD HH:MM 表示
+// JST(日本時間)で「2025年11月17日 14:18」形式で表示
 function formatTsJST(ts?: string | null) {
   if (!ts) return "-";
   const d = new Date(ts);
-  const y = new Intl.DateTimeFormat("ja-JP", {
+
+  const opt: Intl.DateTimeFormatOptions = {
     timeZone: "Asia/Tokyo",
     year: "numeric",
-  }).format(d);
-  const m = new Intl.DateTimeFormat("ja-JP", {
-    timeZone: "Asia/Tokyo",
     month: "2-digit",
-  }).format(d);
-  const day = new Intl.DateTimeFormat("ja-JP", {
-    timeZone: "Asia/Tokyo",
     day: "2-digit",
-  }).format(d);
-  const hh = new Intl.DateTimeFormat("ja-JP", {
-    timeZone: "Asia/Tokyo",
     hour: "2-digit",
-    hour12: false,
-  }).format(d);
-  const mm = new Intl.DateTimeFormat("ja-JP", {
-    timeZone: "Asia/Tokyo",
     minute: "2-digit",
-  }).format(d);
-  return `${y}-${m}-${day} ${hh}:${mm}`;
+    hour12: false,
+  };
+
+  // 例: "2025/11/17 14:03"
+  const formatted = d.toLocaleString("ja-JP", opt);
+  const [ymd, hm] = formatted.split(" ");
+  if (!ymd || !hm) return formatted;
+
+  const [y, m, day] = ymd.split("/");
+  return `${y}年${m}月${day}日 ${hm}`;
 }
 
 function clampInt(v: string, min: number, max: number) {

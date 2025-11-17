@@ -1,29 +1,95 @@
 // web/src/app/api/form-outreach/automation/run-company-list/route.ts
-export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 300;
+export const runtime = "nodejs";
+export const maxDuration = 60;
 
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
+/** ========= ENV ========= */
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 const SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
-const APP_URL =
-  process.env.APP_URL ||
-  process.env.NEXT_PUBLIC_APP_URL ||
-  "http://127.0.0.1:3000";
 
-const CRON_SECRET = process.env.FORM_OUTREACH_CRON_SECRET || "";
+/** ========= Types ========= */
+type Settings = {
+  auto_company_list: boolean;
+  company_schedule: "weekly" | "monthly";
+  company_weekday?: number; // 1=月〜7=日
+  company_month_day?: number; // 1〜31
+  company_limit?: number;
+};
 
-/** ===== Supabase admin ===== */
-function getAdmin() {
-  if (!SUPABASE_URL)
-    throw new Error("NEXT_PUBLIC_SUPABASE_URL is missing in env");
+type AutoRunRow = {
+  id: string;
+  tenant_id: string;
+  kind: string | null;
+  status: string | null;
+  target_count: number | null;
+  started_at: string | null;
+  finished_at: string | null;
+  last_message: string | null;
+  new_prospects: number | null;
+  new_rejected: number | null;
+  new_similar_sites: number | null;
+  last_progress_at: string | null;
+  error_text: string | null;
+  meta: any;
+};
 
+/** ========= Utils ========= */
+
+// UUID 簡易チェック
+function okUuid(s: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    String(s || "").trim()
+  );
+}
+
+// JST 現在時刻
+function nowJST(): Date {
+  return new Date(
+    new Date().toLocaleString("en-US", { timeZone: "Asia/Tokyo" })
+  );
+}
+
+// 週の開始(月曜0:00)〜次週(月曜0:00)
+function startOfThisWeekJST(base?: Date): Date {
+  const d = base ? new Date(base) : nowJST();
+  const day = d.getDay(); // 0(日)〜6(土)
+  const diff = day === 0 ? -6 : 1 - day; // 月曜を週頭とする
+  const monday = new Date(d);
+  monday.setDate(d.getDate() + diff);
+  monday.setHours(0, 0, 0, 0);
+  return monday;
+}
+function startOfNextWeekJST(base?: Date): Date {
+  const monday = startOfThisWeekJST(base);
+  const next = new Date(monday);
+  next.setDate(monday.getDate() + 7);
+  return next;
+}
+
+// 月の開始(1日0:00)〜翌月(1日0:00)
+function startOfThisMonthJST(base?: Date): Date {
+  const d = base ? new Date(base) : nowJST();
+  const m0 = new Date(d.getFullYear(), d.getMonth(), 1);
+  m0.setHours(0, 0, 0, 0);
+  return m0;
+}
+function startOfNextMonthJST(base?: Date): Date {
+  const d = base ? new Date(base) : nowJST();
+  const m0 = new Date(d.getFullYear(), d.getMonth() + 1, 1);
+  m0.setHours(0, 0, 0, 0);
+  return m0;
+}
+
+/** ========= Supabase ========= */
+function getAdmin(): { sb: any; usingServiceRole: boolean } {
+  if (!SUPABASE_URL) throw new Error("NEXT_PUBLIC_SUPABASE_URL is missing");
   if (SERVICE_ROLE) {
     return {
-      sb: createClient(SUPABASE_URL, SERVICE_ROLE),
+      sb: createClient(SUPABASE_URL, SERVICE_ROLE) as any,
       usingServiceRole: true,
     };
   }
@@ -31,329 +97,376 @@ function getAdmin() {
     throw new Error(
       "SUPABASE_SERVICE_ROLE_KEY / NEXT_PUBLIC_SUPABASE_ANON_KEY missing"
     );
-  return { sb: createClient(SUPABASE_URL, ANON_KEY), usingServiceRole: false };
+  return {
+    sb: createClient(SUPABASE_URL, ANON_KEY) as any,
+    usingServiceRole: false,
+  };
 }
 
-/** ===== JST 系 ===== */
-function nowJST() {
-  const now = new Date();
-  const jstMs = now.getTime() + 9 * 60 * 60 * 1000;
-  return new Date(jstMs);
-}
-
-// 月曜=1, …, 日曜=7
-function weekdayJST(d: Date): number {
-  const w = d.getUTCDay(); // 0..6 (日曜=0)
-  return w === 0 ? 7 : w;
-}
-
-/** ===== 汎用ヘルパ ===== */
-async function postJsonWithRetry(
-  url: string,
-  body: any,
-  headers: Record<string, string>
-) {
-  const maxRetry = 3;
-  let lastErr: any = null;
-
-  const isTransient = (s: number) => [408, 429, 500, 502, 503, 504].includes(s);
-
-  for (let i = 0; i <= maxRetry; i++) {
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: {
-          ...headers,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify(body),
-      });
-      const txt = await res.text();
-      const j = txt ? JSON.parse(txt) : {};
-      if (!res.ok && isTransient(res.status)) {
-        lastErr = new Error(j?.error || `HTTP ${res.status}`);
-        await new Promise((r) => setTimeout(r, 300 * (i + 1)));
-        continue;
-      }
-      if (!res.ok) {
-        throw new Error(j?.error || `HTTP ${res.status}`);
-      }
-      return j;
-    } catch (e: any) {
-      lastErr = e;
-      await new Promise((r) => setTimeout(r, 300 * (i + 1)));
-    }
-  }
-  throw lastErr || new Error("request failed");
-}
-
-async function countSince(
-  sb: any,
-  table: string,
-  tenantId: string,
-  sinceIso: string
-): Promise<number> {
-  const { count, error } = await sb
-    .from(table)
-    .select("*", { count: "exact", head: true })
-    .eq("tenant_id", tenantId)
-    .gte("created_at", sinceIso);
-  if (error) throw new Error(error.message);
-  return count || 0;
-}
-
-async function fetchFilters(tenantId: string): Promise<any> {
+/** ========= 設定ロード（既存 settings API を利用） ========= */
+async function loadAutomationSettings(
+  req: Request,
+  tenantId: string
+): Promise<Settings | null> {
   try {
-    const res = await fetch(`${APP_URL}/api/form-outreach/settings/filters`, {
-      method: "GET",
-      headers: { "x-tenant-id": tenantId },
+    const u = new URL(req.url);
+    const base =
+      process.env.APP_URL ||
+      `${u.protocol}//${u.host}` ||
+      "http://localhost:3000";
+
+    const res = await fetch(`${base}/api/form-outreach/automation/settings`, {
+      headers: {
+        "x-tenant-id": tenantId,
+      },
       cache: "no-store",
     });
+
+    if (!res.ok) return null;
+
     const j = await res.json().catch(() => ({}));
-    return j?.filters ?? {};
-  } catch {
-    return {};
-  }
-}
-
-/** ===== スケジュール判定 ===== */
-function isDueWeekly(
-  weekdaySetting: number,
-  lastStartedAt?: string | null
-): boolean {
-  const now = nowJST();
-  const todayW = weekdayJST(now);
-  if (todayW !== weekdaySetting) return false;
-  if (!lastStartedAt) return true;
-
-  const last = new Date(lastStartedAt).getTime();
-  const threshold = now.getTime() - 20 * 60 * 60 * 1000; // 20時間以上前なら再実行可
-  return last < threshold;
-}
-
-function isDueMonthly(
-  monthDaySetting: number,
-  lastStartedAt?: string | null
-): boolean {
-  const now = nowJST();
-  if (now.getUTCDate() !== monthDaySetting) return false;
-  if (!lastStartedAt) return true;
-
-  const last = new Date(lastStartedAt);
-  const sameMonth =
-    last.getUTCFullYear() === now.getUTCFullYear() &&
-    last.getUTCMonth() === now.getUTCMonth();
-  if (!sameMonth) return true;
-
-  const threshold = now.getTime() - 20 * 60 * 60 * 1000;
-  return last.getTime() < threshold;
-}
-
-/** ===== 1テナント分の自動取得を実行 ===== */
-async function runCompanyListForTenant(
-  sb: any,
-  tenantId: string,
-  targetCount: number
-) {
-  const startedAt = new Date().toISOString();
-
-  const { data: runRow, error: runErr } = await sb
-    .from("form_outreach_auto_runs")
-    .insert({
-      tenant_id: tenantId,
-      kind: "company_list",
-      status: "running",
-      target_count: targetCount,
-      started_at: startedAt,
-      last_progress_at: startedAt,
-      last_message: "自動取得を開始しました",
-    })
-    .select("*")
-    .single();
-
-  if (runErr) throw new Error(runErr.message);
-  const runId: string = runRow.id;
-  const sinceIso = startedAt;
-
-  const filters = await fetchFilters(tenantId);
-  const headers = { "x-tenant-id": tenantId };
-
-  let newProspects = 0;
-  let newRejected = 0;
-  let newSimilar = 0;
-
-  const MAX_ATTEMPTS = Math.max(10, targetCount * 6);
-  const BATCH_BASE = Math.min(
-    25,
-    Math.max(8, Math.floor(Math.max(10, targetCount) / 4))
-  );
-
-  try {
-    let attempts = 0;
-    while (newProspects < targetCount && attempts < MAX_ATTEMPTS) {
-      attempts++;
-      const leftover = Math.max(1, targetCount - newProspects);
-      const wantNow = Math.min(BATCH_BASE, leftover);
-      const seed = `${Date.now()}-${attempts}`;
-
-      // Phase A: 国税庁クロール → キャッシュ
-      await postJsonWithRetry(
-        `${APP_URL}/api/form-outreach/companies/crawl`,
-        { filters, want: wantNow, seed },
-        headers
-      );
-
-      // Phase B: enrich → prospects/rejected/similar を保存
-      await postJsonWithRetry(
-        `${APP_URL}/api/form-outreach/companies/enrich`,
-        {
-          since: sinceIso,
-          want: leftover,
-          try_llm: true,
-        },
-        headers
-      );
-
-      // DB ベースで 3テーブルの件数をカウント
-      newProspects = await countSince(sb, "form_prospects", tenantId, sinceIso);
-      newSimilar = await countSince(
-        sb,
-        "form_similar_sites",
-        tenantId,
-        sinceIso
-      );
-      newRejected = await countSince(
-        sb,
-        "form_prospects_rejected",
-        tenantId,
-        sinceIso
-      );
-
-      await sb
-        .from("form_outreach_auto_runs")
-        .update({
-          new_prospects: newProspects,
-          new_rejected: newRejected,
-          new_similar_sites: newSimilar,
-          last_progress_at: new Date().toISOString(),
-          last_message: `自動取得中: prospects=${newProspects}/${targetCount}, rejected=${newRejected}, similar=${newSimilar}`,
-        })
-        .eq("id", runId);
-    }
-
-    const finishedAt = new Date().toISOString();
-    const success = newProspects >= targetCount;
-
-    await sb
-      .from("form_outreach_auto_runs")
-      .update({
-        status: success ? "done" : "error",
-        finished_at: finishedAt,
-        error_text: success ? null : "target 未達 (MAX_ATTEMPTS 到達)",
-        last_message: success
-          ? `完了: ${newProspects}/${targetCount} 件を追加。rejected=${newRejected}, similar=${newSimilar}`
-          : `終了(未達): ${newProspects}/${targetCount} 件。rejected=${newRejected}, similar=${newSimilar}`,
-      })
-      .eq("id", runId);
+    const s = (j?.settings ?? j) as Partial<Settings>;
 
     return {
-      runId,
-      status: success ? "done" : "error",
-      newProspects,
-      newRejected,
-      newSimilar,
+      auto_company_list: !!s.auto_company_list,
+      company_schedule: s.company_schedule ?? "weekly",
+      company_weekday: s.company_weekday ?? 1,
+      company_month_day: s.company_month_day ?? 1,
+      company_limit: s.company_limit ?? 100,
     };
-  } catch (e: any) {
-    const finishedAt = new Date().toISOString();
-    await sb
-      .from("form_outreach_auto_runs")
-      .update({
-        status: "error",
-        finished_at: finishedAt,
-        error_text: String(e?.message || e),
-        last_message: `エラー: ${String(e?.message || e).slice(0, 200)}`,
-      })
-      .eq("id", runId);
-    throw e;
+  } catch {
+    return null;
   }
 }
 
-/** ===== メイン: cron から叩く ===== */
+/** ========= 今週 / 今月の「自動取得件数」を数える =========
+ * form_outreach_auto_runs.kind = 'auto-company-list' のランだけを集計
+ * → 手動ラン(manual-company-list など)とは完全に分離
+ */
+async function countAutoThisWeek(
+  sb: any,
+  tenantId: string,
+  now = nowJST()
+): Promise<number> {
+  const from = startOfThisWeekJST(now);
+  const to = startOfNextWeekJST(now);
+
+  const { data, error } = await sb
+    .from("form_outreach_auto_runs")
+    .select("new_prospects, target_count")
+    .eq("tenant_id", tenantId)
+    .eq("kind", "auto-company-list")
+    .eq("status", "completed")
+    .gte("started_at", from.toISOString())
+    .lt("started_at", to.toISOString());
+
+  if (error) throw new Error(error.message);
+  const rows = (data || []) as AutoRunRow[];
+  return rows.reduce((sum, r) => {
+    const n = r.new_prospects ?? r.target_count ?? 0;
+    return sum + (Number.isFinite(n as any) ? Number(n) : 0);
+  }, 0);
+}
+
+async function countAutoThisMonth(
+  sb: any,
+  tenantId: string,
+  now = nowJST()
+): Promise<number> {
+  const from = startOfThisMonthJST(now);
+  const to = startOfNextMonthJST(now);
+
+  const { data, error } = await sb
+    .from("form_outreach_auto_runs")
+    .select("new_prospects, target_count")
+    .eq("tenant_id", tenantId)
+    .eq("kind", "auto-company-list")
+    .eq("status", "completed")
+    .gte("started_at", from.toISOString())
+    .lt("started_at", to.toISOString());
+
+  if (error) throw new Error(error.message);
+  const rows = (data || []) as AutoRunRow[];
+  return rows.reduce((sum, r) => {
+    const n = r.new_prospects ?? r.target_count ?? 0;
+    return sum + (Number.isFinite(n as any) ? Number(n) : 0);
+  }, 0);
+}
+
+/** ========= すでに「自動ラン」が走っていないか（並行防止は自動だけ） ========= */
+async function hasRunningAuto(
+  sb: any,
+  tenantId: string,
+  now = nowJST()
+): Promise<boolean> {
+  // 直近1時間以内に "auto-company-list" で running があれば同時実行は避ける
+  const oneHourAgo = new Date(now);
+  oneHourAgo.setHours(now.getHours() - 1);
+
+  const { data, error } = await sb
+    .from("form_outreach_auto_runs")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .eq("kind", "auto-company-list")
+    .eq("status", "running")
+    .gte("started_at", oneHourAgo.toISOString())
+    .limit(1);
+
+  if (error) throw new Error(error.message);
+  return Array.isArray(data) && data.length > 0;
+}
+
+/** ========= メイン Handler ========= */
 export async function POST(req: Request) {
+  const trace: string[] = [];
+  const startedAtServer = new Date().toISOString();
+
   try {
-    // 簡易なシークレットチェック（cron から x-cron-secret を送る）
-    if (CRON_SECRET) {
-      const headerSecret = req.headers.get("x-cron-secret") || "";
-      if (headerSecret !== CRON_SECRET) {
-        return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-      }
+    const tenantId = req.headers.get("x-tenant-id") || "";
+    if (!tenantId || !okUuid(tenantId)) {
+      return NextResponse.json(
+        { error: "x-tenant-id required (uuid)" },
+        { status: 400 }
+      );
     }
 
-    const { sb } = getAdmin();
-    const now = nowJST();
-    const w = weekdayJST(now);
-    const day = now.getUTCDate();
+    const { sb, usingServiceRole } = getAdmin();
 
-    // 自動法人リスト取得が ON のテナントを取得
-    const { data: settingsRows, error: setErr } = await sb
-      .from("form_outreach_automation_settings")
-      .select("*")
-      .eq("auto_company_list", true);
-
-    if (setErr) throw new Error(setErr.message);
-
-    const results: any[] = [];
-
-    for (const s of settingsRows || []) {
-      const tenantId: string | null = s.tenant_id || null;
-      if (!tenantId) continue;
-
-      const schedule: "weekly" | "monthly" = s.company_schedule || "weekly";
-      const limit: number = s.company_limit ?? 100;
-      const weekdaySetting: number = s.company_weekday ?? 1;
-      const monthDaySetting: number = s.company_month_day ?? 1;
-
-      // 直近の実行を取得
-      const { data: last, error: lastErr } = await sb
-        .from("form_outreach_auto_runs")
-        .select("id, started_at")
-        .eq("tenant_id", tenantId)
-        .eq("kind", "company_list")
-        .order("started_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-      if (lastErr && lastErr.code !== "PGRST116") {
-        throw new Error(lastErr.message);
-      }
-
-      const lastStartedAt: string | null = last?.started_at ?? null;
-
-      let due = false;
-      if (schedule === "weekly") {
-        due = isDueWeekly(weekdaySetting, lastStartedAt);
-      } else {
-        due = isDueMonthly(monthDaySetting, lastStartedAt);
-      }
-
-      if (!due) {
-        results.push({
-          tenantId,
+    // 他の自動ラン(auto-company-list)が同時に走らないようにする（手動用kindとは分離）
+    if (await hasRunningAuto(sb, tenantId)) {
+      return NextResponse.json(
+        {
           skipped: true,
-          reason: "not due",
-        });
-        continue;
-      }
-
-      const run = await runCompanyListForTenant(sb, tenantId, limit);
-      results.push({
-        tenantId,
-        skipped: false,
-        ...run,
-      });
+          reason: "another auto-company-list run is already running",
+        },
+        { status: 200 }
+      );
     }
 
-    return NextResponse.json({ ok: true, results }, { status: 200 });
+    // 設定ロード（既存 API を利用）
+    const settings = await loadAutomationSettings(req, tenantId);
+    if (!settings || !settings.auto_company_list) {
+      return NextResponse.json(
+        { skipped: true, reason: "auto_company_list is OFF" },
+        { status: 200 }
+      );
+    }
+
+    const now = nowJST();
+    const limit = settings.company_limit ?? 100;
+
+    // 週次 / 月次別に「今週/今月の自動取得件数(自動ランのみ)」を集計
+    let currentAutoCount = 0;
+    if (settings.company_schedule === "weekly") {
+      currentAutoCount = await countAutoThisWeek(sb, tenantId, now);
+    } else {
+      currentAutoCount = await countAutoThisMonth(sb, tenantId, now);
+    }
+
+    trace.push(
+      `schedule=${settings.company_schedule} limit=${limit} currentAuto=${currentAutoCount}`
+    );
+
+    // 例: 毎週月曜10件 → 今週の自動取得が10件未満なら「設定している今」からスタート
+    // 10件以上ある場合は、この週は動かず、次の週/次の月の始まり(指定曜日0:00付近でcronが叩いたタイミング)で start
+    if (currentAutoCount >= limit) {
+      return NextResponse.json(
+        {
+          skipped: true,
+          reason: "auto quota already satisfied for this period",
+          schedule: settings.company_schedule,
+          currentAutoCount,
+          limit,
+        },
+        { status: 200 }
+      );
+    }
+
+    // ここまで来たら「この期間の不足分だけ」自動取得を実行
+    // want = 上限 - これまでの自動取得数
+    let want = Math.max(1, limit - currentAutoCount);
+
+    // 週次の場合は「指定曜日」以外の日は動かさないようにする（例: company_weekday=1→月曜のみ実行）
+    if (settings.company_schedule === "weekly") {
+      const dow = now.getDay(); // 0(日)〜6(土)
+      const todayAs1to7 = dow === 0 ? 7 : dow; // 1=月〜7=日
+      const scheduledDow = settings.company_weekday ?? 1;
+
+      if (todayAs1to7 !== scheduledDow) {
+        // ただし「今週分が足りないから即スタート」の挙動は「指定曜日の中で」保証する仕様とする
+        return NextResponse.json(
+          {
+            skipped: true,
+            reason: "not scheduled weekday",
+            todayAs1to7,
+            scheduledDow,
+            schedule: "weekly",
+            currentAutoCount,
+            limit,
+          },
+          { status: 200 }
+        );
+      }
+    } else {
+      // 月次：指定日以外では実行しない
+      const todayDate = now.getDate();
+      const scheduledDay = settings.company_month_day ?? 1;
+      if (todayDate !== scheduledDay) {
+        return NextResponse.json(
+          {
+            skipped: true,
+            reason: "not scheduled month day",
+            todayDate,
+            scheduledDay,
+            schedule: "monthly",
+            currentAutoCount,
+            limit,
+          },
+          { status: 200 }
+        );
+      }
+    }
+
+    trace.push(`auto-list: will run want=${want}`);
+
+    // ========= form_outreach_auto_runs に「自動ラン」行を作成 =========
+    const runStartedAt = new Date().toISOString();
+    const { data: insertedRuns, error: insertRunErr } = await sb
+      .from("form_outreach_auto_runs")
+      .insert([
+        {
+          tenant_id: tenantId,
+          kind: "auto-company-list",
+          status: "running",
+          target_count: want,
+          started_at: runStartedAt,
+          last_message: "auto company list run started",
+          new_prospects: 0,
+          new_rejected: 0,
+          new_similar_sites: 0,
+          last_progress_at: runStartedAt,
+          error_text: null,
+          meta: {
+            schedule: settings.company_schedule,
+            company_weekday: settings.company_weekday ?? null,
+            company_month_day: settings.company_month_day ?? null,
+            limit,
+            currentAutoCount_before: currentAutoCount,
+          },
+        },
+      ])
+      .select("*")
+      .limit(1);
+
+    if (insertRunErr) {
+      return NextResponse.json(
+        { error: insertRunErr.message, trace },
+        { status: 500 }
+      );
+    }
+    const runRow = (insertedRuns || [])[0] as AutoRunRow | undefined;
+    const runId = runRow?.id;
+
+    // ========= 実際の「法人リスト取得」処理: crawl → enrich =========
+    const u = new URL(req.url);
+    const base =
+      process.env.APP_URL ||
+      `${u.protocol}//${u.host}` ||
+      "http://localhost:3000";
+
+    // 1) NTA から候補法人を取得して cache へ
+    const crawlRes = await fetch(`${base}/api/form-outreach/companies/crawl`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-tenant-id": tenantId,
+      },
+      body: JSON.stringify({ want }),
+    });
+    const crawlJson: any = await crawlRes.json().catch(() => ({}));
+    trace.push(`crawl_status=${crawlRes.status}`);
+
+    // 2) cache → prospects へ enrich
+    // 「今回分」として区切るため、since は今の時刻を使う
+    const since = runStartedAt;
+    const enrichRes = await fetch(
+      `${base}/api/form-outreach/companies/enrich`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-tenant-id": tenantId,
+        },
+        body: JSON.stringify({ since, want, try_llm: false }),
+      }
+    );
+    const enrichJson: any = await enrichRes.json().catch(() => ({}));
+    trace.push(`enrich_status=${enrichRes.status}`);
+
+    const newProspects: number =
+      Number(enrichJson?.recent_count ?? enrichJson?.inserted ?? 0) || 0;
+    const newSimilar: number =
+      Number(enrichJson?.recent_similar_count ?? 0) || 0;
+    const rejectedCount: number = Array.isArray(enrichJson?.rejected)
+      ? enrichJson.rejected.length
+      : 0;
+
+    const finishedAt = new Date().toISOString();
+
+    // ========= ランの完了ステータス更新 =========
+    if (runId) {
+      const lastMessage =
+        crawlRes.ok && enrichRes.ok
+          ? "auto company list run completed"
+          : "auto company list run completed with errors";
+
+      const { error: updateRunErr } = await sb
+        .from("form_outreach_auto_runs")
+        .update({
+          status: crawlRes.ok && enrichRes.ok ? "completed" : "error",
+          finished_at: finishedAt,
+          last_message: lastMessage,
+          new_prospects: newProspects,
+          new_rejected: rejectedCount,
+          new_similar_sites: newSimilar,
+          last_progress_at: finishedAt,
+          error_text:
+            !crawlRes.ok || !enrichRes.ok
+              ? JSON.stringify({
+                  crawl_status: crawlRes.status,
+                  enrich_status: enrichRes.status,
+                  crawl_error: crawlJson?.error ?? null,
+                  enrich_error: enrichJson?.error ?? null,
+                }).slice(0, 2000)
+              : null,
+        })
+        .eq("id", runId);
+
+      if (updateRunErr) {
+        trace.push(`updateRunErr=${updateRunErr.message}`);
+      }
+    }
+
+    return NextResponse.json(
+      {
+        ok: true,
+        tenant_id: tenantId,
+        schedule: settings.company_schedule,
+        limit,
+        currentAutoCount_before: currentAutoCount,
+        want,
+        new_prospects: newProspects,
+        new_rejected: rejectedCount,
+        new_similar_sites: newSimilar,
+        using_service_role: usingServiceRole,
+        crawl_status: crawlRes.status,
+        enrich_status: enrichRes.status,
+        trace,
+        run_id: runId ?? null,
+        started_at_server: startedAtServer,
+      },
+      { status: 200 }
+    );
   } catch (e: any) {
     return NextResponse.json(
       { error: String(e?.message || e) },
