@@ -157,50 +157,81 @@ export async function GET(req: Request) {
     const successRate =
       okSum + failSum > 0 ? (okSum * 100) / (okSum + failSum) : 0;
 
-    // --- series: メッセージ送信数を日別集計 ---
+    // --- series: 正規/不備/近似 を日別集計 ---
     const { from: rangeFrom, to: rangeTo } = getRangeWindow(range, now);
 
-    const { data: msgs, error: mErr } = await sb
-      .from("form_outreach_messages")
-      .select("sent_at, channel")
-      .eq("tenant_id", tenantId)
-      .not("sent_at", "is", null)
-      .gte("sent_at", rangeFrom.toISOString())
-      .lte("sent_at", rangeTo.toISOString());
+    const [prosRowsRes, rejRowsRes, simRowsRes] = await Promise.all([
+      sb
+        .from("form_prospects")
+        .select("created_at")
+        .eq("tenant_id", tenantId)
+        .gte("created_at", rangeFrom.toISOString())
+        .lte("created_at", rangeTo.toISOString()),
+      sb
+        .from("form_prospects_rejected")
+        .select("created_at")
+        .eq("tenant_id", tenantId)
+        .gte("created_at", rangeFrom.toISOString())
+        .lte("created_at", rangeTo.toISOString()),
+      sb
+        .from("form_similar_sites")
+        .select("created_at")
+        .eq("tenant_id", tenantId)
+        .gte("created_at", rangeFrom.toISOString())
+        .lte("created_at", rangeTo.toISOString()),
+    ]);
 
-    if (mErr) throw new Error(mErr.message);
+    if (prosRowsRes.error) throw new Error(prosRowsRes.error.message);
+    if (rejRowsRes.error) throw new Error(rejRowsRes.error.message);
+    if (simRowsRes.error) throw new Error(simRowsRes.error.message);
 
-    const totalMap = new Map<string, number>();
-    const formMap = new Map<string, number>();
-    const emailMap = new Map<string, number>();
+    const prosRows = prosRowsRes.data || [];
+    const rejRows = rejRowsRes.data || [];
+    const simRows = simRowsRes.data || [];
 
-    // 期間内の各日を0で初期化
+    // 日付ごとの map を初期化
+    const allMap = new Map<string, number>();
+    const prosMap = new Map<string, number>();
+    const rejMap = new Map<string, number>();
+    const simMap = new Map<string, number>();
+
     for (
       let d = new Date(rangeFrom.getTime());
       d <= rangeTo;
       d.setDate(d.getDate() + 1)
     ) {
       const key = dateKeyJst(d);
-      totalMap.set(key, 0);
-      formMap.set(key, 0);
-      emailMap.set(key, 0);
+      allMap.set(key, 0);
+      prosMap.set(key, 0);
+      rejMap.set(key, 0);
+      simMap.set(key, 0);
     }
 
-    (msgs || []).forEach((m: any) => {
-      const sentAt = m.sent_at;
-      if (!sentAt) return;
-      const d = new Date(sentAt);
-      if (Number.isNaN(d.getTime())) return;
-      const key = dateKeyJst(d);
+    const bump = (map: Map<string, number>, key: string) =>
+      map.set(key, (map.get(key) || 0) + 1);
 
-      totalMap.set(key, (totalMap.get(key) || 0) + 1);
+    // 正規企業リスト
+    prosRows.forEach((r: any) => {
+      if (!r.created_at) return;
+      const key = dateKeyJst(new Date(r.created_at));
+      bump(prosMap, key);
+      bump(allMap, key);
+    });
 
-      const ch = (m.channel || "").toLowerCase();
-      if (ch === "form") {
-        formMap.set(key, (formMap.get(key) || 0) + 1);
-      } else if (ch === "email") {
-        emailMap.set(key, (emailMap.get(key) || 0) + 1);
-      }
+    // 不備企業リスト
+    rejRows.forEach((r: any) => {
+      if (!r.created_at) return;
+      const key = dateKeyJst(new Date(r.created_at));
+      bump(rejMap, key);
+      bump(allMap, key);
+    });
+
+    // 近似サイトリスト
+    simRows.forEach((r: any) => {
+      if (!r.created_at) return;
+      const key = dateKeyJst(new Date(r.created_at));
+      bump(simMap, key);
+      bump(allMap, key);
     });
 
     const toSeries = (map: Map<string, number>) =>
@@ -209,9 +240,10 @@ export async function GET(req: Request) {
         .map(([date, count]) => ({ date, count }));
 
     const series = {
-      total: toSeries(totalMap),
-      form: toSeries(formMap),
-      email: toSeries(emailMap),
+      all: toSeries(allMap),
+      prospects: toSeries(prosMap),
+      rejected: toSeries(rejMap),
+      similar: toSeries(simMap),
     };
 
     return NextResponse.json(
