@@ -31,6 +31,20 @@ type Summary = {
 type RangeKey = "7d" | "14d" | "1m" | "3m" | "6m" | "1y";
 type Mode = "total" | "form" | "email";
 
+// /api/me/tenant からテナントIDを取得（schedules と同じロジック）
+async function fetchTenantId(): Promise<string | null> {
+  try {
+    let meRes = await fetch("/api/me/tenant", { cache: "no-store" });
+    if (!meRes.ok) {
+      meRes = await fetch("/api/me/tenant/", { cache: "no-store" });
+    }
+    const me = await meRes.json().catch(() => ({}));
+    return me?.tenant_id ?? me?.profile?.tenant_id ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // API応答をどの形でも受け取れるように正規化
 function normalizeSummary(raw: any): Summary | null {
   if (!raw) return null;
@@ -67,18 +81,34 @@ function normalizeSummary(raw: any): Summary | null {
 }
 
 export default function FormOutreachLanding() {
+  const [tenantId, setTenantId] = useState<string | null>(null);
   const [data, setData] = useState<Summary | null>(null);
   const [range, setRange] = useState<RangeKey>("14d");
   const [mode, setMode] = useState<Mode>("total");
   const [msg, setMsg] = useState("");
 
+  // ① テナントID取得
   useEffect(() => {
     (async () => {
+      const t = await fetchTenantId();
+      setTenantId(t);
+    })();
+  }, []);
+
+  // ② テナントID + range で KPI を取得
+  useEffect(() => {
+    if (!tenantId) return;
+    (async () => {
       try {
+        setMsg("");
         const res = await fetch(`/api/form-outreach/summary?range=${range}`, {
           cache: "no-store",
+          headers: { "x-tenant-id": tenantId },
         });
         const j = await res.json().catch(() => null);
+        if (!res.ok) {
+          throw new Error(j?.error || "summary fetch failed");
+        }
         const normalized = normalizeSummary(j);
         if (!normalized) throw new Error("summary is empty");
         setData(normalized);
@@ -87,7 +117,7 @@ export default function FormOutreachLanding() {
         setData(null);
       }
     })();
-  }, [range]);
+  }, [range, tenantId]);
 
   const series = useMemo(() => {
     if (!data) return [];
@@ -121,13 +151,6 @@ export default function FormOutreachLanding() {
           </p>
         </div>
 
-        {/* 機能メニュー（実行 / リスト / 設定） */}
-        <header className="mb-3">
-          <h2 className="text-2xl md:text-[24px] font-semibold text-neutral-900">
-            機能メニュー
-          </h2>
-        </header>
-
         <div className="mb-6 rounded-2xl border border-neutral-200 p-5">
           <div className="grid grid-cols-1 gap-7 md:grid-cols-3">
             {/* 実行 */}
@@ -157,7 +180,7 @@ export default function FormOutreachLanding() {
                     href="/form-outreach/schedules"
                     className="text-base text-neutral-800 underline-offset-2 hover:underline"
                   >
-                    送信ログ
+                    実行ログ
                   </Link>
                 </li>
               </ul>
