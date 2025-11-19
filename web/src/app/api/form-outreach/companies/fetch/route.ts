@@ -8,6 +8,7 @@ import { NTA_TOWN_SEEDS } from "@/constants/ntaTownSeeds.generated";
 
 /** ---------- Types ---------- */
 type SizeRange = "1-9" | "10-49" | "50-249" | "250+";
+
 type Filters = {
   prefectures?: string[];
   employee_size_ranges?: SizeRange[];
@@ -20,6 +21,7 @@ type Filters = {
   established_to?: string | null;
   max?: number;
 };
+
 type Candidate = {
   company_name: string;
   website?: string | null;
@@ -35,6 +37,7 @@ type Candidate = {
   capital?: number | null;
   established_on?: string | null;
 };
+
 type Rejected = Candidate & { reject_reasons: string[] };
 
 /** ---------- ENV ---------- */
@@ -52,6 +55,7 @@ const UA =
 const LANG = "ja-JP,ja;q=0.9";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 const clamp = (n: unknown, min: number, max: number) =>
   Math.max(min, Math.min(max, Math.floor(Number(n) || 0)));
 
@@ -86,11 +90,13 @@ function textFromHtml(html: string): string {
     .replace(/\s+/g, " ")
     .slice(0, 250_000);
 }
+
 function toHalfWidthDigits(s: string): string {
   return s.replace(/[０-９]/g, (d) =>
     String.fromCharCode(d.charCodeAt(0) - 0xfee0)
   );
 }
+
 function parseYenAmount(raw: string): number | null {
   let s = toHalfWidthDigits(raw).replace(/[,，\s]/g, "");
   const unit = /億|万/.exec(s)?.[0] || "";
@@ -101,6 +107,7 @@ function parseYenAmount(raw: string): number | null {
   if (unit === "万") return Math.round(n * 10_000);
   return Math.round(n);
 }
+
 function extractCapital(text: string): number | null {
   const t = toHalfWidthDigits(text);
   const re = /資本金[^\d０-９]{0,6}([0-9０-９.,]+)\s*(億|万)?\s*円?/i;
@@ -109,6 +116,7 @@ function extractCapital(text: string): number | null {
   const amt = parseYenAmount(`${m[1]}${m[2] || ""}`);
   return amt ?? null;
 }
+
 function extractEstablishedOn(text: string): string | null {
   const t = toHalfWidthDigits(text).replace(/\s/g, "");
   const m =
@@ -126,6 +134,7 @@ function extractEstablishedOn(text: string): string | null {
   if (!y || y < 1900 || y > 2100) return null;
   return `${y}-${mm}-${dd}`;
 }
+
 function extractCompanySizeToRange(text: string): SizeRange | null {
   const t = text.replace(/[,\uFF0C\u3000]/g, "");
   const re =
@@ -141,6 +150,7 @@ function extractCompanySizeToRange(text: string): SizeRange | null {
   if (n <= 249) return "50-249";
   return "250+";
 }
+
 function normalizeUrl(u?: string | null): string | undefined {
   if (!u) return;
   try {
@@ -168,14 +178,21 @@ function extractEmailsFrom(
       .replace(/\s*\(dot\)\s*/gi, ".")
       .replace(/＜?アットマーク＞?/g, "@")
       .replace(/＜?ドット＞?/g, ".");
+
   const re = /[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}(?:\.[A-Z]{2,})?/gi;
+
+  // 本文から
   for (const e of deob(text).match(re) ?? []) pool.add(e);
+
+  // mailto:
   const mailtoRe = /href=["']mailto:([^"']+)["']/gi;
   let m: RegExpExecArray | null;
   while ((m = mailtoRe.exec(html))) {
     const raw = decodeURIComponent(m[1] || "");
     for (const e of deob(raw).match(re) ?? []) pool.add(e);
   }
+
+  // JSON-LDから
   const ldRe =
     /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
   while ((m = ldRe.exec(html))) {
@@ -185,8 +202,11 @@ function extractEmailsFrom(
       if (typeof cand === "string") {
         for (const e of deob(cand).match(re) ?? []) pool.add(e);
       }
-    } catch {}
+    } catch {
+      // ignore json parse error
+    }
   }
+
   const arr = [...pool];
   if (host) {
     const main = arr.find((e) =>
@@ -266,11 +286,13 @@ function dedupeCands(cands: Candidate[]): Candidate[] {
   }
   return out;
 }
+
 function keyForRejected(c: Rejected): string {
   const num = (c.corporate_number || "").toLowerCase();
   const n = (c.company_name || "").toLowerCase();
   return `${num}__${n}`;
 }
+
 function pick<T>(arr: T[], n: number, seed: number): T[] {
   const a = arr.slice();
   for (let i = a.length - 1; i > 0; i--) {
@@ -285,6 +307,7 @@ const SPECIAL_TOWN_LEVEL: Record<string, string[]> = {
   東京都: ["渋谷区", "千代田区", "中央区", "港区", "新宿区", "世田谷区"],
   大阪府: ["大阪市中央区"],
 };
+
 function buildAddressKeywords(
   filters: Filters,
   seedNum: number
@@ -348,9 +371,11 @@ function parseSearchHtml(html: string): Array<{
     address: string | null;
     detail_url: string | null;
   }> = [];
+
   const linkRe = /href=["'](\/number\/(\d{13}))[#"']/g;
   let m: RegExpExecArray | null;
   const seen = new Set<string>();
+
   while ((m = linkRe.exec(html))) {
     const rel = m[1];
     const num = m[2];
@@ -362,15 +387,19 @@ function parseSearchHtml(html: string): Array<{
     const ctx = html.slice(ctxStart, ctxEnd).replace(/\s+/g, " ");
 
     const candNames: string[] = [];
+
     const n1 =
       />(?:名称|商号|法人名)[^<]{0,10}<\/[^>]*>\s*<[^>]*>([^<]{2,120})<\//i
         .exec(ctx)?.[1]
         ?.trim();
     if (n1) candNames.push(n1);
+
     const n2 = />\s*([^<]{2,120})\s*<\/a>/.exec(ctx)?.[1]?.trim();
     if (n2) candNames.push(n2);
+
     const n3 = /<strong[^>]*>([^<]{2,180})<\/strong>/.exec(ctx)?.[1]?.trim();
     if (n3) candNames.push(n3);
+
     const name = candNames.length
       ? candNames[(Date.now() + candNames.length) % candNames.length]
       : null;
@@ -388,6 +417,7 @@ function parseSearchHtml(html: string): Array<{
       rel,
       "https://www.houjin-bangou.nta.go.jp"
     ).toString();
+
     out.push({
       corporate_number: num,
       name: name || null,
@@ -408,6 +438,7 @@ function parseSearchHtml(html: string): Array<{
       detail_url: `https://www.houjin-bangou.nta.go.jp/number/${num}`,
     });
   }
+
   return out;
 }
 
@@ -430,7 +461,9 @@ async function crawlByAddressKeyword(keyword: string, page = 1) {
       const html = await r.text();
       const rows = parseSearchHtml(html);
       if (rows.length) return rows;
-    } catch {}
+    } catch {
+      // ignore
+    }
   }
   return [];
 }
@@ -447,6 +480,7 @@ async function fetchDetailAndFill(row: {
     const r = await fetchWithTimeout(row.detail_url, {}, 15000);
     if (!r.ok) return row;
     const html = await r.text();
+
     const name =
       /商号又は名称[^<]*<\/th>\s*<td[^>]*>([\s\S]{1,200}?)<\/td>/i
         .exec(html)?.[1]
@@ -475,6 +509,7 @@ async function resolveHomepageWithLLM(
   c: Candidate
 ): Promise<string | undefined> {
   if (!OPENAI_API_KEY) return normalizeUrl(c.website || undefined);
+
   const sys =
     "You are a helpful assistant. Output STRICT JSON only, no commentary.";
   const prompt = `次の法人の公式ホームページURLを1つ推定してください。不明なら空。必ず https:// から。
@@ -499,8 +534,10 @@ async function resolveHomepageWithLLM(
       ],
     }),
   });
+
   const txt = await res.text();
   if (!res.ok) return normalizeUrl(c.website || undefined);
+
   try {
     const j = JSON.parse(txt);
     const content = j?.choices?.[0]?.message?.content ?? "{}";
@@ -515,23 +552,31 @@ async function resolveHomepageWithLLM(
 async function verifyAndEnrichWebsite(c: Candidate): Promise<Candidate | null> {
   const site = normalizeUrl(c.website || undefined);
   if (!site) return null;
+
   try {
     const r = await fetchWithTimeout(site, {}, 12000);
     if (!r.ok) return null;
     const html = await r.text();
     const text = textFromHtml(html);
+
     let host = "";
     try {
       host = new URL(site).host;
-    } catch {}
+    } catch {
+      // ignore
+    }
+
     const emails = extractEmailsFrom(html, text, host);
+
     const contact_form_url = await (async () => {
       const links =
         html.match(/<a\s+[^>]*href=["'][^"']+["'][^>]*>[\s\S]*?<\/a>/gi) || [];
+
       const find = (href: string, label: string) =>
         /contact|inquiry|お問い合わせ|お問合せ|問合せ/i.test(
           href + " " + label
         );
+
       for (const a of links) {
         const href = /href=["']([^"']+)["']/.exec(a)?.[1] || "";
         const label = a
@@ -541,8 +586,11 @@ async function verifyAndEnrichWebsite(c: Candidate): Promise<Candidate | null> {
         try {
           const abs = new URL(href, site).toString();
           if (find(abs, label)) return abs;
-        } catch {}
+        } catch {
+          // ignore
+        }
       }
+
       for (const p of [
         "/contact",
         "/contact-us",
@@ -556,7 +604,9 @@ async function verifyAndEnrichWebsite(c: Candidate): Promise<Candidate | null> {
           const u = new URL(p, site).toString();
           const rr = await fetchWithTimeout(u, { method: "HEAD" }, 5000);
           if (rr.ok) return u;
-        } catch {}
+        } catch {
+          // ignore
+        }
       }
       return null;
     })();
@@ -583,49 +633,60 @@ async function verifyAndEnrichWebsite(c: Candidate): Promise<Candidate | null> {
 /** 事前/最終フィルタ */
 function prefilterByRegistry(c: Candidate, f: Filters) {
   const reasons: string[] = [];
+
   if (f.capital_min != null && Number.isFinite(f.capital_min)) {
     if (c.capital == null || c.capital < (f.capital_min as number)) {
       reasons.push("資本金が下限未満、または不明");
     }
   }
+
   if (f.capital_max != null && Number.isFinite(f.capital_max)) {
     if (c.capital == null || c.capital > (f.capital_max as number)) {
       reasons.push("資本金が上限超過、または不明");
     }
   }
+
   if (f.established_from) {
     if (!c.established_on || c.established_on < f.established_from) {
       reasons.push("設立日が下限より前、または不明");
     }
   }
+
   if (f.established_to) {
     if (!c.established_on || c.established_on > f.established_to) {
       reasons.push("設立日が上限より後、または不明");
     }
   }
+
   return { ok: reasons.length === 0, reasons };
 }
+
 function matchesFilters(c: Candidate, f: Filters) {
   const reasons: string[] = [];
+
   if (f.prefectures?.length) {
     const set = new Set((c.prefectures ?? []).map(String));
     const some = [...set].some((p) => f.prefectures!.includes(p));
     if (!some) reasons.push("所在都道府県が不一致");
   }
+
   if (f.employee_size_ranges?.length) {
     const ex = c.company_size_extracted ?? null;
     if (!ex) reasons.push("従業員数の実測が不明");
     else if (!f.employee_size_ranges.includes(ex))
       reasons.push("従業員数レンジ不一致");
   }
+
   const pre = prefilterByRegistry(c, f);
   if (!pre.ok) reasons.push(...pre.reasons);
+
   return { ok: reasons.length === 0, reasons };
 }
 
 /** ---------- Handler: POST ---------- */
 export async function POST(req: Request) {
   const trace: string[] = [];
+
   try {
     if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
       return NextResponse.json(
@@ -635,11 +696,12 @@ export async function POST(req: Request) {
     }
 
     const tenantId = req.headers.get("x-tenant-id") || "";
-    if (!tenantId)
+    if (!tenantId) {
       return NextResponse.json(
         { error: "x-tenant-id required" },
         { status: 400 }
       );
+    }
 
     const body: any = await req.json().catch(() => ({}));
     const filters: Filters = body?.filters ?? {};
@@ -664,18 +726,22 @@ export async function POST(req: Request) {
         .eq("tenant_id", tenantId)
         .not("corporate_number", "is", null),
     ]);
-    if (exWeb.error)
+
+    if (exWeb.error) {
       return NextResponse.json({ error: exWeb.error.message }, { status: 500 });
-    if (exCorp.error)
+    }
+    if (exCorp.error) {
       return NextResponse.json(
         { error: exCorp.error.message },
         { status: 500 }
       );
-    if (exCacheCorp.error)
+    }
+    if (exCacheCorp.error) {
       return NextResponse.json(
         { error: exCacheCorp.error.message },
         { status: 500 }
       );
+    }
 
     const existingWebsite = new Set(
       (exWeb.data || [])
@@ -769,6 +835,7 @@ export async function POST(req: Request) {
         await sleep(50);
         if (rawRows.length >= Math.max(want * 40, 1000)) break;
       }
+
       if (rawRows.length >= Math.max(want * 40, 1000)) break;
     }
     trace.push(`crawl=${rawRows.length}, pwUsed=${pwUsed}`);
@@ -796,6 +863,7 @@ export async function POST(req: Request) {
         source: "nta-crawl",
         scraped_at: new Date().toISOString(),
       }));
+
     let cacheInserted = 0;
     if (cachePayload.length) {
       const { data, error } = await admin
@@ -826,6 +894,7 @@ export async function POST(req: Request) {
         (c.prefectures || []).some((p) => set.has(p))
       );
     }
+
     base = dedupeCands(base);
     trace.push(`base=${base.length}`);
 
@@ -846,7 +915,9 @@ export async function POST(req: Request) {
       const chunk = base.slice(i, i + CONCURRENCY);
       const solved: Candidate[] = await Promise.all(
         chunk.map(async (cand: Candidate): Promise<Candidate> => {
-          if (!cand.website) cand.website = await resolveHomepageWithLLM(cand);
+          if (!cand.website) {
+            cand.website = await resolveHomepageWithLLM(cand);
+          }
           return cand;
         })
       );
@@ -861,8 +932,10 @@ export async function POST(req: Request) {
 
     const resolvable = withSite.filter((x) => !!x.website);
     const unresolved = withSite.filter((x) => !x.website);
-    for (const ng of unresolved)
+
+    for (const ng of unresolved) {
       rejected.push({ ...ng, reject_reasons: ["公式サイト未解決"] });
+    }
     trace.push(
       `hp_resolvable=${resolvable.length}, unresolved=${unresolved.length}`
     );
@@ -875,10 +948,12 @@ export async function POST(req: Request) {
       for (const cc of verified) {
         if (!cc) continue;
         const webKey = String(cc.website || "").toLowerCase();
+
         if (existingWebsite.has(webKey)) {
           rejected.push({ ...cc, reject_reasons: ["既存URLと重複"] });
           continue;
         }
+
         const fin = matchesFilters(cc, filters);
         if (fin.ok) {
           accepted.push(cc);
@@ -890,6 +965,7 @@ export async function POST(req: Request) {
       }
       if (accepted.length >= want) break;
     }
+
     accepted = dedupeCands(accepted).slice(0, want);
     trace.push(`accepted=${accepted.length}, rejected=${rejected.length}`);
 
@@ -922,6 +998,7 @@ export async function POST(req: Request) {
         .select(
           "id, tenant_id, company_name, website, contact_email, contact_form_url, industry, company_size, job_site_source, prefectures, corporate_number, hq_address, capital, established_on, created_at"
         );
+
       if (error) {
         trace.push(`prospects_upsert_error: ${error.message}`);
       } else {
@@ -936,8 +1013,9 @@ export async function POST(req: Request) {
     for (const it of rejected) {
       const k = keyForRejected(it);
       const ex = dedupedRejectedMap.get(k);
-      if (!ex) dedupedRejectedMap.set(k, it);
-      else {
+      if (!ex) {
+        dedupedRejectedMap.set(k, it);
+      } else {
         dedupedRejectedMap.set(k, {
           ...ex,
           reject_reasons: Array.from(
@@ -973,20 +1051,23 @@ export async function PATCH(req: Request) {
         { status: 500 }
       );
     }
+
     const tenantId = req.headers.get("x-tenant-id") || "";
-    if (!tenantId)
+    if (!tenantId) {
       return NextResponse.json(
         { error: "x-tenant-id required" },
         { status: 400 }
       );
+    }
 
     const body: any = await req.json().catch(() => ({}));
     const c: Candidate | undefined = body?.candidate as Candidate | undefined;
-    if (!c || !c.company_name)
+    if (!c || !c.company_name) {
       return NextResponse.json(
         { error: "candidate is required" },
         { status: 400 }
       );
+    }
 
     const admin: any = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
     const payload = {
@@ -1007,6 +1088,7 @@ export async function PATCH(req: Request) {
       capital: c.capital ?? null,
       established_on: c.established_on ?? null,
     };
+
     const { data, error } = await admin
       .from("form_prospects")
       .upsert(payload as any, { onConflict: "tenant_id,website" })
@@ -1014,8 +1096,11 @@ export async function PATCH(req: Request) {
         "id, tenant_id, company_name, website, contact_email, contact_form_url, industry, company_size, job_site_source, prefectures, corporate_number, hq_address, capital, established_on, created_at"
       )
       .single();
-    if (error)
+
+    if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+
     return NextResponse.json({ row: data });
   } catch (e: unknown) {
     const msg = (e as Error)?.message || String(e);

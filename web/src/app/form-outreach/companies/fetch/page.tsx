@@ -176,7 +176,7 @@ export default function ManualFetch() {
           updated_at: incoming.updated_at ?? null,
         });
 
-        // 直近表示の復元（省略：前回と同様）
+        // 直近表示の復元
         const raw = localStorage.getItem(LS_KEY);
         if (raw) {
           const obj = JSON.parse(raw);
@@ -473,9 +473,9 @@ export default function ManualFetch() {
       }
 
       // 最終追い込み（まだ未達ならもう一度だけ enrich）
-      if (rtProspectCount < targetNew) {
+      if (recentProspectsCount < targetNew) {
         try {
-          const leftover = Math.max(1, targetNew - rtProspectCount);
+          const leftover = Math.max(1, targetNew - recentProspectsCount);
           setS((a) => a.map((v, idx) => (idx === 6 ? "running" : v)));
           const ej = await apiPostWithRetry<any>(
             "/api/form-outreach/companies/enrich",
@@ -513,18 +513,22 @@ export default function ManualFetch() {
 
           const rc = Number(ej?.recent_count || 0);
           const rs = Number(ej?.recent_similar_count || 0);
+          recentProspectsCount = rc;
+          recentSimilarCount = rs;
           setRtProspectCount(rc);
           setRtSimilarCount(rs);
         } catch {}
       }
 
       // 終了メッセージ（未達考慮）
-      if (rtProspectCount >= targetNew) {
+      if (recentProspectsCount >= targetNew) {
         setMsg(
-          `完了：新規追加が目標件数に達しました（${rtProspectCount}/${targetNew} 件）`
+          `完了：新規追加が目標件数に達しました（${recentProspectsCount}/${targetNew} 件）`
         );
       } else {
-        setMsg(`終了：新規追加は ${rtProspectCount}/${targetNew} 件（未達）`);
+        setMsg(
+          `終了：新規追加は ${recentProspectsCount}/${targetNew} 件（未達）`
+        );
       }
     } catch (e: any) {
       setActiveIdx(-1);
