@@ -27,9 +27,10 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 
 /** ========= Types ========= */
 type EnrichBody = {
-  since?: string; // ← フロントの「開始する」を押した瞬間のISO（秒単位まで）
+  since?: string; // フロントの「開始する」を押した瞬間のISO
   want?: number;
   try_llm?: boolean;
+  collected_by?: string | null; // ★ 自動実行なら "auto"
 };
 
 type CacheRow = {
@@ -58,6 +59,7 @@ type AddedRow = {
   capital?: number | null;
   established_on?: string | null;
   created_at: string | null;
+  collected_by?: string | null; // ★ 追加
 };
 
 type RejectedRow = {
@@ -78,6 +80,7 @@ type RejectedRow = {
   source_site?: string | null;
   reject_reasons: string[];
   created_at?: string | null;
+  collected_by?: string | null; // ★ 追加
 };
 
 /** ========= Utils ========= */
@@ -715,34 +718,56 @@ function parseCapitalYen(s: string): number | null {
   }
 }
 
-/** ========= LLM業種判定（既存） ========= */
+/** ========= 業種判定: ヒューリスティックのみ ========= */
+function classifyIndustryHeuristically(input: {
+  companyName: string;
+  htmlTop?: string | null;
+  htmlAbout?: string | null;
+}): { large: IndustryLarge; small: string } {
+  const txt = [input.htmlTop || "", input.htmlAbout || ""]
+    .join(" ")
+    .toLowerCase();
+
+  if (/(病院|クリニック|介護|福祉|訪問看護)/.test(txt)) {
+    return { large: "医療・福祉" as IndustryLarge, small: "医療系サービス" };
+  }
+  if (/(システム開発|ソフトウェア|saas|受託開発|クラウド)/.test(txt)) {
+    return {
+      large: "情報通信・メディア" as IndustryLarge,
+      small: "受託開発・SI",
+    };
+  }
+  if (/(物流|倉庫|運送|トラック)/.test(txt)) {
+    return {
+      large: "運輸・物流・郵便" as IndustryLarge,
+      small: "物流・3PL",
+    };
+  }
+  if (/(建設|土木|設備工事|電気工事|解体)/.test(txt)) {
+    return { large: "建設" as IndustryLarge, small: "総合工事" };
+  }
+  if (/(ホテル|旅館|レストラン|カフェ|飲食)/.test(txt)) {
+    return {
+      large: "宿泊・飲食" as IndustryLarge,
+      small: "飲食店（レストラン・カフェ・バー）",
+    };
+  }
+
+  // デフォルト：その他サービス
+  const small = INDUSTRY_CATEGORIES["その他サービス"]?.[0] || "その他サービス";
+  return {
+    large: "その他サービス" as IndustryLarge,
+    small,
+  };
+}
+
+/** ========= LLM業種判定（既存＋ヒューリスティックfallback） ========= */
 async function classifyIndustryWithLLM(input: {
   companyName: string;
   htmlTop?: string | null;
   htmlAbout?: string | null;
 }): Promise<{ large: IndustryLarge; small: string }> {
-  const fallback = (): { large: IndustryLarge; small: string } => {
-    const txt = [input.htmlTop || "", input.htmlAbout || ""]
-      .join(" ")
-      .toLowerCase();
-    if (/(病院|クリニック|介護|福祉|訪問看護)/.test(txt))
-      return { large: "医療・福祉", small: "医療系サービス" };
-    if (/(システム開発|ソフトウェア|saas|受託開発|クラウド)/.test(txt))
-      return { large: "情報通信・メディア", small: "受託開発・SI" };
-    if (/(物流|倉庫|運送|トラック)/.test(txt))
-      return { large: "運輸・物流・郵便", small: "物流・3PL" };
-    if (/(建設|土木|設備工事|電気工事|解体)/.test(txt))
-      return { large: "建設", small: "総合工事" };
-    if (/(ホテル|旅館|レストラン|カフェ|飲食)/.test(txt))
-      return {
-        large: "宿泊・飲食",
-        small: "飲食店（レストラン・カフェ・バー）",
-      };
-    return {
-      large: "その他サービス",
-      small: INDUSTRY_CATEGORIES["その他サービス"][0] || "その他サービス",
-    };
-  };
+  const fallback = () => classifyIndustryHeuristically(input);
 
   try {
     if (!OPENAI_API_KEY) return fallback();
@@ -850,6 +875,7 @@ async function upsertSimilarSite(
     contact_email?: string | null;
     phone?: string | null;
     reasons?: string[] | null;
+    collected_by?: string | null; // ★ 追加
   }
 ): Promise<{ inserted: boolean }> {
   const now = new Date().toISOString();
@@ -860,6 +886,7 @@ async function upsertSimilarSite(
     reasons: p.reasons ?? ["社名不一致だがコンタクト手段あり"],
     created_at: now,
     updated_at: now,
+    collected_by: p.collected_by ?? null,
   };
 
   const { error: insErr } = await sb.from("form_similar_sites").insert(payload);
@@ -881,6 +908,7 @@ async function upsertSimilarSite(
         phone: payload.phone ?? null,
         reasons: payload.reasons,
         updated_at: now,
+        collected_by: payload.collected_by ?? null,
       })
       .eq("tenant_id", payload.tenant_id)
       .eq("found_website", payload.found_website);
@@ -932,6 +960,7 @@ function mergeProspect(existing: any, incoming: any) {
     "hq_address",
     "capital",
     "established_on",
+    "collected_by", // ★ collected_by もマージ（既存が優先）
   ];
   for (const k of keys) merged[k] = pick(existing[k], incoming[k]);
   return merged;
@@ -943,6 +972,8 @@ async function upsertProspectSafe(
 ): Promise<{ saved: AddedRow }> {
   const now = new Date().toISOString();
   const payload: any = { ...row, created_at: row.created_at ?? now };
+  payload.collected_by = row.collected_by ?? null;
+
   const corp = (row.corporate_number || "").trim() || null;
 
   if (corp) {
@@ -1032,7 +1063,7 @@ async function loadRecentProspects(
   sinceISO: string
 ): Promise<{ rows: AddedRow[]; count: number }> {
   const sel =
-    "id,tenant_id,company_name,website,contact_email,contact_form_url,phone,industry,company_size,prefectures,job_site_source,corporate_number,hq_address,capital,established_on,created_at";
+    "id,tenant_id,company_name,website,contact_email,contact_form_url,phone,industry,company_size,prefectures,job_site_source,corporate_number,hq_address,capital,established_on,created_at,collected_by";
   const { data, error } = await sb
     .from("form_prospects")
     .select(sel)
@@ -1078,14 +1109,17 @@ export async function POST(req: Request) {
       );
     }
 
-    // since はフロントの「開始する」押下時刻（修正2）
     const body = (await req.json().catch(() => ({}))) as EnrichBody;
+
+    // since はフロントの「開始する」押下時刻
     const since =
       typeof body?.since === "string"
         ? body.since
         : new Date(Date.now() - 1 * 60 * 1000).toISOString(); // fallbackは直近1分
     const want = Math.max(1, Math.min(2000, Number(body?.want ?? 30)));
     const tryLLM = !!body?.try_llm;
+    const collectedBy =
+      typeof body?.collected_by === "string" ? body.collected_by : null;
 
     const { sb } = getAdmin();
 
@@ -1107,6 +1141,7 @@ export async function POST(req: Request) {
           hq_address: c.address || null,
           reject_reasons: ["会社名が空のためスキップ"],
           source_site: "cache",
+          collected_by: collectedBy ?? null,
         });
         continue;
       }
@@ -1137,6 +1172,7 @@ export async function POST(req: Request) {
             GOOGLE_MAPS_API_KEY ? "Maps利用済み" : "Maps未設定",
           ],
           source_site: "none",
+          collected_by: collectedBy ?? null,
         });
         continue;
       }
@@ -1163,6 +1199,7 @@ export async function POST(req: Request) {
               contact_email: prof.contact_email || null,
               phone: prof.phone || null,
               reasons: ["トップHTML社名不一致／近似サイト保存"],
+              collected_by: collectedBy ?? null,
             });
             if (r.inserted) nearMissSaved += 1;
           } catch {}
@@ -1178,6 +1215,7 @@ export async function POST(req: Request) {
             hasContact ? "近似サイトは別テーブルに保存" : "連絡手段無し",
           ],
           source_site: source || "google",
+          collected_by: collectedBy ?? null,
         });
         continue;
       }
@@ -1205,13 +1243,29 @@ export async function POST(req: Request) {
 
       // 5) 都道府県・業種（本店所在地はNTAの住所を使用）
       const pref = extractPrefecture(c.address);
+
+      // ★ 業種判定（try_llm=true: LLM + fallback, false: ヒューリスティックのみ）
+      let industryLarge: IndustryLarge | null = null;
+      let industrySmall: string | null = null;
       let industryValue: string | null = null;
+
       if (tryLLM) {
         const cls = await classifyIndustryWithLLM({
           companyName: name,
           htmlTop: prof.htmlTop,
           htmlAbout: prof.htmlAbout,
         });
+        industryLarge = cls.large;
+        industrySmall = cls.small;
+        industryValue = `${cls.large} / ${cls.small}`;
+      } else {
+        const cls = classifyIndustryHeuristically({
+          companyName: name,
+          htmlTop: prof.htmlTop,
+          htmlAbout: prof.htmlAbout,
+        });
+        industryLarge = cls.large;
+        industrySmall = cls.small;
         industryValue = `${cls.large} / ${cls.small}`;
       }
 
@@ -1232,6 +1286,7 @@ export async function POST(req: Request) {
           prefectures: pref || null,
           capital: prof.capital ?? null,
           established_on: prof.established_on ?? null,
+          collected_by: collectedBy ?? null,
         });
 
         rows.push(saved);
@@ -1250,6 +1305,9 @@ export async function POST(req: Request) {
             String(e?.message || e).slice(0, 160),
           ],
           source_site: source || "google",
+          industry_large: industryLarge ?? null,
+          industry_small: industrySmall ?? null,
+          collected_by: collectedBy ?? null,
         });
       }
     }

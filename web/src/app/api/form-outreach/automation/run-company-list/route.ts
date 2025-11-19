@@ -220,7 +220,10 @@ async function loadFilters(
   return (data as FiltersRow) || null;
 }
 
-/** ========= 現在の期間内に form_prospects へ入っている件数を集計 ========= */
+/**
+ * ========= 現在の期間内に form_prospects へ入っている件数を集計 =========
+ *  ※ 自動実行で取得したものだけ（collected_by = 'auto'）を対象
+ */
 async function countProspectsInCurrentPeriod(
   sb: any,
   tenantId: string,
@@ -249,8 +252,9 @@ async function countProspectsInCurrentPeriod(
 
   const { data, error } = await sb
     .from("form_prospects")
-    .select("id, created_at")
+    .select("id, created_at, collected_by")
     .eq("tenant_id", tenantId)
+    .eq("collected_by", "auto") // ★ 自動実行で取得したものだけ
     .gte("created_at", fromIso)
     .lt("created_at", toIso);
 
@@ -267,7 +271,6 @@ async function hasRunningAuto(
   tenantId: string,
   now = nowJST()
 ): Promise<boolean> {
-  // 直近1時間以内に "auto-company-list" で running があれば同時実行は避ける
   const oneHourAgo = new Date(now);
   oneHourAgo.setHours(now.getHours() - 1);
 
@@ -300,7 +303,6 @@ export async function POST(req: Request) {
 
     const { sb, usingServiceRole } = getAdmin();
 
-    // body は Cron や Progress からも叩きやすいように任意
     const body = (await req.json().catch(() => ({}))) as {
       max_new_prospects?: number;
       triggered_by?: string; // "cron" | "progress" | "manual" など
@@ -311,7 +313,6 @@ export async function POST(req: Request) {
         : undefined;
     const triggeredBy = body?.triggered_by || "system";
 
-    // 他の自動ラン(auto-company-list)が同時に走らないようにする
     if (await hasRunningAuto(sb, tenantId)) {
       return NextResponse.json(
         {
@@ -322,7 +323,6 @@ export async function POST(req: Request) {
       );
     }
 
-    // 設定ロード
     const settings = await loadAutomationSettings(req, tenantId);
     if (!settings || !settings.auto_company_list) {
       return NextResponse.json(
@@ -334,7 +334,7 @@ export async function POST(req: Request) {
     const now = nowJST();
     const limit = settings.company_limit ?? 100;
 
-    // 現在の期間内にすでに取得済みの「正規企業リスト」の件数（form_prospects ベース）
+    // 現在の期間内に、すでに「自動実行で取得した企業リスト（form_prospects, collected_by='auto'）」の件数
     const { currentAutoCount, periodFrom } =
       await countProspectsInCurrentPeriod(sb, tenantId, settings, now);
 
@@ -344,7 +344,6 @@ export async function POST(req: Request) {
       } limit=${limit} currentAuto=${currentAutoCount} periodFrom=${periodFrom.toISOString()}`
     );
 
-    // 上限に達していれば、この期間は何もしない
     if (currentAutoCount >= limit) {
       return NextResponse.json(
         {
@@ -358,10 +357,10 @@ export async function POST(req: Request) {
       );
     }
 
-    // ====== 週次 / 月次の「実行日」かどうかを判定 ======
+    // ====== 週次 / 月次の「実行日」かどうか判定 ======
     if (settings.company_schedule === "weekly") {
-      const dow = now.getDay(); // 0(日)〜6(土)
-      const todayAs1to7 = dow === 0 ? 7 : dow; // 1=月〜7=日
+      const dow = now.getDay();
+      const todayAs1to7 = dow === 0 ? 7 : dow;
       const scheduledDow = settings.company_weekday ?? 1;
 
       if (todayAs1to7 !== scheduledDow) {
@@ -380,7 +379,6 @@ export async function POST(req: Request) {
         );
       }
     } else {
-      // 月次
       const todayDate = now.getDate();
       const scheduledDay = settings.company_month_day ?? 1;
 
@@ -400,12 +398,10 @@ export async function POST(req: Request) {
         );
       }
     }
-    // ====== ここまでが「週次 / 月次のスケジュール判定」 ======
+    // ====== ここまでスケジュール判定 ======
 
-    // この期間で不足している「正規企業リスト」の件数
     const remain = Math.max(1, limit - currentAutoCount);
 
-    // crawl ルートが want を 1〜200 に clamp しているので、それに合わせる
     const MAX_PER_RUN = 200;
     let want =
       typeof maxNewFromBody === "number" && maxNewFromBody > 0
@@ -416,10 +412,10 @@ export async function POST(req: Request) {
 
     trace.push(`auto-list: will run want=${want}`);
 
-    // ========= form_outreach_filters を取得（prefectures などを crawl/enrich に渡す） =========
+    // ========= form_outreach_filters =========
     const filters = await loadFilters(sb, tenantId);
 
-    // ========= form_outreach_auto_runs に「自動ラン」行を作成 =========
+    // ========= form_outreach_auto_runs へ running 行を作成 =========
     const runStartedAt = new Date().toISOString();
     const { data: insertedRuns, error: insertRunErr } = await sb
       .from("form_outreach_auto_runs")
@@ -459,7 +455,7 @@ export async function POST(req: Request) {
     const runRow = (insertedRuns || [])[0] as AutoRunRow | undefined;
     const runId = runRow?.id;
 
-    // ========= 実際の「法人リスト取得」処理: crawl → enrich =========
+    // ========= crawl → enrich 呼び出し =========
     const u = new URL(req.url);
     const base =
       process.env.APP_URL ||
@@ -485,8 +481,14 @@ export async function POST(req: Request) {
     const crawlJson: any = await crawlRes.json().catch(() => ({}));
     trace.push(`crawl_status=${crawlRes.status}`);
 
-    // 2) cache → prospects へ enrich
-    const enrichBody: any = { since: runStartedAt, want, try_llm: false };
+    // 2) cache → prospects/rejected/similar へ enrich
+    //    ★ 自動実行分だと分かるように collected_by: "auto" を渡す
+    const enrichBody: any = {
+      since: runStartedAt,
+      want,
+      try_llm: false,
+      collected_by: "auto",
+    };
     if (filters) {
       enrichBody.filters = filters;
     }
@@ -505,7 +507,7 @@ export async function POST(req: Request) {
     const enrichJson: any = await enrichRes.json().catch(() => ({}));
     trace.push(`enrich_status=${enrichRes.status}`);
 
-    // enrich の返り値に依存せず、「実際に form_prospects に入った件数」を数え直す
+    // enrich の返り値に依存せず、「実際に form_prospects に入り、かつ collected_by='auto' の件数」を数え直す
     const { currentAutoCount: totalAfterRun } =
       await countProspectsInCurrentPeriod(sb, tenantId, settings, nowJST());
     const newProspects = Math.max(0, totalAfterRun - currentAutoCount);

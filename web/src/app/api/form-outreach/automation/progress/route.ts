@@ -52,20 +52,15 @@ function nowJST(): Date {
   );
 }
 
-/** 週次: 現在の「計測期間」を返す
- *  - 1=月〜7=日
- *  - 基本は「直近の指定曜日0:00〜次の指定曜日0:00」
- *  - ただし updatedAt がその期間内にあれば from を updatedAt に引き上げる
- */
+/** 週次: 現在の「計測期間」を返す */
 function getCurrentWeeklyPeriod(
   now: Date,
   weekday1to7: number,
   updatedAt?: string | null
 ): { from: Date; to: Date } {
-  let targetDow = weekday1to7 === 7 ? 0 : weekday1to7; // JS の getDay() は 0(日)〜6(土)
-  if (targetDow < 0 || targetDow > 6) targetDow = 1; // デフォルト月曜
+  let targetDow = weekday1to7 === 7 ? 0 : weekday1to7;
+  if (targetDow < 0 || targetDow > 6) targetDow = 1;
 
-  // 直近の「指定曜日 0:00」（now を含むかそれ以前）
   const last = new Date(now);
   last.setHours(0, 0, 0, 0);
   while (last.getDay() !== targetDow) {
@@ -78,7 +73,7 @@ function getCurrentWeeklyPeriod(
   if (updatedAt) {
     const u = new Date(updatedAt);
     if (!isNaN(u.getTime()) && u > from && u < next) {
-      from = u; // ON にした途中からカウント開始
+      from = u;
     }
   }
 
@@ -112,13 +107,11 @@ function getCurrentMonthlyPeriod(
   let prev: Date;
   let next: Date;
   if (now >= thisBoundary) {
-    // 今月の境界を過ぎている → 今月境界〜翌月境界
     prev = thisBoundary;
     const nextMonth = (m + 1) % 12;
     const nextYear = m === 11 ? y + 1 : y;
     next = getMonthlyBoundary(nextYear, nextMonth, scheduledDay);
   } else {
-    // まだ今月の境界前 → 先月境界〜今月境界
     const prevMonth = (m + 11) % 12;
     const prevYear = m === 0 ? y - 1 : y;
     prev = getMonthlyBoundary(prevYear, prevMonth, scheduledDay);
@@ -195,7 +188,10 @@ async function loadAutomationSettings(
   }
 }
 
-/** ========= 期間内の正規 / 不備 / 近似サイトを実テーブルから集計 ========= */
+/**
+ * ========= 期間内の正規 / 不備 / 近似サイトを実テーブルから集計 =========
+ *  ※ いずれも collected_by = 'auto' のものだけ
+ */
 async function countFromTable(
   sb: any,
   table: string,
@@ -205,8 +201,9 @@ async function countFromTable(
 ): Promise<number> {
   const { data, error } = await sb
     .from(table)
-    .select("id, created_at")
+    .select("id, created_at, collected_by")
     .eq("tenant_id", tenantId)
+    .eq("collected_by", "auto") // ★ 自動実行分のみ
     .gte("created_at", fromIso)
     .lt("created_at", toIso);
 
@@ -259,10 +256,8 @@ export async function GET(req: Request) {
     const { sb } = getAdmin();
     const now = nowJST();
 
-    // 0) 自動実行設定を取得（週次 / 月次 / 取得件数 / updated_at など）
     const settings = await loadAutomationSettings(req, tenantId);
 
-    // 1) 最新の自動ラン情報を取得（最後の1件）
     const { data: latestRows, error: latestErr } = await sb
       .from("form_outreach_auto_runs")
       .select("*")
@@ -274,7 +269,6 @@ export async function GET(req: Request) {
     if (latestErr) throw new Error(latestErr.message);
     const last = (latestRows || [])[0] as AutoRunRow | undefined;
 
-    // 2) 計測期間の from〜to を決める & 実テーブルから件数集計
     let todayTargetCount: number | null = null;
     let todayProcessedCount: number | null = null;
     let newProspects = 0;
@@ -295,7 +289,7 @@ export async function GET(req: Request) {
           settings.updated_at
         );
         periodFrom = from;
-        periodTo = now; // 「今の時点まで」の取得件数
+        periodTo = now;
       } else {
         const { from } = getCurrentMonthlyPeriod(
           now,
@@ -316,9 +310,9 @@ export async function GET(req: Request) {
       newRejected = summary.newRejected;
       newSimilar = summary.newSimilar;
 
+      // 進捗バーは「自動取得した企業リスト（form_prospects, collected_by='auto'）」の件数で管理
       todayProcessedCount = newProspects;
     } else {
-      // 自動取得OFFや設定取得失敗時は 0 として扱う
       todayTargetCount = null;
       todayProcessedCount = null;
       newProspects = 0;
@@ -326,13 +320,11 @@ export async function GET(req: Request) {
       newSimilar = 0;
     }
 
-    // 3) ステータス判定
     let status: "idle" | "running" | "completed" | "error" = "idle";
     if (last?.status === "running") status = "running";
     else if (last?.status === "completed") status = "completed";
     else if (last?.status === "error") status = "error";
 
-    // 4) キューの残り（単純に target_count - new_prospects として計算）
     const queueSize =
       last && last.status === "running"
         ? Math.max(
@@ -342,7 +334,6 @@ export async function GET(req: Request) {
           )
         : 0;
 
-    // 5) レスポンス
     return NextResponse.json(
       {
         progress: {
