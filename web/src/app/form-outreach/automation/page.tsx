@@ -147,6 +147,24 @@ export default function AutomationPage() {
     const fetchProgress = async () => {
       try {
         setProgressLoading(true);
+
+        // ★ 1) まずサーバー側の自動実行トリガーを叩く
+        //    - run-company-list 側で「週次 / 月次」「取得件数上限」「filters」を判定してくれる
+        //    - 条件を満たさないときは skipped:true で軽く返るだけ
+        try {
+          await fetch("/api/form-outreach/automation/run-company-list", {
+            method: "POST",
+            headers: {
+              "x-tenant-id": tenantId,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({ triggered_by: "progress" }),
+          });
+        } catch (e) {
+          console.error("auto run trigger failed:", e);
+        }
+
+        // ★ 2) その後で最新の進捗を取得
         const res = await fetch("/api/form-outreach/automation/progress", {
           headers: { "x-tenant-id": tenantId },
           cache: "no-store",
@@ -407,7 +425,7 @@ export default function AutomationPage() {
                 {/* 進捗バー（正規企業リスト基準） */}
                 {progressPercent != null ? (
                   <div>
-                    <div className="mb-1 flex items-center justify-between text-xs text-neutral-600">
+                    <div className="mb-1 flex items-center justify_between text-xs text-neutral-600">
                       <span>{statusLabel}</span>
                       <span>
                         {progress.today_processed_count ?? 0} /{" "}
@@ -867,7 +885,7 @@ function BlockA({ settings }: { settings: Settings }) {
 
 function BlockB({ settings }: { settings: Settings }) {
   return (
-    <div className="rounded-xl border border-neutral-200 bg-white p-3 shadow-sm">
+    <div className="rounded-xl border border-neutral-200 bg-white p-3 shadow_sm">
       <div className="mb-1 text-sm font-semibold text-neutral-800">
         メッセージ送信自動化
       </div>

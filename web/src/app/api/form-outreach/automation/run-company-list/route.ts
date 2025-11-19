@@ -15,7 +15,7 @@ const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
 type Settings = {
   auto_company_list: boolean;
   company_schedule: "weekly" | "monthly";
-  company_weekday?: number; // 1=月〜7=日（カウントのための情報。実行条件はCron/Progress側で制御）
+  company_weekday?: number; // 1=月〜7=日
   company_month_day?: number; // 1〜31
   company_limit?: number;
 };
@@ -170,10 +170,7 @@ async function loadFilters(
   return (data as FiltersRow) || null;
 }
 
-/** ========= 今週 / 今月の「自動取得件数(new_prospects)」を数える =========
- * form_outreach_auto_runs.kind = 'auto-company-list' のランだけを集計
- * → 手動ラン(manual-company-list など)とは完全に分離
- */
+/** ========= 今週 / 今月の「自動取得件数(new_prospects)」を数える ========= */
 async function countAutoThisWeek(
   sb: any,
   tenantId: string,
@@ -274,7 +271,7 @@ export async function POST(req: Request) {
         : undefined;
     const triggeredBy = body?.triggered_by || "system";
 
-    // 他の自動ラン(auto-company-list)が同時に走らないようにする（手動用kindとは分離）
+    // 他の自動ラン(auto-company-list)が同時に走らないようにする
     if (await hasRunningAuto(sb, tenantId)) {
       return NextResponse.json(
         {
@@ -309,7 +306,7 @@ export async function POST(req: Request) {
       `schedule=${settings.company_schedule} limit=${limit} currentAuto=${currentAutoCount}`
     );
 
-    // 例: 毎週10件 → 今週の自動取得が10件以上なら、この期間は何もしない
+    // 上限に達していれば、その期間は何もしない
     if (currentAutoCount >= limit) {
       return NextResponse.json(
         {
@@ -323,6 +320,51 @@ export async function POST(req: Request) {
       );
     }
 
+    // ====== ★ ここで「週次 / 月次のスケジュール」を判定する ======
+    if (settings.company_schedule === "weekly") {
+      const dow = now.getDay(); // 0(日)〜6(土)
+      const todayAs1to7 = dow === 0 ? 7 : dow; // 1=月〜7=日
+      const scheduledDow = settings.company_weekday ?? 1;
+
+      if (todayAs1to7 !== scheduledDow) {
+        // まだ実行日ではないのでスキップ（状態は前回の completed のまま）
+        return NextResponse.json(
+          {
+            skipped: true,
+            reason: "not scheduled weekday",
+            now_jst: now.toISOString(),
+            schedule: "weekly",
+            todayAs1to7,
+            scheduledDow,
+            currentAutoCount,
+            limit,
+          },
+          { status: 200 }
+        );
+      }
+    } else {
+      // 月次
+      const todayDate = now.getDate();
+      const scheduledDay = settings.company_month_day ?? 1;
+
+      if (todayDate !== scheduledDay) {
+        return NextResponse.json(
+          {
+            skipped: true,
+            reason: "not scheduled month day",
+            now_jst: now.toISOString(),
+            schedule: "monthly",
+            todayDate,
+            scheduledDay,
+            currentAutoCount,
+            limit,
+          },
+          { status: 200 }
+        );
+      }
+    }
+    // ====== ★ ここまでが「週次 / 月次のスケジュール判定」 ======
+
     // この期間で不足している「正規企業リスト」の件数
     const remain = Math.max(1, limit - currentAutoCount);
 
@@ -333,7 +375,6 @@ export async function POST(req: Request) {
         ? Math.min(remain, maxNewFromBody, MAX_PER_RUN)
         : Math.min(remain, MAX_PER_RUN);
 
-    // 念のため 1件以上に
     want = Math.max(1, want);
 
     trace.push(`auto-list: will run want=${want}`);
@@ -390,7 +431,6 @@ export async function POST(req: Request) {
     // 1) NTA から候補法人を取得して cache へ
     const crawlBody: any = { want };
     if (filters) {
-      // crawl 側では filters.prefectures を利用（他の条件は今後拡張する前提）
       crawlBody.filters = {
         prefectures: filters.prefectures ?? undefined,
       };
@@ -408,10 +448,8 @@ export async function POST(req: Request) {
     trace.push(`crawl_status=${crawlRes.status}`);
 
     // 2) cache → prospects へ enrich
-    // 「今回分」として区切るため、since は runStartedAt を使う
     const enrichBody: any = { since: runStartedAt, want, try_llm: false };
     if (filters) {
-      // enrich 側で業種や従業員規模などをフィルタする場合に備えて丸ごと渡す
       enrichBody.filters = filters;
     }
 
@@ -429,7 +467,6 @@ export async function POST(req: Request) {
     const enrichJson: any = await enrichRes.json().catch(() => ({}));
     trace.push(`enrich_status=${enrichRes.status}`);
 
-    // enrich の結果から「正規企業リスト」「不備」「近似サイト」の件数を取得
     const newProspects: number =
       Number(enrichJson?.recent_count ?? enrichJson?.inserted ?? 0) || 0;
     const newSimilar: number =
