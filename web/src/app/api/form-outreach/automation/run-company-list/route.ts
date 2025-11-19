@@ -1,7 +1,7 @@
 // web/src/app/api/form-outreach/automation/run-company-list/route.ts
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
@@ -139,7 +139,22 @@ async function loadAutomationSettings(
   }
 }
 
-/** ========= 今週 / 今月の「自動取得件数」を数える =========
+/** ========= form_outreach_filters のロード ========= */
+async function loadFilters(sb: any, tenantId: string): Promise<any | null> {
+  const { data, error } = await sb
+    .from("form_outreach_filters")
+    .select("*")
+    .eq("tenant_id", tenantId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("loadFilters error:", error.message);
+    return null;
+  }
+  return data || null;
+}
+
+/** ========= 今週 / 今月の「自動取得件数(new_prospects)」を数える =========
  * form_outreach_auto_runs.kind = 'auto-company-list' のランだけを集計
  * → 手動ラン(manual-company-list など)とは完全に分離
  */
@@ -232,6 +247,16 @@ export async function POST(req: Request) {
 
     const { sb, usingServiceRole } = getAdmin();
 
+    const body = (await req.json().catch(() => ({}))) as {
+      max_new_prospects?: number;
+      triggered_by?: string;
+    };
+    const maxNewFromBody =
+      body && typeof body.max_new_prospects === "number"
+        ? body.max_new_prospects
+        : undefined;
+    const triggeredBy = body?.triggered_by || "frontend_or_progress";
+
     // 他の自動ラン(auto-company-list)が同時に走らないようにする（手動用kindとは分離）
     if (await hasRunningAuto(sb, tenantId)) {
       return NextResponse.json(
@@ -267,8 +292,8 @@ export async function POST(req: Request) {
       `schedule=${settings.company_schedule} limit=${limit} currentAuto=${currentAutoCount}`
     );
 
-    // 例: 毎週月曜10件 → 今週の自動取得が10件未満なら「設定している今」からスタート
-    // 10件以上ある場合は、この週は動かず、次の週/次の月の始まり(指定曜日0:00付近でcronが叩いたタイミング)で start
+    // 例: 毎週月曜10件 → 今週の自動取得が10件未満なら「この時点から」自動取得
+    // 10件以上ある場合は、この期間は動かない（次の週 / 月に任せる）
     if (currentAutoCount >= limit) {
       return NextResponse.json(
         {
@@ -282,50 +307,12 @@ export async function POST(req: Request) {
       );
     }
 
-    // ここまで来たら「この期間の不足分だけ」自動取得を実行
-    // want = 上限 - これまでの自動取得数
-    let want = Math.max(1, limit - currentAutoCount);
-
-    // 週次の場合は「指定曜日」以外の日は動かさないようにする（例: company_weekday=1→月曜のみ実行）
-    if (settings.company_schedule === "weekly") {
-      const dow = now.getDay(); // 0(日)〜6(土)
-      const todayAs1to7 = dow === 0 ? 7 : dow; // 1=月〜7=日
-      const scheduledDow = settings.company_weekday ?? 1;
-
-      if (todayAs1to7 !== scheduledDow) {
-        // ただし「今週分が足りないから即スタート」の挙動は「指定曜日の中で」保証する仕様とする
-        return NextResponse.json(
-          {
-            skipped: true,
-            reason: "not scheduled weekday",
-            todayAs1to7,
-            scheduledDow,
-            schedule: "weekly",
-            currentAutoCount,
-            limit,
-          },
-          { status: 200 }
-        );
-      }
-    } else {
-      // 月次：指定日以外では実行しない
-      const todayDate = now.getDate();
-      const scheduledDay = settings.company_month_day ?? 1;
-      if (todayDate !== scheduledDay) {
-        return NextResponse.json(
-          {
-            skipped: true,
-            reason: "not scheduled month day",
-            todayDate,
-            scheduledDay,
-            schedule: "monthly",
-            currentAutoCount,
-            limit,
-          },
-          { status: 200 }
-        );
-      }
-    }
+    // この期間で不足している正規企業数
+    const remain = Math.max(1, limit - currentAutoCount);
+    const want =
+      typeof maxNewFromBody === "number" && maxNewFromBody > 0
+        ? Math.min(remain, maxNewFromBody)
+        : remain;
 
     trace.push(`auto-list: will run want=${want}`);
 
@@ -352,6 +339,7 @@ export async function POST(req: Request) {
             company_month_day: settings.company_month_day ?? null,
             limit,
             currentAutoCount_before: currentAutoCount,
+            triggered_by: triggeredBy,
           },
         },
       ])
@@ -367,6 +355,9 @@ export async function POST(req: Request) {
     const runRow = (insertedRuns || [])[0] as AutoRunRow | undefined;
     const runId = runRow?.id;
 
+    // ========= form_outreach_filters を取得 =========
+    const filters = await loadFilters(sb, tenantId);
+
     // ========= 実際の「法人リスト取得」処理: crawl → enrich =========
     const u = new URL(req.url);
     const base =
@@ -375,20 +366,31 @@ export async function POST(req: Request) {
       "http://localhost:3000";
 
     // 1) NTA から候補法人を取得して cache へ
+    const crawlBody: any = { want };
+    if (filters) {
+      // /companies/crawl 側で filters を解釈してもらう想定
+      crawlBody.filters = filters;
+    }
+
     const crawlRes = await fetch(`${base}/api/form-outreach/companies/crawl`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
         "x-tenant-id": tenantId,
       },
-      body: JSON.stringify({ want }),
+      body: JSON.stringify(crawlBody),
     });
     const crawlJson: any = await crawlRes.json().catch(() => ({}));
     trace.push(`crawl_status=${crawlRes.status}`);
 
     // 2) cache → prospects へ enrich
-    // 「今回分」として区切るため、since は今の時刻を使う
-    const since = runStartedAt;
+    // 「今回分」として区切るため、since は runStartedAt を使う
+    const enrichBody: any = { since: runStartedAt, want, try_llm: false };
+    if (filters) {
+      // 必要に応じて enrich 側にも filters を渡せるようにしておく
+      enrichBody.filters = filters;
+    }
+
     const enrichRes = await fetch(
       `${base}/api/form-outreach/companies/enrich`,
       {
@@ -397,12 +399,13 @@ export async function POST(req: Request) {
           "content-type": "application/json",
           "x-tenant-id": tenantId,
         },
-        body: JSON.stringify({ since, want, try_llm: false }),
+        body: JSON.stringify(enrichBody),
       }
     );
     const enrichJson: any = await enrichRes.json().catch(() => ({}));
     trace.push(`enrich_status=${enrichRes.status}`);
 
+    // enrich の結果から「正規企業リスト」「不備」「近似サイト」の件数を取得
     const newProspects: number =
       Number(enrichJson?.recent_count ?? enrichJson?.inserted ?? 0) || 0;
     const newSimilar: number =
