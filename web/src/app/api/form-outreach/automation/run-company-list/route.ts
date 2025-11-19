@@ -15,7 +15,7 @@ const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
 type Settings = {
   auto_company_list: boolean;
   company_schedule: "weekly" | "monthly";
-  company_weekday?: number; // 1=月〜7=日
+  company_weekday?: number; // 1=月〜7=日（カウントのための情報。実行条件はCron/Progress側で制御）
   company_month_day?: number; // 1〜31
   company_limit?: number;
 };
@@ -35,6 +35,19 @@ type AutoRunRow = {
   last_progress_at: string | null;
   error_text: string | null;
   meta: any;
+};
+
+type FiltersRow = {
+  tenant_id: string;
+  prefectures?: string[] | null;
+  employee_size_ranges?: string[] | null;
+  keywords?: string[] | null;
+  industries_large?: string[] | null;
+  industries_small?: string[] | null;
+  capital_min?: number | null;
+  capital_max?: number | null;
+  established_from?: string | null;
+  established_to?: string | null;
 };
 
 /** ========= Utils ========= */
@@ -140,7 +153,10 @@ async function loadAutomationSettings(
 }
 
 /** ========= form_outreach_filters のロード ========= */
-async function loadFilters(sb: any, tenantId: string): Promise<any | null> {
+async function loadFilters(
+  sb: any,
+  tenantId: string
+): Promise<FiltersRow | null> {
   const { data, error } = await sb
     .from("form_outreach_filters")
     .select("*")
@@ -151,7 +167,7 @@ async function loadFilters(sb: any, tenantId: string): Promise<any | null> {
     console.error("loadFilters error:", error.message);
     return null;
   }
-  return data || null;
+  return (data as FiltersRow) || null;
 }
 
 /** ========= 今週 / 今月の「自動取得件数(new_prospects)」を数える =========
@@ -247,15 +263,16 @@ export async function POST(req: Request) {
 
     const { sb, usingServiceRole } = getAdmin();
 
+    // body は Cron や Progress からも叩きやすいように任意
     const body = (await req.json().catch(() => ({}))) as {
       max_new_prospects?: number;
-      triggered_by?: string;
+      triggered_by?: string; // "cron" | "progress" | "manual" など
     };
     const maxNewFromBody =
       body && typeof body.max_new_prospects === "number"
         ? body.max_new_prospects
         : undefined;
-    const triggeredBy = body?.triggered_by || "frontend_or_progress";
+    const triggeredBy = body?.triggered_by || "system";
 
     // 他の自動ラン(auto-company-list)が同時に走らないようにする（手動用kindとは分離）
     if (await hasRunningAuto(sb, tenantId)) {
@@ -292,8 +309,7 @@ export async function POST(req: Request) {
       `schedule=${settings.company_schedule} limit=${limit} currentAuto=${currentAutoCount}`
     );
 
-    // 例: 毎週月曜10件 → 今週の自動取得が10件未満なら「この時点から」自動取得
-    // 10件以上ある場合は、この期間は動かない（次の週 / 月に任せる）
+    // 例: 毎週10件 → 今週の自動取得が10件以上なら、この期間は何もしない
     if (currentAutoCount >= limit) {
       return NextResponse.json(
         {
@@ -307,14 +323,23 @@ export async function POST(req: Request) {
       );
     }
 
-    // この期間で不足している正規企業数
+    // この期間で不足している「正規企業リスト」の件数
     const remain = Math.max(1, limit - currentAutoCount);
-    const want =
+
+    // crawl ルートが want を 1〜200 に clamp しているので、それに合わせる
+    const MAX_PER_RUN = 200;
+    let want =
       typeof maxNewFromBody === "number" && maxNewFromBody > 0
-        ? Math.min(remain, maxNewFromBody)
-        : remain;
+        ? Math.min(remain, maxNewFromBody, MAX_PER_RUN)
+        : Math.min(remain, MAX_PER_RUN);
+
+    // 念のため 1件以上に
+    want = Math.max(1, want);
 
     trace.push(`auto-list: will run want=${want}`);
+
+    // ========= form_outreach_filters を取得（prefectures などを crawl/enrich に渡す） =========
+    const filters = await loadFilters(sb, tenantId);
 
     // ========= form_outreach_auto_runs に「自動ラン」行を作成 =========
     const runStartedAt = new Date().toISOString();
@@ -355,9 +380,6 @@ export async function POST(req: Request) {
     const runRow = (insertedRuns || [])[0] as AutoRunRow | undefined;
     const runId = runRow?.id;
 
-    // ========= form_outreach_filters を取得 =========
-    const filters = await loadFilters(sb, tenantId);
-
     // ========= 実際の「法人リスト取得」処理: crawl → enrich =========
     const u = new URL(req.url);
     const base =
@@ -368,8 +390,10 @@ export async function POST(req: Request) {
     // 1) NTA から候補法人を取得して cache へ
     const crawlBody: any = { want };
     if (filters) {
-      // /companies/crawl 側で filters を解釈してもらう想定
-      crawlBody.filters = filters;
+      // crawl 側では filters.prefectures を利用（他の条件は今後拡張する前提）
+      crawlBody.filters = {
+        prefectures: filters.prefectures ?? undefined,
+      };
     }
 
     const crawlRes = await fetch(`${base}/api/form-outreach/companies/crawl`, {
@@ -387,7 +411,7 @@ export async function POST(req: Request) {
     // 「今回分」として区切るため、since は runStartedAt を使う
     const enrichBody: any = { since: runStartedAt, want, try_llm: false };
     if (filters) {
-      // 必要に応じて enrich 側にも filters を渡せるようにしておく
+      // enrich 側で業種や従業員規模などをフィルタする場合に備えて丸ごと渡す
       enrichBody.filters = filters;
     }
 
