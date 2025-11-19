@@ -32,6 +32,12 @@ type AutomationProgress = {
   last_run_finished_at?: string | null;
   today_target_count?: number | null;
   today_processed_count?: number | null;
+
+  // ▼ 追加: 今日の新規件数（正規 / 不備 / 近似サイト）
+  today_new_prospects?: number | null;
+  today_new_rejected?: number | null;
+  today_new_similar_sites?: number | null;
+
   queue_size?: number | null;
   error_message?: string | null;
 };
@@ -166,6 +172,15 @@ export default function AutomationPage() {
             p.today_target_count ?? prev?.today_target_count ?? null,
           today_processed_count:
             p.today_processed_count ?? prev?.today_processed_count ?? null,
+
+          // ▼ 追加: 正規 / 不備 / 近似サイト
+          today_new_prospects:
+            p.today_new_prospects ?? prev?.today_new_prospects ?? null,
+          today_new_rejected:
+            p.today_new_rejected ?? prev?.today_new_rejected ?? null,
+          today_new_similar_sites:
+            p.today_new_similar_sites ?? prev?.today_new_similar_sites ?? null,
+
           queue_size: p.queue_size ?? prev?.queue_size ?? null,
           error_message: p.error_message ?? prev?.error_message ?? null,
         }));
@@ -388,8 +403,8 @@ export default function AutomationPage() {
             </div>
 
             {progress ? (
-              <div className="mt-3 space-y-3">
-                {/* 進捗バー */}
+              <div className="mt-3 space-y-4">
+                {/* 進捗バー（正規企業リスト基準） */}
                 {progressPercent != null ? (
                   <div>
                     <div className="mb-1 flex items-center justify-between text-xs text-neutral-600">
@@ -415,6 +430,47 @@ export default function AutomationPage() {
                     {progress.label ? `（${progress.label}）` : ""}
                   </div>
                 )}
+
+                {/* 正規 / 不備 / 近似サイト のサマリカード */}
+                <div className="grid grid-cols-1 gap-3 text-[11px] text-neutral-700 md:grid-cols-3">
+                  <div className="rounded-lg border border-emerald-100 bg-emerald-50/60 px-3 py-2">
+                    <div className="text-[11px] font-medium text-emerald-800">
+                      正規企業リスト（新規）
+                    </div>
+                    <div className="mt-1 text-lg font-semibold text-emerald-900">
+                      {progress.today_new_prospects ?? 0} 件
+                    </div>
+                    <p className="mt-0.5 text-[10px] text-emerald-800/80">
+                      今日、自動処理で <code>form_prospects</code>{" "}
+                      に追加された件数
+                    </p>
+                  </div>
+
+                  <div className="rounded-lg border border-amber-100 bg-amber-50/60 px-3 py-2">
+                    <div className="text-[11px] font-medium text-amber-800">
+                      不備企業リスト（除外）
+                    </div>
+                    <div className="mt-1 text-lg font-semibold text-amber-900">
+                      {progress.today_new_rejected ?? 0} 件
+                    </div>
+                    <p className="mt-0.5 text-[10px] text-amber-800/80">
+                      今日、条件不一致などで{" "}
+                      <code>form_prospects_rejected</code> に入った件数
+                    </p>
+                  </div>
+
+                  <div className="rounded-lg border border-sky-100 bg-sky-50/60 px-3 py-2">
+                    <div className="text-[11px] font-medium text-sky-800">
+                      近似サイトリスト（要確認）
+                    </div>
+                    <div className="mt-1 text-lg font-semibold text-sky-900">
+                      {progress.today_new_similar_sites ?? 0} 件
+                    </div>
+                    <p className="mt-0.5 text-[10px] text-sky-800/80">
+                      今日、<code>form_similar_sites</code> に保存された件数
+                    </p>
+                  </div>
+                </div>
 
                 {/* 実行時間などの詳細 */}
                 <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-neutral-600 md:grid-cols-4">

@@ -29,14 +29,6 @@ type AutoRunRow = {
   meta: any;
 };
 
-type Settings = {
-  auto_company_list: boolean;
-  company_schedule: "weekly" | "monthly";
-  company_weekday?: number;
-  company_month_day?: number;
-  company_limit?: number;
-};
-
 /** ========= Utils ========= */
 
 function okUuid(s: string) {
@@ -81,85 +73,56 @@ function getAdmin(): { sb: any; usingServiceRole: boolean } {
   };
 }
 
-/** ========= 設定ロード（既存 settings API を叩く） ========= */
-async function loadAutomationSettings(
-  req: Request,
-  tenantId: string
-): Promise<Settings | null> {
-  try {
-    const u = new URL(req.url);
-    const base =
-      process.env.APP_URL ||
-      `${u.protocol}//${u.host}` ||
-      "http://localhost:3000";
-
-    const res = await fetch(`${base}/api/form-outreach/automation/settings`, {
-      headers: {
-        "x-tenant-id": tenantId,
-      },
-      cache: "no-store",
-    });
-
-    if (!res.ok) return null;
-
-    const j = await res.json().catch(() => ({}));
-    const s = (j?.settings ?? j) as Partial<Settings>;
-
-    return {
-      auto_company_list: !!s.auto_company_list,
-      company_schedule: s.company_schedule ?? "weekly",
-      company_weekday: s.company_weekday ?? 1,
-      company_month_day: s.company_month_day ?? 1,
-      company_limit: s.company_limit ?? 100,
-    };
-  } catch {
-    return null;
-  }
-}
-
-/** ========= いま自動ランが走っているか ========= */
-async function hasRunningAuto(sb: any, tenantId: string): Promise<boolean> {
-  const { data, error } = await sb
-    .from("form_outreach_auto_runs")
-    .select("id")
-    .eq("tenant_id", tenantId)
-    .eq("kind", "auto-company-list")
-    .eq("status", "running")
-    .limit(1);
-
-  if (error) throw new Error(error.message);
-  return Array.isArray(data) && data.length > 0;
-}
-
-/** ========= 今日の自動実行件数サマリ ========= */
+/** ========= 今日の自動実行件数サマリ =========
+ *  正規企業 / 不備企業 / 近似サイトをそれぞれ集計
+ */
 async function loadTodaySummary(
   sb: any,
   tenantId: string,
   now = nowJST()
-): Promise<{ target: number; processed: number }> {
-  const from = startOfTodayJST(now);
-  const to = startOfTomorrowJST(now);
+): Promise<{
+  target: number;
+  processed: number;
+  newProspects: number;
+  newRejected: number;
+  newSimilar: number;
+}> {
+  const from = startOfTodayJST(now).toISOString();
+  const to = startOfTomorrowJST(now).toISOString();
 
   const { data, error } = await sb
     .from("form_outreach_auto_runs")
-    .select("target_count,new_prospects")
+    .select(
+      "target_count,new_prospects,new_rejected,new_similar_sites,status,kind"
+    )
     .eq("tenant_id", tenantId)
     .eq("kind", "auto-company-list")
-    .gte("started_at", from.toISOString())
-    .lt("started_at", to.toISOString());
+    .gte("started_at", from)
+    .lt("started_at", to);
 
   if (error) throw new Error(error.message);
   const rows = (data || []) as AutoRunRow[];
 
   let target = 0;
-  let processed = 0;
+  let processed = 0; // 「正規企業リスト」の進捗基準
+  let newProspects = 0;
+  let newRejected = 0;
+  let newSimilar = 0;
+
   for (const r of rows) {
     const t = Number(r.target_count ?? 0) || 0;
-    const p = Number(r.new_prospects ?? 0) || 0;
+    const np = Number(r.new_prospects ?? 0) || 0;
+    const nr = Number(r.new_rejected ?? 0) || 0;
+    const ns = Number(r.new_similar_sites ?? 0) || 0;
+
     target += t;
-    processed += p || t; // new_prospects が null の場合は target_count を代替
+    processed += np; // 進捗バーは「正規企業リスト（new_prospects）」基準
+    newProspects += np;
+    newRejected += nr;
+    newSimilar += ns;
   }
-  return { target, processed };
+
+  return { target, processed, newProspects, newRejected, newSimilar };
 }
 
 /** ========= メイン Handler ========= */
@@ -180,13 +143,8 @@ export async function GET(req: Request) {
 
     const { sb } = getAdmin();
     const now = nowJST();
-    const url = new URL(req.url);
-    const base =
-      process.env.APP_URL ||
-      `${url.protocol}//${url.host}` ||
-      "http://localhost:3000";
 
-    // 1) まず現在の最新ラン情報を取得
+    // 1) 最新の自動ラン情報を取得（最後の1件）
     const { data: latestRows, error: latestErr } = await sb
       .from("form_outreach_auto_runs")
       .select("*")
@@ -197,72 +155,47 @@ export async function GET(req: Request) {
 
     if (latestErr) throw new Error(latestErr.message);
     const last = (latestRows || [])[0] as AutoRunRow | undefined;
-    const hasRunning =
-      last?.status === "running" || (await hasRunningAuto(sb, tenantId));
 
-    // 2) 自動リスト取得を「必要なら実行」する
-    // ・auto_company_list が ON
-    // ・現在 running ではない
-    // というときに /automation/run-company-list を叩いて実行させる
-    if (!hasRunning) {
-      const settings = await loadAutomationSettings(req, tenantId);
-      if (settings && settings.auto_company_list) {
-        try {
-          await fetch(`${base}/api/form-outreach/automation/run-company-list`, {
-            method: "POST",
-            headers: {
-              "x-tenant-id": tenantId,
-              "content-type": "application/json",
-            },
-            body: JSON.stringify({}), // 判定ロジックは run-company-list 側で実施
-          });
-        } catch (e) {
-          // 自動起動のエラーは progress には出さず、ログに留める
-          console.error("auto run trigger failed:", e);
-        }
-      }
-    }
+    // 2) 今日のサマリを取得（正規 / 不備 / 近似サイト）
+    const {
+      target: todayTarget,
+      processed: todayProcessed,
+      newProspects,
+      newRejected,
+      newSimilar,
+    } = await loadTodaySummary(sb, tenantId, now);
 
-    // 3) 実行の有無にかかわらず、改めて最新ランと今日のサマリを取得して返す
-    const { data: latestRows2, error: latestErr2 } = await sb
-      .from("form_outreach_auto_runs")
-      .select("*")
-      .eq("tenant_id", tenantId)
-      .eq("kind", "auto-company-list")
-      .order("started_at", { ascending: false })
-      .limit(1);
-
-    if (latestErr2) throw new Error(latestErr2.message);
-    const last2 = (latestRows2 || [])[0] as AutoRunRow | undefined;
-
-    const { target: todayTarget, processed: todayProcessed } =
-      await loadTodaySummary(sb, tenantId, now);
-
+    // 3) ステータス判定
     let status: "idle" | "running" | "completed" | "error" = "idle";
-    if (last2?.status === "running") status = "running";
-    else if (last2?.status === "completed") status = "completed";
-    else if (last2?.status === "error") status = "error";
+    if (last?.status === "running") status = "running";
+    else if (last?.status === "completed") status = "completed";
+    else if (last?.status === "error") status = "error";
 
+    // 4) キューの残り（単純に target_count - new_prospects として計算）
     const queueSize =
-      last2 && last2.status === "running"
+      last && last.status === "running"
         ? Math.max(
             0,
-            (Number(last2.target_count ?? 0) || 0) -
-              (Number(last2.new_prospects ?? 0) || 0)
+            (Number(last.target_count ?? 0) || 0) -
+              (Number(last.new_prospects ?? 0) || 0)
           )
         : 0;
 
+    // 5) レスポンス
     return NextResponse.json(
       {
         progress: {
           status,
-          label: last2?.last_message ?? null,
-          last_run_started_at: last2?.started_at ?? null,
-          last_run_finished_at: last2?.finished_at ?? null,
+          label: last?.last_message ?? null,
+          last_run_started_at: last?.started_at ?? null,
+          last_run_finished_at: last?.finished_at ?? null,
           today_target_count: todayTarget || null,
           today_processed_count: todayProcessed || null,
+          today_new_prospects: newProspects || null,
+          today_new_rejected: newRejected || null,
+          today_new_similar_sites: newSimilar || null,
           queue_size: queueSize || null,
-          error_message: last2?.error_text ?? null,
+          error_message: last?.error_text ?? null,
         },
       },
       { status: 200 }
