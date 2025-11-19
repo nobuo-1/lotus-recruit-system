@@ -18,6 +18,7 @@ type Settings = {
   company_weekday?: number; // 1=月〜7=日
   company_month_day?: number; // 1〜31
   company_limit?: number;
+  updated_at?: string | null;
 };
 
 type AutoRunRow = {
@@ -66,35 +67,81 @@ function nowJST(): Date {
   );
 }
 
-// 週の開始(月曜0:00)〜次週(月曜0:00)
-function startOfThisWeekJST(base?: Date): Date {
-  const d = base ? new Date(base) : nowJST();
-  const day = d.getDay(); // 0(日)〜6(土)
-  const diff = day === 0 ? -6 : 1 - day; // 月曜を週頭とする
-  const monday = new Date(d);
-  monday.setDate(d.getDate() + diff);
-  monday.setHours(0, 0, 0, 0);
-  return monday;
-}
-function startOfNextWeekJST(base?: Date): Date {
-  const monday = startOfThisWeekJST(base);
-  const next = new Date(monday);
-  next.setDate(monday.getDate() + 7);
-  return next;
+/** 週次: 現在の「計測期間」を返す（progress と同じロジック） */
+function getCurrentWeeklyPeriod(
+  now: Date,
+  weekday1to7: number,
+  updatedAt?: string | null
+): { from: Date; to: Date } {
+  let targetDow = weekday1to7 === 7 ? 0 : weekday1to7; // JS getDay: 0(日)〜6(土)
+  if (targetDow < 0 || targetDow > 6) targetDow = 1;
+
+  const last = new Date(now);
+  last.setHours(0, 0, 0, 0);
+  while (last.getDay() !== targetDow) {
+    last.setDate(last.getDate() - 1);
+  }
+  const next = new Date(last);
+  next.setDate(next.getDate() + 7);
+
+  let from = last;
+  if (updatedAt) {
+    const u = new Date(updatedAt);
+    if (!isNaN(u.getTime()) && u > from && u < next) {
+      from = u;
+    }
+  }
+
+  return { from, to: next };
 }
 
-// 月の開始(1日0:00)〜翌月(1日0:00)
-function startOfThisMonthJST(base?: Date): Date {
-  const d = base ? new Date(base) : nowJST();
-  const m0 = new Date(d.getFullYear(), d.getMonth(), 1);
-  m0.setHours(0, 0, 0, 0);
-  return m0;
+/** 月次: その月に存在しない日付の場合は、月内の最大日を使う */
+function getMonthlyBoundary(
+  year: number,
+  month0: number,
+  scheduledDay: number
+): Date {
+  const daysInMonth = new Date(year, month0 + 1, 0).getDate();
+  const safeDay = Math.max(1, Math.min(scheduledDay, daysInMonth));
+  const d = new Date(year, month0, safeDay);
+  d.setHours(0, 0, 0, 0);
+  return d;
 }
-function startOfNextMonthJST(base?: Date): Date {
-  const d = base ? new Date(base) : nowJST();
-  const m0 = new Date(d.getFullYear(), d.getMonth() + 1, 1);
-  m0.setHours(0, 0, 0, 0);
-  return m0;
+
+/** 月次: 現在の「計測期間」を返す */
+function getCurrentMonthlyPeriod(
+  now: Date,
+  scheduledDay: number,
+  updatedAt?: string | null
+): { from: Date; to: Date } {
+  const y = now.getFullYear();
+  const m = now.getMonth();
+
+  const thisBoundary = getMonthlyBoundary(y, m, scheduledDay);
+
+  let prev: Date;
+  let next: Date;
+  if (now >= thisBoundary) {
+    prev = thisBoundary;
+    const nextMonth = (m + 1) % 12;
+    const nextYear = m === 11 ? y + 1 : y;
+    next = getMonthlyBoundary(nextYear, nextMonth, scheduledDay);
+  } else {
+    const prevMonth = (m + 11) % 12;
+    const prevYear = m === 0 ? y - 1 : y;
+    prev = getMonthlyBoundary(prevYear, prevMonth, scheduledDay);
+    next = thisBoundary;
+  }
+
+  let from = prev;
+  if (updatedAt) {
+    const u = new Date(updatedAt);
+    if (!isNaN(u.getTime()) && u > from && u < next) {
+      from = u;
+    }
+  }
+
+  return { from, to: next };
 }
 
 /** ========= Supabase ========= */
@@ -139,6 +186,8 @@ async function loadAutomationSettings(
 
     const j = await res.json().catch(() => ({}));
     const s = (j?.settings ?? j) as Partial<Settings>;
+    const updated =
+      (j as any)?.updatedAt || (j as any)?.updated_at || s.updated_at || null;
 
     return {
       auto_company_list: !!s.auto_company_list,
@@ -146,6 +195,7 @@ async function loadAutomationSettings(
       company_weekday: s.company_weekday ?? 1,
       company_month_day: s.company_month_day ?? 1,
       company_limit: s.company_limit ?? 100,
+      updated_at: updated,
     };
   } catch {
     return null;
@@ -170,55 +220,45 @@ async function loadFilters(
   return (data as FiltersRow) || null;
 }
 
-/** ========= 今週 / 今月の「自動取得件数(new_prospects)」を数える ========= */
-async function countAutoThisWeek(
+/** ========= 現在の期間内に form_prospects へ入っている件数を集計 ========= */
+async function countProspectsInCurrentPeriod(
   sb: any,
   tenantId: string,
-  now = nowJST()
-): Promise<number> {
-  const from = startOfThisWeekJST(now);
-  const to = startOfNextWeekJST(now);
+  settings: Settings,
+  now: Date
+): Promise<{ currentAutoCount: number; periodFrom: Date }> {
+  let periodFrom: Date;
+  if (settings.company_schedule === "weekly") {
+    const { from } = getCurrentWeeklyPeriod(
+      now,
+      settings.company_weekday ?? 1,
+      settings.updated_at
+    );
+    periodFrom = from;
+  } else {
+    const { from } = getCurrentMonthlyPeriod(
+      now,
+      settings.company_month_day ?? 1,
+      settings.updated_at
+    );
+    periodFrom = from;
+  }
+
+  const fromIso = periodFrom.toISOString();
+  const toIso = now.toISOString();
 
   const { data, error } = await sb
-    .from("form_outreach_auto_runs")
-    .select("new_prospects, target_count")
+    .from("form_prospects")
+    .select("id, created_at")
     .eq("tenant_id", tenantId)
-    .eq("kind", "auto-company-list")
-    .eq("status", "completed")
-    .gte("started_at", from.toISOString())
-    .lt("started_at", to.toISOString());
+    .gte("created_at", fromIso)
+    .lt("created_at", toIso);
 
   if (error) throw new Error(error.message);
-  const rows = (data || []) as AutoRunRow[];
-  return rows.reduce((sum, r) => {
-    const n = r.new_prospects ?? r.target_count ?? 0;
-    return sum + (Number.isFinite(n as any) ? Number(n) : 0);
-  }, 0);
-}
+  const rows = Array.isArray(data) ? data : [];
+  const count = rows.length;
 
-async function countAutoThisMonth(
-  sb: any,
-  tenantId: string,
-  now = nowJST()
-): Promise<number> {
-  const from = startOfThisMonthJST(now);
-  const to = startOfNextMonthJST(now);
-
-  const { data, error } = await sb
-    .from("form_outreach_auto_runs")
-    .select("new_prospects, target_count")
-    .eq("tenant_id", tenantId)
-    .eq("kind", "auto-company-list")
-    .eq("status", "completed")
-    .gte("started_at", from.toISOString())
-    .lt("started_at", to.toISOString());
-
-  if (error) throw new Error(error.message);
-  const rows = (data || []) as AutoRunRow[];
-  return rows.reduce((sum, r) => {
-    const n = r.new_prospects ?? r.target_count ?? 0;
-    return sum + (Number.isFinite(n as any) ? Number(n) : 0);
-  }, 0);
+  return { currentAutoCount: count, periodFrom };
 }
 
 /** ========= すでに「自動ラン」が走っていないか（並行防止は自動だけ） ========= */
@@ -282,7 +322,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // 設定ロード（既存 API を利用）
+    // 設定ロード
     const settings = await loadAutomationSettings(req, tenantId);
     if (!settings || !settings.auto_company_list) {
       return NextResponse.json(
@@ -294,19 +334,17 @@ export async function POST(req: Request) {
     const now = nowJST();
     const limit = settings.company_limit ?? 100;
 
-    // 週次 / 月次別に「今週/今月の自動取得件数(自動ランのみ)」を集計
-    let currentAutoCount = 0;
-    if (settings.company_schedule === "weekly") {
-      currentAutoCount = await countAutoThisWeek(sb, tenantId, now);
-    } else {
-      currentAutoCount = await countAutoThisMonth(sb, tenantId, now);
-    }
+    // 現在の期間内にすでに取得済みの「正規企業リスト」の件数（form_prospects ベース）
+    const { currentAutoCount, periodFrom } =
+      await countProspectsInCurrentPeriod(sb, tenantId, settings, now);
 
     trace.push(
-      `schedule=${settings.company_schedule} limit=${limit} currentAuto=${currentAutoCount}`
+      `schedule=${
+        settings.company_schedule
+      } limit=${limit} currentAuto=${currentAutoCount} periodFrom=${periodFrom.toISOString()}`
     );
 
-    // 上限に達していれば、その期間は何もしない
+    // 上限に達していれば、この期間は何もしない
     if (currentAutoCount >= limit) {
       return NextResponse.json(
         {
@@ -320,14 +358,13 @@ export async function POST(req: Request) {
       );
     }
 
-    // ====== ★ ここで「週次 / 月次のスケジュール」を判定する ======
+    // ====== 週次 / 月次の「実行日」かどうかを判定 ======
     if (settings.company_schedule === "weekly") {
       const dow = now.getDay(); // 0(日)〜6(土)
       const todayAs1to7 = dow === 0 ? 7 : dow; // 1=月〜7=日
       const scheduledDow = settings.company_weekday ?? 1;
 
       if (todayAs1to7 !== scheduledDow) {
-        // まだ実行日ではないのでスキップ（状態は前回の completed のまま）
         return NextResponse.json(
           {
             skipped: true,
@@ -363,7 +400,7 @@ export async function POST(req: Request) {
         );
       }
     }
-    // ====== ★ ここまでが「週次 / 月次のスケジュール判定」 ======
+    // ====== ここまでが「週次 / 月次のスケジュール判定」 ======
 
     // この期間で不足している「正規企業リスト」の件数
     const remain = Math.max(1, limit - currentAutoCount);
@@ -405,6 +442,7 @@ export async function POST(req: Request) {
             company_month_day: settings.company_month_day ?? null,
             limit,
             currentAutoCount_before: currentAutoCount,
+            period_from: periodFrom.toISOString(),
             triggered_by: triggeredBy,
           },
         },
@@ -467,8 +505,11 @@ export async function POST(req: Request) {
     const enrichJson: any = await enrichRes.json().catch(() => ({}));
     trace.push(`enrich_status=${enrichRes.status}`);
 
-    const newProspects: number =
-      Number(enrichJson?.recent_count ?? enrichJson?.inserted ?? 0) || 0;
+    // enrich の返り値に依存せず、「実際に form_prospects に入った件数」を数え直す
+    const { currentAutoCount: totalAfterRun } =
+      await countProspectsInCurrentPeriod(sb, tenantId, settings, nowJST());
+    const newProspects = Math.max(0, totalAfterRun - currentAutoCount);
+
     const newSimilar: number =
       Number(enrichJson?.recent_similar_count ?? 0) || 0;
     const rejectedCount: number = Array.isArray(enrichJson?.rejected)

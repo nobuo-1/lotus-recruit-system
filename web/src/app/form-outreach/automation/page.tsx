@@ -33,7 +33,7 @@ type AutomationProgress = {
   today_target_count?: number | null;
   today_processed_count?: number | null;
 
-  // ▼ 追加: 今日の新規件数（正規 / 不備 / 近似サイト）
+  // ▼ 追加: 期間内の新規件数（正規 / 不備 / 近似サイト）
   today_new_prospects?: number | null;
   today_new_rejected?: number | null;
   today_new_similar_sites?: number | null;
@@ -412,7 +412,7 @@ export default function AutomationPage() {
                   自動実行の進捗
                 </div>
                 <p className="mt-1 text-xs text-neutral-500">
-                  今日分の自動処理の進み具合を表示します。
+                  週次・月次の設定に応じた「現在の期間」での自動処理の状況を表示します。
                 </p>
               </div>
               {progressLoading && (
@@ -425,7 +425,7 @@ export default function AutomationPage() {
                 {/* 進捗バー（正規企業リスト基準） */}
                 {progressPercent != null ? (
                   <div>
-                    <div className="mb-1 flex items-center justify_between text-xs text-neutral-600">
+                    <div className="mb-1 flex items-center justify-between text-xs text-neutral-600">
                       <span>{statusLabel}</span>
                       <span>
                         {progress.today_processed_count ?? 0} /{" "}
@@ -459,7 +459,7 @@ export default function AutomationPage() {
                       {progress.today_new_prospects ?? 0} 件
                     </div>
                     <p className="mt-0.5 text-[10px] text-emerald-800/80">
-                      今日、自動処理で <code>form_prospects</code>{" "}
+                      現在の集計期間内に自動処理で <code>form_prospects</code>{" "}
                       に追加された件数
                     </p>
                   </div>
@@ -472,7 +472,7 @@ export default function AutomationPage() {
                       {progress.today_new_rejected ?? 0} 件
                     </div>
                     <p className="mt-0.5 text-[10px] text-amber-800/80">
-                      今日、条件不一致などで{" "}
+                      現在の集計期間内で条件不一致などにより{" "}
                       <code>form_prospects_rejected</code> に入った件数
                     </p>
                   </div>
@@ -485,7 +485,8 @@ export default function AutomationPage() {
                       {progress.today_new_similar_sites ?? 0} 件
                     </div>
                     <p className="mt-0.5 text-[10px] text-sky-800/80">
-                      今日、<code>form_similar_sites</code> に保存された件数
+                      現在の集計期間内に <code>form_similar_sites</code>{" "}
+                      に保存された件数
                     </p>
                   </div>
                 </div>
@@ -501,7 +502,7 @@ export default function AutomationPage() {
                     <dd>{formatTsJST(progress.last_run_finished_at)}</dd>
                   </div>
                   <div>
-                    <dt className="text-neutral-400">今日の対象件数</dt>
+                    <dt className="text-neutral-400">対象件数（期間）</dt>
                     <dd>
                       {progress.today_target_count != null
                         ? `${progress.today_target_count} 件`
@@ -509,7 +510,9 @@ export default function AutomationPage() {
                     </dd>
                   </div>
                   <div>
-                    <dt className="text-neutral-400">今日の処理済み件数</dt>
+                    <dt className="text-neutral-400">
+                      正規企業リスト（期間内）
+                    </dt>
                     <dd>
                       {progress.today_processed_count != null
                         ? `${progress.today_processed_count} 件`
@@ -885,7 +888,7 @@ function BlockA({ settings }: { settings: Settings }) {
 
 function BlockB({ settings }: { settings: Settings }) {
   return (
-    <div className="rounded-xl border border-neutral-200 bg-white p-3 shadow_sm">
+    <div className="rounded-xl border border-neutral-200 bg-white p-3 shadow-sm">
       <div className="mb-1 text-sm font-semibold text-neutral-800">
         メッセージ送信自動化
       </div>

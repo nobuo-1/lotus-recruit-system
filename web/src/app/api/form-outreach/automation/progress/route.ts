@@ -29,6 +29,15 @@ type AutoRunRow = {
   meta: any;
 };
 
+type Settings = {
+  auto_company_list: boolean;
+  company_schedule: "weekly" | "monthly";
+  company_weekday?: number; // 1=月〜7=日
+  company_month_day?: number; // 1〜31
+  company_limit?: number;
+  updated_at?: string | null;
+};
+
 /** ========= Utils ========= */
 
 function okUuid(s: string) {
@@ -43,15 +52,88 @@ function nowJST(): Date {
   );
 }
 
-function startOfTodayJST(base?: Date): Date {
-  const d = base ? new Date(base) : nowJST();
+/** 週次: 現在の「計測期間」を返す
+ *  - 1=月〜7=日
+ *  - 基本は「直近の指定曜日0:00〜次の指定曜日0:00」
+ *  - ただし updatedAt がその期間内にあれば from を updatedAt に引き上げる
+ */
+function getCurrentWeeklyPeriod(
+  now: Date,
+  weekday1to7: number,
+  updatedAt?: string | null
+): { from: Date; to: Date } {
+  let targetDow = weekday1to7 === 7 ? 0 : weekday1to7; // JS の getDay() は 0(日)〜6(土)
+  if (targetDow < 0 || targetDow > 6) targetDow = 1; // デフォルト月曜
+
+  // 直近の「指定曜日 0:00」（now を含むかそれ以前）
+  const last = new Date(now);
+  last.setHours(0, 0, 0, 0);
+  while (last.getDay() !== targetDow) {
+    last.setDate(last.getDate() - 1);
+  }
+  const next = new Date(last);
+  next.setDate(next.getDate() + 7);
+
+  let from = last;
+  if (updatedAt) {
+    const u = new Date(updatedAt);
+    if (!isNaN(u.getTime()) && u > from && u < next) {
+      from = u; // ON にした途中からカウント開始
+    }
+  }
+
+  return { from, to: next };
+}
+
+/** 月次: その月に存在しない日付の場合は、月内の最大日を使う */
+function getMonthlyBoundary(
+  year: number,
+  month0: number,
+  scheduledDay: number
+): Date {
+  const daysInMonth = new Date(year, month0 + 1, 0).getDate();
+  const safeDay = Math.max(1, Math.min(scheduledDay, daysInMonth));
+  const d = new Date(year, month0, safeDay);
   d.setHours(0, 0, 0, 0);
   return d;
 }
-function startOfTomorrowJST(base?: Date): Date {
-  const d = startOfTodayJST(base);
-  d.setDate(d.getDate() + 1);
-  return d;
+
+/** 月次: 現在の「計測期間」を返す */
+function getCurrentMonthlyPeriod(
+  now: Date,
+  scheduledDay: number,
+  updatedAt?: string | null
+): { from: Date; to: Date } {
+  const y = now.getFullYear();
+  const m = now.getMonth();
+
+  const thisBoundary = getMonthlyBoundary(y, m, scheduledDay);
+
+  let prev: Date;
+  let next: Date;
+  if (now >= thisBoundary) {
+    // 今月の境界を過ぎている → 今月境界〜翌月境界
+    prev = thisBoundary;
+    const nextMonth = (m + 1) % 12;
+    const nextYear = m === 11 ? y + 1 : y;
+    next = getMonthlyBoundary(nextYear, nextMonth, scheduledDay);
+  } else {
+    // まだ今月の境界前 → 先月境界〜今月境界
+    const prevMonth = (m + 11) % 12;
+    const prevYear = m === 0 ? y - 1 : y;
+    prev = getMonthlyBoundary(prevYear, prevMonth, scheduledDay);
+    next = thisBoundary;
+  }
+
+  let from = prev;
+  if (updatedAt) {
+    const u = new Date(updatedAt);
+    if (!isNaN(u.getTime()) && u > from && u < next) {
+      from = u;
+    }
+  }
+
+  return { from, to: next };
 }
 
 /** ========= Supabase ========= */
@@ -73,56 +155,89 @@ function getAdmin(): { sb: any; usingServiceRole: boolean } {
   };
 }
 
-/** ========= 今日の自動実行件数サマリ =========
- *  正規企業 / 不備企業 / 近似サイトをそれぞれ集計
- */
-async function loadTodaySummary(
+/** ========= 設定ロード（既存 settings API を利用） ========= */
+async function loadAutomationSettings(
+  req: Request,
+  tenantId: string
+): Promise<Settings | null> {
+  try {
+    const u = new URL(req.url);
+    const base =
+      process.env.APP_URL ||
+      `${u.protocol}//${u.host}` ||
+      "http://localhost:3000";
+
+    const res = await fetch(`${base}/api/form-outreach/automation/settings`, {
+      headers: {
+        "x-tenant-id": tenantId,
+      },
+      cache: "no-store",
+    });
+
+    if (!res.ok) return null;
+
+    const j = await res.json().catch(() => ({}));
+    const s = (j?.settings ?? j) as Partial<Settings>;
+
+    const updated =
+      (j as any)?.updatedAt || (j as any)?.updated_at || s.updated_at || null;
+
+    return {
+      auto_company_list: !!s.auto_company_list,
+      company_schedule: s.company_schedule ?? "weekly",
+      company_weekday: s.company_weekday ?? 1,
+      company_month_day: s.company_month_day ?? 1,
+      company_limit: s.company_limit ?? 100,
+      updated_at: updated,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** ========= 期間内の正規 / 不備 / 近似サイトを実テーブルから集計 ========= */
+async function countFromTable(
+  sb: any,
+  table: string,
+  tenantId: string,
+  fromIso: string,
+  toIso: string
+): Promise<number> {
+  const { data, error } = await sb
+    .from(table)
+    .select("id, created_at")
+    .eq("tenant_id", tenantId)
+    .gte("created_at", fromIso)
+    .lt("created_at", toIso);
+
+  if (error) throw new Error(error.message);
+  return Array.isArray(data) ? data.length : 0;
+}
+
+async function loadPeriodSummary(
   sb: any,
   tenantId: string,
-  now = nowJST()
+  from: Date,
+  to: Date
 ): Promise<{
-  target: number;
-  processed: number;
   newProspects: number;
   newRejected: number;
   newSimilar: number;
 }> {
-  const from = startOfTodayJST(now).toISOString();
-  const to = startOfTomorrowJST(now).toISOString();
+  const fromIso = from.toISOString();
+  const toIso = to.toISOString();
 
-  const { data, error } = await sb
-    .from("form_outreach_auto_runs")
-    .select(
-      "target_count,new_prospects,new_rejected,new_similar_sites,status,kind"
-    )
-    .eq("tenant_id", tenantId)
-    .eq("kind", "auto-company-list")
-    .gte("started_at", from)
-    .lt("started_at", to);
+  const [pros, rej, sim] = await Promise.all([
+    countFromTable(sb, "form_prospects", tenantId, fromIso, toIso),
+    countFromTable(sb, "form_prospects_rejected", tenantId, fromIso, toIso),
+    countFromTable(sb, "form_similar_sites", tenantId, fromIso, toIso),
+  ]);
 
-  if (error) throw new Error(error.message);
-  const rows = (data || []) as AutoRunRow[];
-
-  let target = 0;
-  let processed = 0; // 「正規企業リスト」の進捗基準
-  let newProspects = 0;
-  let newRejected = 0;
-  let newSimilar = 0;
-
-  for (const r of rows) {
-    const t = Number(r.target_count ?? 0) || 0;
-    const np = Number(r.new_prospects ?? 0) || 0;
-    const nr = Number(r.new_rejected ?? 0) || 0;
-    const ns = Number(r.new_similar_sites ?? 0) || 0;
-
-    target += t;
-    processed += np; // 進捗バーは「正規企業リスト（new_prospects）」基準
-    newProspects += np;
-    newRejected += nr;
-    newSimilar += ns;
-  }
-
-  return { target, processed, newProspects, newRejected, newSimilar };
+  return {
+    newProspects: pros,
+    newRejected: rej,
+    newSimilar: sim,
+  };
 }
 
 /** ========= メイン Handler ========= */
@@ -144,6 +259,9 @@ export async function GET(req: Request) {
     const { sb } = getAdmin();
     const now = nowJST();
 
+    // 0) 自動実行設定を取得（週次 / 月次 / 取得件数 / updated_at など）
+    const settings = await loadAutomationSettings(req, tenantId);
+
     // 1) 最新の自動ラン情報を取得（最後の1件）
     const { data: latestRows, error: latestErr } = await sb
       .from("form_outreach_auto_runs")
@@ -156,14 +274,57 @@ export async function GET(req: Request) {
     if (latestErr) throw new Error(latestErr.message);
     const last = (latestRows || [])[0] as AutoRunRow | undefined;
 
-    // 2) 今日のサマリを取得（正規 / 不備 / 近似サイト）
-    const {
-      target: todayTarget,
-      processed: todayProcessed,
-      newProspects,
-      newRejected,
-      newSimilar,
-    } = await loadTodaySummary(sb, tenantId, now);
+    // 2) 計測期間の from〜to を決める & 実テーブルから件数集計
+    let todayTargetCount: number | null = null;
+    let todayProcessedCount: number | null = null;
+    let newProspects = 0;
+    let newRejected = 0;
+    let newSimilar = 0;
+
+    if (settings && settings.auto_company_list) {
+      const limit = settings.company_limit ?? 0;
+      todayTargetCount = limit > 0 ? limit : null;
+
+      let periodFrom: Date;
+      let periodTo: Date;
+
+      if (settings.company_schedule === "weekly") {
+        const { from } = getCurrentWeeklyPeriod(
+          now,
+          settings.company_weekday ?? 1,
+          settings.updated_at
+        );
+        periodFrom = from;
+        periodTo = now; // 「今の時点まで」の取得件数
+      } else {
+        const { from } = getCurrentMonthlyPeriod(
+          now,
+          settings.company_month_day ?? 1,
+          settings.updated_at
+        );
+        periodFrom = from;
+        periodTo = now;
+      }
+
+      const summary = await loadPeriodSummary(
+        sb,
+        tenantId,
+        periodFrom,
+        periodTo
+      );
+      newProspects = summary.newProspects;
+      newRejected = summary.newRejected;
+      newSimilar = summary.newSimilar;
+
+      todayProcessedCount = newProspects;
+    } else {
+      // 自動取得OFFや設定取得失敗時は 0 として扱う
+      todayTargetCount = null;
+      todayProcessedCount = null;
+      newProspects = 0;
+      newRejected = 0;
+      newSimilar = 0;
+    }
 
     // 3) ステータス判定
     let status: "idle" | "running" | "completed" | "error" = "idle";
@@ -189,8 +350,8 @@ export async function GET(req: Request) {
           label: last?.last_message ?? null,
           last_run_started_at: last?.started_at ?? null,
           last_run_finished_at: last?.finished_at ?? null,
-          today_target_count: todayTarget || null,
-          today_processed_count: todayProcessed || null,
+          today_target_count: todayTargetCount,
+          today_processed_count: todayProcessedCount,
           today_new_prospects: newProspects || null,
           today_new_rejected: newRejected || null,
           today_new_similar_sites: newSimilar || null,
