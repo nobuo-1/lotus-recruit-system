@@ -22,14 +22,15 @@ type Summary = {
   allTimeRuns: number;
   successRate: number; // %
   series: {
-    total: SeriesPoint[];
-    form: SeriesPoint[];
-    email: SeriesPoint[];
+    all: SeriesPoint[]; // すべて（正規 + 不備 + 近似）
+    prospects: SeriesPoint[]; // 正規企業リスト数（form_prospects）
+    rejected: SeriesPoint[]; // 不備企業リスト数（form_prospects_rejected）
+    similar: SeriesPoint[]; // 近似サイトリスト数（form_similar_sites）
   };
 };
 
 type RangeKey = "7d" | "14d" | "1m" | "3m" | "6m" | "1y";
-type Mode = "total" | "form" | "email";
+type Mode = "all" | "prospects" | "rejected" | "similar";
 
 // /api/me/tenant からテナントIDを取得（schedules と同じロジック）
 async function fetchTenantId(): Promise<string | null> {
@@ -54,9 +55,10 @@ function normalizeSummary(raw: any): Summary | null {
   const arr = (v: any) => (Array.isArray(v) ? v : []);
 
   const series = root.series ?? {};
-  const total = arr(series.total);
-  const form = arr(series.form);
-  const email = arr(series.email);
+  const all = arr(series.all);
+  const prospects = arr(series.prospects);
+  const rejected = arr(series.rejected);
+  const similar = arr(series.similar);
 
   // date/count の最低限ガード
   const fix = (xs: any[]): SeriesPoint[] =>
@@ -73,9 +75,10 @@ function normalizeSummary(raw: any): Summary | null {
     allTimeRuns: n(root.allTimeRuns),
     successRate: n(root.successRate),
     series: {
-      total: fix(total),
-      form: fix(form),
-      email: fix(email),
+      all: fix(all),
+      prospects: fix(prospects),
+      rejected: fix(rejected),
+      similar: fix(similar),
     },
   };
 }
@@ -84,7 +87,7 @@ export default function FormOutreachLanding() {
   const [tenantId, setTenantId] = useState<string | null>(null);
   const [data, setData] = useState<Summary | null>(null);
   const [range, setRange] = useState<RangeKey>("14d");
-  const [mode, setMode] = useState<Mode>("total");
+  const [mode, setMode] = useState<Mode>("all");
   const [msg, setMsg] = useState("");
 
   // ① テナントID取得
@@ -119,11 +122,20 @@ export default function FormOutreachLanding() {
     })();
   }, [range, tenantId]);
 
+  // グラフ用シリーズ（モードに応じた1本）
   const series = useMemo(() => {
     if (!data) return [];
-    if (mode === "form") return data.series.form;
-    if (mode === "email") return data.series.email;
-    return data.series.total;
+    switch (mode) {
+      case "prospects":
+        return data.series.prospects;
+      case "rejected":
+        return data.series.rejected;
+      case "similar":
+        return data.series.similar;
+      case "all":
+      default:
+        return data.series.all;
+    }
   }, [data, mode]);
 
   const periodTotal = useMemo(
@@ -134,7 +146,6 @@ export default function FormOutreachLanding() {
   const fmtPct = (n: unknown) => {
     const x = Number(n);
     return Number.isFinite(x) ? x.toFixed(2) : "0.00";
-    // 小数点第2位まで
   };
 
   return (
@@ -279,7 +290,7 @@ export default function FormOutreachLanding() {
         <div className="mt-6 rounded-2xl border border-neutral-200 p-4">
           <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="text-base font-semibold text-neutral-800">
-              直近{labelOf(range)}の実行数
+              直近{labelOf(range)}のリスト取得数
             </div>
             <div className="flex flex-wrap gap-2">
               {/* 期間 */}
@@ -300,25 +311,29 @@ export default function FormOutreachLanding() {
                   )
                 )}
               </div>
-              {/* 対象 */}
+              {/* 対象（4種類） */}
               <div className="inline-flex items-center gap-1">
-                {(["total", "form", "email"] as const).map((m) => (
-                  <button
-                    key={m}
-                    onClick={() => setMode(m)}
-                    className={`rounded-lg px-2 py-1 text-xs ${
-                      mode === m
-                        ? "border border-indigo-400 text-indigo-700"
-                        : "border border-neutral-200 text-neutral-500 hover:bg-neutral-50"
-                    }`}
-                  >
-                    {m === "total"
-                      ? "合計"
-                      : m === "form"
-                      ? "フォーム"
-                      : "メール"}
-                  </button>
-                ))}
+                {(["all", "prospects", "rejected", "similar"] as Mode[]).map(
+                  (m) => (
+                    <button
+                      key={m}
+                      onClick={() => setMode(m)}
+                      className={`rounded-lg px-2 py-1 text-xs ${
+                        mode === m
+                          ? "border border-indigo-400 text-indigo-700"
+                          : "border border-neutral-200 text-neutral-500 hover:bg-neutral-50"
+                      }`}
+                    >
+                      {m === "all"
+                        ? "すべて"
+                        : m === "prospects"
+                        ? "正規企業"
+                        : m === "rejected"
+                        ? "不備企業"
+                        : "近似サイト"}
+                    </button>
+                  )
+                )}
               </div>
             </div>
           </div>
