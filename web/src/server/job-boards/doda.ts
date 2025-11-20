@@ -48,6 +48,10 @@ export function parseDodaJobsCount(html: string): number | null {
  *
  * 参考にいただいた URL:
  * https://doda.jp/DodaFront/View/JobSearchList.action?sid=TopSearch&usrclk=PC_logout_kyujinSearchArea_searchButton
+ *
+ * まずは「キーワードにまとめて投げる」簡易版。
+ * internalLarge / internalSmall / prefecture / ageBand / employmentType / salaryBand
+ * に入っている文字列を keyword として連結している。
  */
 function buildDodaUrl(cond: ManualCondition): string {
   const base = "https://doda.jp/DodaFront/View/JobSearchList.action";
@@ -58,9 +62,6 @@ function buildDodaUrl(cond: ManualCondition): string {
   u.searchParams.set("sid", "TopSearch");
   u.searchParams.set("usrclk", "PC_logout_kyujinSearchArea_searchButton");
 
-  // まずは「キーワードにまとめて投げる」簡易版
-  // ※実運用では職種コード / 地域コードに変換して
-  //   パラメータへセットしても OK（あとから拡張しやすい形にしておく）
   const kwParts = [
     cond.internalLarge,
     cond.internalSmall,
@@ -82,26 +83,42 @@ function buildDodaUrl(cond: ManualCondition): string {
 
 /**
  * doda の検索件数を取得するメイン関数
+ *
+ * - fetch は AbortController + try/catch でラップ
+ * - 通信エラーやタイムアウト時は例外を投げず null を返す
  */
 export async function fetchDodaJobsCount(
   cond: ManualCondition
 ): Promise<number | null> {
   const url = buildDodaUrl(cond);
 
-  const res = await fetch(url, {
-    method: "GET",
-    headers: {
-      "user-agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
-      "accept-language": "ja-JP,ja;q=0.9,en;q=0.8",
-    },
-  });
+  const controller = new AbortController();
+  const timeoutMs = 15000;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  if (!res.ok) {
-    console.error("doda fetch failed", res.status, res.statusText);
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: {
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
+        "accept-language": "ja-JP,ja;q=0.9,en;q=0.8",
+      },
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      console.error("doda fetch failed", res.status, res.statusText);
+      return null;
+    }
+
+    const html = await res.text();
+    return parseDodaJobsCount(html);
+  } catch (err) {
+    // fetch 失敗時は例外を上に投げず null にする
+    console.error("doda fetch error", err);
     return null;
+  } finally {
+    clearTimeout(timer);
   }
-
-  const html = await res.text();
-  return parseDodaJobsCount(html);
 }
