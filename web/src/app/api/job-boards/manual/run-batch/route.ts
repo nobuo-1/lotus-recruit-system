@@ -3,7 +3,6 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 
 /**
  * 手動ページ側の rows と揃えた型
@@ -29,7 +28,7 @@ type RunBatchRequestBody = {
   sal?: string[]; // ["~300万", "300~400万", ...]
   pref?: string[]; // ["東京都", "大阪府", ...]
   want?: number; // 上限件数（例: 200） ※なければ 200
-  saveMode?: "history" | "none"; // "history" のとき job_board_manual_runs に保存
+  saveMode?: "history" | "none"; // 将来 DB 保存するかどうかのフラグ用（今は未使用）
 };
 
 /** ====== 職種の合成キーを分解 ====== */
@@ -79,16 +78,7 @@ function parseJobsCount(html: string): number {
   return 0;
 }
 
-/** ====== マイナビの検索 URL を組み立てる ======
- *
- * !!! 重要 !!!
- *  - 実際のマイナビ転職の検索フォームのパラメータに合わせて
- *    下の「TODO」の部分を調整してください。
- *  - 今は「ひとまず動く」ように、
- *    ・ベース URL: jobsearchType=14 & searchType=18
- *    ・キーワード検索パラメータ: fw=「職種/都道府県/雇用形態/年収/年齢層」を全部くっつけた文字列
- *    という形にしてあります。
- */
+/** ====== マイナビの検索 URL を組み立てる ====== */
 const MYNAVI_BASE =
   "https://tenshoku.mynavi.jp/list/?jobsearchType=14&searchType=18";
 
@@ -104,27 +94,16 @@ type MynaviSearchOptions = {
 function buildMynaviUrl(opt: MynaviSearchOptions): string {
   const url = new URL(MYNAVI_BASE);
 
-  // --------------------------
-  // 職種 → マイナビの職種キーワード or コード
-  // --------------------------
   const jobWords: string[] = [];
   if (opt.internal_small) {
-    // 例: 「営業:::法人営業」→ 「法人営業」
     jobWords.push(opt.internal_small);
   } else if (opt.internal_large) {
     jobWords.push(opt.internal_large);
   }
 
-  // --------------------------
-  // 都道府県 → キーワードで代用
-  // --------------------------
   if (opt.prefecture) {
     jobWords.push(opt.prefecture);
   }
-
-  // --------------------------
-  // 雇用形態 / 年収帯 / 年齢層 もキーワードに付けておく
-  // --------------------------
   if (opt.employment_type) {
     jobWords.push(opt.employment_type);
   }
@@ -137,25 +116,47 @@ function buildMynaviUrl(opt: MynaviSearchOptions): string {
 
   const freeWord = jobWords.join(" ");
 
-  // TODO: 実サイトの HTML から、キーワード検索の name 属性を確認して書き換える
   if (freeWord) {
+    // 実サイトの name="fw" を想定
     url.searchParams.set("fw", freeWord);
   }
 
   return url.toString();
 }
 
+/** ====== タイムアウト付き fetch ====== */
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit = {},
+  ms = 12000
+): Promise<Response> {
+  const ctl = new AbortController();
+  const id = setTimeout(() => ctl.abort(), ms);
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: ctl.signal,
+    });
+  } finally {
+    clearTimeout(id);
+  }
+}
+
 /** ====== 単一の条件でマイナビから求人数を取得 ====== */
 async function fetchMynaviJobsCount(opt: MynaviSearchOptions): Promise<number> {
   const url = buildMynaviUrl(opt);
 
-  const res = await fetch(url, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-      "Accept-Language": "ja,en;q=0.9",
+  const res = await fetchWithTimeout(
+    url,
+    {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+        "Accept-Language": "ja,en;q=0.9",
+      },
     },
-  });
+    12000
+  );
 
   if (!res.ok) {
     console.warn("[mynavi] HTTP error", res.status, url);
@@ -173,39 +174,16 @@ function normalizeDimension(values?: string[] | null): (string | null)[] {
   return values;
 }
 
-/** ===== Supabase / tenant utilities ===== */
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-
-function isValidUuid(v: unknown): v is string {
-  if (typeof v !== "string") return false;
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-    v
-  );
-}
-
-function resolveTenantId(req: NextRequest, body?: any): string | null {
-  const h = (req.headers.get("x-tenant-id") || "").trim();
-  if (isValidUuid(h)) return h;
-
-  const cookie = req.headers.get("cookie") || "";
-  const m = cookie.match(/(?:^|;\s*)(x-tenant-id|tenant_id)=([^;]+)/i);
-  if (m && isValidUuid(decodeURIComponent(m[2])))
-    return decodeURIComponent(m[2]);
-
-  if (isValidUuid(body?.tenant_id)) return String(body?.tenant_id);
-
-  return null;
-}
+/** ==== 安全のためのハード上限 ====
+ *  - 1回の実行で実際にマイナビへ投げる最大リクエスト数
+ *  - want や組み合わせ数よりも優先される
+ */
+const MAX_FETCHES_HARD = 40;
+const CONCURRENCY = 5;
+const MAX_ELAPSED_MS = 45_000;
 
 /**
  * POST /api/job-boards/manual/run-batch
- *
- * 手動実行ページから呼ばれるエンドポイント。
- *  - 今回は「マイナビ（mynavi）」のみ対応。
- *  - 年齢層/雇用形態/年収帯/都道府県/職種の全組み合わせで
- *    マイナビの検索を実行し、求人数を取得する。
- *  - saveMode === "history" のとき job_board_manual_runs に保存する。
  */
 export async function POST(req: NextRequest) {
   try {
@@ -213,7 +191,6 @@ export async function POST(req: NextRequest) {
 
     const sites = body.sites ?? [];
     const want = body.want && body.want > 0 ? body.want : 200;
-    const saveMode = body.saveMode ?? "none";
 
     // 今回はマイナビのみ対応
     if (!sites.includes("mynavi")) {
@@ -223,7 +200,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ---- 職種の次元（small が優先。なければ large 単位。どちらも空なら 1 パターン null） ----
+    // ---- 職種の次元 ----
     type JobDimension = {
       internal_large: string | null;
       internal_small: string | null;
@@ -250,137 +227,99 @@ export async function POST(req: NextRequest) {
     const salDims = normalizeDimension(body.sal);
     const prefDims = normalizeDimension(body.pref);
 
-    const results: ManualFetchRow[] = [];
-
-    // 組み合わせ総数のざっくり計算（ログ用）
-    const totalComb =
-      jobDims.length *
-      ageDims.length *
-      empDims.length *
-      salDims.length *
-      prefDims.length;
-
-    console.log(
-      `[manual-run] mynavi combinations: job=${jobDims.length}, age=${ageDims.length}, emp=${empDims.length}, sal=${salDims.length}, pref=${prefDims.length} (total=${totalComb})`
-    );
-
-    let processed = 0;
-
-    // ==== 全組み合わせループ ====
+    // ==== 全組み合わせを一旦列挙 ====
+    const allCombos: MynaviSearchOptions[] = [];
     for (const job of jobDims) {
       for (const pref of prefDims) {
         for (const age of ageDims) {
           for (const emp of empDims) {
             for (const sal of salDims) {
-              if (results.length >= want) {
-                break;
-              }
-
-              const opt: MynaviSearchOptions = {
+              allCombos.push({
                 internal_large: job.internal_large,
                 internal_small: job.internal_small,
                 prefecture: pref,
                 age_band: age,
                 employment_type: emp,
                 salary_band: sal,
-              };
-
-              let jobsCount: number | null = null;
-
-              try {
-                jobsCount = await fetchMynaviJobsCount(opt);
-              } catch (e) {
-                console.warn("[manual-run] fetchMynaviJobsCount error", e);
-                jobsCount = null;
-              }
-
-              results.push({
-                site_key: "mynavi",
-                internal_large: job.internal_large,
-                internal_small: job.internal_small,
-                prefecture: pref,
-                age_band: age,
-                employment_type: emp,
-                salary_band: sal,
-                jobs_count: jobsCount,
-                candidates_count: null, // 今回はまだ未取得
               });
-
-              processed++;
             }
-            if (results.length >= want) break;
           }
-          if (results.length >= want) break;
         }
-        if (results.length >= want) break;
       }
-      if (results.length >= want) break;
     }
 
-    let historyId: string | null = null;
+    const totalComb = allCombos.length;
+    const maxFetches = Math.min(want, MAX_FETCHES_HARD, totalComb);
 
-    // ====== job_board_manual_runs へ保存（saveMode === "history" のとき） ======
-    if (saveMode === "history") {
-      const tenantId = resolveTenantId(req, body);
+    console.log(
+      `[manual-run] mynavi combinations total=${totalComb}, execute=${maxFetches}`
+    );
 
-      if (tenantId && isValidUuid(tenantId)) {
-        try {
-          const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-          const params = {
-            sites,
-            large: body.large ?? [],
-            small: body.small ?? [],
-            age: body.age ?? [],
-            emp: body.emp ?? [],
-            sal: body.sal ?? [],
-            pref: body.pref ?? [],
-            want,
-            site_key: "mynavi",
-            via: "manual-run-batch",
-          };
+    const results: ManualFetchRow[] = [];
+    const start = Date.now();
 
-          const { data, error } = await admin
-            .from("job_board_manual_runs")
-            .insert({
-              tenant_id: tenantId,
-              params,
-              results,
-              result_count: results.length,
-            })
-            .select("id")
-            .single();
+    let index = 0;
+    while (index < maxFetches) {
+      const chunk = allCombos.slice(index, index + CONCURRENCY);
 
-          if (error) throw error;
-          historyId = data?.id ?? null;
-        } catch (e) {
-          console.error("[manual-run] failed to save history", e);
-        }
-      } else {
+      const chunkResults = await Promise.all(
+        chunk.map(async (opt) => {
+          let jobsCount: number | null = null;
+          try {
+            jobsCount = await fetchMynaviJobsCount(opt);
+          } catch (e) {
+            console.warn("[manual-run] fetchMynaviJobsCount error", e);
+            jobsCount = null;
+          }
+
+          return { opt, jobsCount };
+        })
+      );
+
+      for (const { opt, jobsCount } of chunkResults) {
+        results.push({
+          site_key: "mynavi",
+          internal_large: opt.internal_large,
+          internal_small: opt.internal_small,
+          prefecture: opt.prefecture,
+          age_band: opt.age_band,
+          employment_type: opt.employment_type,
+          salary_band: opt.salary_band,
+          jobs_count: jobsCount,
+          candidates_count: null, // 求職者数は後日実装
+        });
+      }
+
+      index += CONCURRENCY;
+
+      if (Date.now() - start > MAX_ELAPSED_MS) {
         console.warn(
-          "[manual-run] saveMode=history だが tenant_id が解決できませんでした。保存はスキップします。"
+          "[manual-run] timeout safeguard: returning partial results"
         );
+        break;
       }
     }
 
-    const note = [
+    const processed = results.length;
+
+    const noteParts: string[] = [
       "マイナビから求人数を取得しました。",
-      `試行した組み合わせ数: ${processed}`,
+      `試行予定の組み合わせ数: ${totalComb}`,
+      `実際に取得を行った組み合わせ数: ${processed}`,
       `レスポンスに含めた件数: ${results.length}`,
-      totalComb > results.length
-        ? `※ want=${want} の上限に達したため、全組み合わせ(${totalComb})の一部のみ実行しています。`
-        : "",
-      historyId
-        ? `job_board_manual_runs に保存しました（ID: ${historyId}）`
-        : "",
-    ]
-      .filter(Boolean)
-      .join("\n");
+    ];
+
+    if (totalComb > processed || processed >= MAX_FETCHES_HARD) {
+      noteParts.push(
+        `※ 上限 (${MAX_FETCHES_HARD}件 または want=${want}) とタイムアウト対策により、全組み合わせ(${totalComb})の一部のみ取得しています。条件（職種・都道府県・年齢層など）を絞るとより正確になります。`
+      );
+    }
 
     return NextResponse.json({
       ok: true,
       preview: results,
-      note,
-      history_id: historyId,
+      note: noteParts.join("\n"),
+      history_id: null, // 将来「手動実行履歴」に保存する場合用
     });
   } catch (e: any) {
     console.error("[manual-run] error", e);

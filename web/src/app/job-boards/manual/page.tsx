@@ -352,8 +352,10 @@ export default function JobBoardsManualPage() {
   const [emps, setEmps] = useState<string[]>([]);
   const [sals, setSals] = useState<string[]>([]);
   const [prefs, setPrefs] = useState<string[]>([]);
+
   const [openCat, setOpenCat] = useState(false);
   const [openPref, setOpenPref] = useState(false);
+  const [openConfig, setOpenConfig] = useState(false);
 
   const [running, setRunning] = useState(false);
   const [msg, setMsg] = useState("");
@@ -450,7 +452,7 @@ export default function JobBoardsManualPage() {
           sal: sals,
           pref: prefs,
           want: 200,
-          saveMode: "history", // 履歴へ保存
+          saveMode: "history", // 将来: 履歴へ保存
         }),
       });
 
@@ -469,6 +471,29 @@ export default function JobBoardsManualPage() {
     }
   };
 
+  const handleOpenConfig = () => {
+    setOpenConfig(true);
+  };
+
+  const handleRunFromModal = () => {
+    setOpenConfig(false);
+    void run();
+  };
+
+  // 結果のサマリー
+  const summary = useMemo(() => {
+    if (!rows || rows.length === 0) return null;
+    let totalJobs = 0;
+    const bySite: Record<string, number> = {};
+    for (const r of rows) {
+      const jobs = r.jobs_count ?? 0;
+      totalJobs += jobs;
+      const key = r.site_key || "その他";
+      bySite[key] = (bySite[key] ?? 0) + jobs;
+    }
+    return { totalJobs, bySite, count: rows.length };
+  }, [rows]);
+
   return (
     <>
       <AppHeader showBack />
@@ -479,7 +504,7 @@ export default function JobBoardsManualPage() {
               転職サイト 手動実行
             </h1>
             <p className="mt-1 text-sm text-neutral-500">
-              ログイン情報を利用して件数を取得。結果は「手動実行履歴」に保存。
+              ログイン情報を利用して件数を取得します。条件は「実行する」ボタンから開くモーダルで設定できます。
             </p>
           </div>
           <Link
@@ -490,138 +515,128 @@ export default function JobBoardsManualPage() {
           </Link>
         </div>
 
-        <section className="rounded-2xl border border-neutral-200 p-4 space-y-4">
-          {/* サイト */}
-          <div>
-            <div className="mb-1 text-xs font-medium text-neutral-600">
-              サイト
+        {/* 実行条件サマリー ＋ 実行ボタン */}
+        <section className="rounded-2xl border border-neutral-200 p-4 space-y-3 mb-6">
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex-1">
+              <div className="mb-1 text-sm font-medium text-neutral-700">
+                実行条件の概要
+              </div>
+              <p className="text-xs text-neutral-500 mb-2">
+                サイト・職種・都道府県・年齢層・雇用形態・年収帯をまとめて設定できます。
+              </p>
+              <div className="flex flex-wrap gap-2 text-[11px] text-neutral-600">
+                <span className="inline-flex items-center rounded-full bg-neutral-100 px-2 py-1">
+                  サイト:{" "}
+                  {sites.length
+                    ? `${sites.length}件選択`
+                    : "未選択（マイナビ推奨）"}
+                </span>
+                <span className="inline-flex items-center rounded-full bg-neutral-100 px-2 py-1">
+                  職種: 大 {large.length || "全"} / 小 {small.length || "全"}
+                </span>
+                <span className="inline-flex items-center rounded-full bg-neutral-100 px-2 py-1">
+                  都道府県: {prefs.length ? `${prefs.length}件` : "全国"}
+                </span>
+                <span className="inline-flex items-center rounded-full bg-neutral-100 px-2 py-1">
+                  年齢層: {ages.length ? `${ages.length}件` : "指定なし"}
+                </span>
+                <span className="inline-flex items-center rounded-full bg-neutral-100 px-2 py-1">
+                  雇用形態: {emps.length ? `${emps.length}件` : "指定なし"}
+                </span>
+                <span className="inline-flex items-center rounded-full bg-neutral-100 px-2 py-1">
+                  年収帯: {sals.length ? `${sals.length}件` : "指定なし"}
+                </span>
+              </div>
             </div>
-            <div className="flex flex-wrap">
-              <Chip
-                active={sites.length === SITE_OPTIONS.length}
-                label="すべて"
-                onClick={() => setSites(SITE_OPTIONS.map((s) => s.value))}
-              />
-              <Chip
-                active={sites.length === 0}
-                label="解除"
-                onClick={() => setSites([])}
-              />
-              {SITE_OPTIONS.map((o) => (
-                <Chip
-                  key={o.value}
-                  label={o.label}
-                  active={sites.includes(o.value)}
-                  onClick={() =>
-                    setSites(
-                      sites.includes(o.value)
-                        ? sites.filter((x) => x !== o.value)
-                        : [...sites, o.value]
-                    )
-                  }
-                />
-              ))}
-            </div>
-          </div>
-
-          {/* 職種 */}
-          <div>
-            <div className="mb-1 text-xs font-medium text-neutral-600">
-              職種
-            </div>
-            <button
-              className="px-2 py-1 text-xs rounded-lg border border-neutral-300 hover:bg-neutral-50"
-              onClick={() => setOpenCat(true)}
-            >
-              選択（大:{large.length || "すべて"} / 小:
-              {small.length || "すべて"}）
-            </button>
-          </div>
-
-          {/* 都道府県 */}
-          <div>
-            <div className="mb-1 text-xs font-medium text-neutral-600">
-              都道府県
-            </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-col items-end gap-2">
               <button
-                className="px-2 py-1 text-xs rounded-lg border border-neutral-300 hover:bg-neutral-50"
-                onClick={() => setOpenPref(true)}
+                onClick={handleOpenConfig}
+                className="inline-flex items-center gap-2 rounded-lg border border-neutral-300 px-4 py-2 text-sm hover:bg-neutral-50"
               >
-                選択（{prefs.length ? `${prefs.length}件` : "全国"}）
+                条件を設定して実行する
               </button>
-              {prefs.length > 0 && (
-                <button
-                  className="px-2 py-1 text-xs rounded-lg border border-neutral-300 hover:bg-neutral-50"
-                  onClick={() => setPrefs([])}
-                >
-                  クリア
-                </button>
-              )}
+              <button
+                disabled
+                className="inline-flex items-center gap-2 rounded-lg border border-dashed border-neutral-300 px-3 py-1.5 text-xs text-neutral-400 cursor-not-allowed"
+                title="求職者数取得は後で実装予定です"
+              >
+                求職者数も取得（準備中）
+              </button>
+              <span className="text-[10px] text-neutral-400">
+                ※ 求職者数の自動取得は今後対応予定です（現在は UI のみ）。
+              </span>
             </div>
-          </div>
-
-          {/* 年齢/雇用/年収 */}
-          <div>
-            <div className="mb-1 text-xs font-medium text-neutral-600">
-              年齢層
-            </div>
-            <TagMulti values={ages} setValues={setAges} options={AGE_BANDS} />
-          </div>
-          <div>
-            <div className="mb-1 text-xs font-medium text-neutral-600">
-              雇用形態
-            </div>
-            <TagMulti values={emps} setValues={setEmps} options={EMP_TYPES} />
-          </div>
-          <div>
-            <div className="mb-1 text-xs font-medium text-neutral-600">
-              年収帯
-            </div>
-            <TagMulti values={sals} setValues={setSals} options={SALARY_BAND} />
-          </div>
-
-          <div className="pt-2">
-            <button
-              onClick={run}
-              disabled={running || sites.length === 0}
-              className="inline-flex items-center gap-2 rounded-lg border border-neutral-300 px-4 py-2 text-sm hover:bg-neutral-50 disabled:opacity-50"
-            >
-              {running && (
-                <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-                  <circle
-                    cx="12"
-                    cy="12"
-                    r="10"
-                    stroke="currentColor"
-                    strokeWidth="4"
-                    fill="none"
-                    opacity="0.25"
-                  />
-                  <path
-                    d="M22 12a10 10 0 00-10-10"
-                    stroke="currentColor"
-                    strokeWidth="4"
-                    fill="none"
-                  />
-                </svg>
-              )}
-              実行する
-            </button>
           </div>
 
           {msg && (
-            <pre className="whitespace-pre-wrap text-xs text-neutral-600">
+            <pre className="mt-2 whitespace-pre-wrap text-xs text-neutral-600 bg-neutral-50 rounded-lg px-3 py-2 border border-neutral-200">
               {msg}
             </pre>
           )}
         </section>
 
-        {/* 結果表 */}
-        <section className="mt-6 rounded-2xl border border-neutral-200 p-4">
-          <div className="text-sm font-semibold mb-2">
-            取得結果（今回の手動実行）
+        {/* 結果表示 */}
+        <section className="rounded-2xl border border-neutral-200 p-4">
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-sm font-semibold">
+              取得結果（今回の手動実行）
+            </div>
+            {summary && (
+              <div className="flex flex-col items-end gap-1 text-xs text-neutral-500">
+                <div>
+                  条件に一致した組み合わせ:{" "}
+                  <span className="font-semibold">{summary.count}</span> 件
+                </div>
+                <div>
+                  合計求人数:{" "}
+                  <span className="font-semibold">
+                    {summary.totalJobs.toLocaleString()}
+                  </span>{" "}
+                  件
+                </div>
+              </div>
+            )}
           </div>
+
+          {summary && (
+            <div className="mb-4 grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2">
+                <div className="text-xs text-neutral-500">合計求人数</div>
+                <div className="mt-1 text-xl font-semibold text-neutral-900">
+                  {summary.totalJobs.toLocaleString()}
+                  <span className="ml-1 text-xs font-normal text-neutral-500">
+                    件
+                  </span>
+                </div>
+              </div>
+              <div className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2">
+                <div className="text-xs text-neutral-500">
+                  条件の組み合わせ数
+                </div>
+                <div className="mt-1 text-xl font-semibold text-neutral-900">
+                  {summary.count}
+                  <span className="ml-1 text-xs font-normal text-neutral-500">
+                    パターン
+                  </span>
+                </div>
+              </div>
+              <div className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2">
+                <div className="text-xs text-neutral-500">
+                  サイト別 合計求人数
+                </div>
+                <div className="mt-1 text-xs text-neutral-800 space-y-0.5">
+                  {Object.entries(summary.bySite).map(([site, num]) => (
+                    <div key={site} className="flex justify-between">
+                      <span>{site}</span>
+                      <span>{num.toLocaleString()} 件</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="overflow-x-auto rounded-xl border border-neutral-200">
             <table className="min-w-[900px] w-full text-sm">
               <thead className="bg-neutral-50 text-neutral-600">
@@ -644,12 +659,17 @@ export default function JobBoardsManualPage() {
                       colSpan={9}
                       className="px-4 py-8 text-center text-neutral-400"
                     >
-                      まだ結果がありません
+                      まだ結果がありません。「条件を設定して実行する」から取得してください。
                     </td>
                   </tr>
                 ) : (
                   (rows ?? []).map((r, i) => (
-                    <tr key={i} className="border-t border-neutral-200">
+                    <tr
+                      key={i}
+                      className={`border-t border-neutral-200 ${
+                        i % 2 === 0 ? "bg-white" : "bg-neutral-50/40"
+                      }`}
+                    >
                       <td className="px-3 py-3">{r.site_key}</td>
                       <td className="px-3 py-3">{r.internal_large ?? "-"}</td>
                       <td className="px-3 py-3">{r.internal_small ?? "-"}</td>
@@ -657,11 +677,11 @@ export default function JobBoardsManualPage() {
                       <td className="px-3 py-3">{r.age_band ?? "-"}</td>
                       <td className="px-3 py-3">{r.employment_type ?? "-"}</td>
                       <td className="px-3 py-3">{r.salary_band ?? "-"}</td>
-                      <td className="px-3 py-3 text-right">
-                        {r.jobs_count ?? 0}
+                      <td className="px-3 py-3 text-right font-semibold">
+                        {r.jobs_count?.toLocaleString() ?? 0}
                       </td>
-                      <td className="px-3 py-3 text-right">
-                        {r.candidates_count ?? 0}
+                      <td className="px-3 py-3 text-right text-neutral-400">
+                        {r.candidates_count?.toLocaleString() ?? 0}
                       </td>
                     </tr>
                   ))
@@ -672,7 +692,180 @@ export default function JobBoardsManualPage() {
         </section>
       </main>
 
-      {/* モーダル */}
+      {/* 条件設定モーダル */}
+      {openConfig && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40">
+          <div className="w-[980px] max-w-[96vw] rounded-2xl bg-white shadow-xl border border-neutral-200 overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200">
+              <div className="font-semibold text-sm">実行条件の設定</div>
+              <button
+                onClick={() => setOpenConfig(false)}
+                className="rounded-lg px-2 py-1 border border-neutral-300 hover:bg-neutral-50 text-xs"
+              >
+                閉じる
+              </button>
+            </div>
+
+            <div className="p-4 space-y-4 max-h-[70vh] overflow-auto text-sm">
+              {/* サイト */}
+              <div>
+                <div className="mb-1 text-xs font-medium text-neutral-600">
+                  サイト
+                </div>
+                <p className="text-[11px] text-neutral-500 mb-1">
+                  ※ 現在はマイナビのみ実装済みです。他サイトは今後対応予定。
+                </p>
+                <div className="flex flex-wrap">
+                  <Chip
+                    active={sites.length === SITE_OPTIONS.length}
+                    label="すべて"
+                    onClick={() => setSites(SITE_OPTIONS.map((s) => s.value))}
+                  />
+                  <Chip
+                    active={sites.length === 0}
+                    label="解除"
+                    onClick={() => setSites([])}
+                  />
+                  {SITE_OPTIONS.map((o) => (
+                    <Chip
+                      key={o.value}
+                      label={o.label}
+                      active={sites.includes(o.value)}
+                      onClick={() =>
+                        setSites(
+                          sites.includes(o.value)
+                            ? sites.filter((x) => x !== o.value)
+                            : [...sites, o.value]
+                        )
+                      }
+                    />
+                  ))}
+                </div>
+              </div>
+
+              {/* 職種 */}
+              <div>
+                <div className="mb-1 text-xs font-medium text-neutral-600">
+                  職種
+                </div>
+                <button
+                  className="px-2 py-1 text-xs rounded-lg border border-neutral-300 hover:bg-neutral-50"
+                  onClick={() => setOpenCat(true)}
+                >
+                  職種を選択（大:{large.length || "すべて"} / 小:
+                  {small.length || "すべて"}）
+                </button>
+              </div>
+
+              {/* 都道府県 */}
+              <div>
+                <div className="mb-1 text-xs font-medium text-neutral-600">
+                  都道府県
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    className="px-2 py-1 text-xs rounded-lg border border-neutral-300 hover:bg-neutral-50"
+                    onClick={() => setOpenPref(true)}
+                  >
+                    都道府県を選択（
+                    {prefs.length ? `${prefs.length}件` : "全国"}）
+                  </button>
+                  {prefs.length > 0 && (
+                    <button
+                      className="px-2 py-1 text-xs rounded-lg border border-neutral-300 hover:bg-neutral-50"
+                      onClick={() => setPrefs([])}
+                    >
+                      クリア
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* 年齢/雇用/年収 */}
+              <div>
+                <div className="mb-1 text-xs font-medium text-neutral-600">
+                  年齢層
+                </div>
+                <TagMulti
+                  values={ages}
+                  setValues={setAges}
+                  options={AGE_BANDS}
+                />
+              </div>
+              <div>
+                <div className="mb-1 text-xs font-medium text-neutral-600">
+                  雇用形態
+                </div>
+                <TagMulti
+                  values={emps}
+                  setValues={setEmps}
+                  options={EMP_TYPES}
+                />
+              </div>
+              <div>
+                <div className="mb-1 text-xs font-medium text-neutral-600">
+                  年収帯
+                </div>
+                <TagMulti
+                  values={sals}
+                  setValues={setSals}
+                  options={SALARY_BAND}
+                />
+              </div>
+
+              {/* 求職者数ボタン（後で実装用） */}
+              <div className="mt-2">
+                <button
+                  disabled
+                  className="inline-flex items-center gap-2 rounded-lg border border-dashed border-neutral-300 px-3 py-1.5 text-xs text-neutral-400 cursor-not-allowed"
+                >
+                  求職者数も取得（準備中）
+                </button>
+                <p className="mt-1 text-[11px] text-neutral-400">
+                  ※ 求職者数のスクレイピング / API 連携は今後実装予定です。
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-neutral-200">
+              <button
+                onClick={() => setOpenConfig(false)}
+                className="rounded-lg px-3 py-1 border border-neutral-300 text-xs hover:bg-neutral-50"
+              >
+                キャンセル
+              </button>
+              <button
+                onClick={handleRunFromModal}
+                disabled={running || sites.length === 0}
+                className="inline-flex items-center gap-2 rounded-lg border border-neutral-300 px-4 py-2 text-xs hover:bg-neutral-50 disabled:opacity-50"
+              >
+                {running && (
+                  <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                    <circle
+                      cx="12"
+                      cy="12"
+                      r="10"
+                      stroke="currentColor"
+                      strokeWidth="4"
+                      fill="none"
+                      opacity="0.25"
+                    />
+                    <path
+                      d="M22 12a10 10 0 00-10-10"
+                      stroke="currentColor"
+                      strokeWidth="4"
+                      fill="none"
+                    />
+                  </svg>
+                )}
+                この条件で求人件数を実行する
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 職種モーダル */}
       {openCat && (
         <JobCategoryModal
           large={large}
@@ -685,6 +878,8 @@ export default function JobBoardsManualPage() {
           }}
         />
       )}
+
+      {/* 都道府県モーダル */}
       {openPref && (
         <PrefectureModal
           selected={prefs}
