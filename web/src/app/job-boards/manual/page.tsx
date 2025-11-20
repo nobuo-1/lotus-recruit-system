@@ -266,7 +266,7 @@ const SITE_OPTIONS: { value: string; label: string }[] = [
   // 今後エン転職などを追加する場合はここに value を追加
 ];
 
-// ★追加: site_key → 表示用ラベルのマップ
+// site_key → 表示用ラベルのマップ
 const SITE_LABEL_MAP: Record<string, string> = SITE_OPTIONS.reduce((acc, s) => {
   acc[s.value] = s.label;
   return acc;
@@ -465,7 +465,12 @@ const ConditionModal: React.FC<ConditionModalProps> = ({
             <div className="font-medium text-neutral-700 mb-1">
               現在の条件サマリ
             </div>
-            <div>サイト: {sites.length ? sites.join(" / ") : "未選択"}</div>
+            <div>
+              サイト:{" "}
+              {sites.length
+                ? sites.map((s) => SITE_LABEL_MAP[s] ?? s).join(" / ")
+                : "未選択"}
+            </div>
             <div className="mt-1">
               職種: 大分類 {large.length || 0} / 小分類 {small.length || 0}
             </div>
@@ -611,7 +616,7 @@ function aggregateManualRows(rows: ManualResultRow[]): ManualResultRow | null {
   };
 }
 
-// ★追加: サイト別サマリ用型 & ビルダー
+// サイト別サマリ用型 & ビルダー
 type SiteSummary = {
   siteKey: string;
   label: string;
@@ -783,7 +788,7 @@ export default function JobBoardsManualPage() {
         )}%)`
       : "";
 
-  // ★変更: 全体集計とサイト別集計をそれぞれ計算
+  // 全体集計とサイト別集計をそれぞれ計算
   const summaryAll = useMemo(() => aggregateManualRows(rows), [rows]);
   const perSiteSummaries = useMemo(() => buildSiteSummaries(rows), [rows]);
 
@@ -912,7 +917,7 @@ export default function JobBoardsManualPage() {
           )}
         </section>
 
-        {/* ★変更: 結果表示 → 全体集計 + サイト別集計 */}
+        {/* 結果表示 → 全体集計 + サイト別集計 */}
         <section className="mt-6 rounded-2xl border border-neutral-200 p-4">
           <div className="text-sm font-semibold mb-3">取得結果</div>
 

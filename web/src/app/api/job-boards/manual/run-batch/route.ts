@@ -12,6 +12,10 @@ import {
   SALARY_BANDS,
 } from "@/server/job-boards/types";
 
+// 条件付き URL 生成 & 件数取得を行う共通モジュール
+import { fetchMynaviJobsCount } from "@/server/job-boards/mynavi";
+import { fetchDodaJobsCount } from "@/server/job-boards/doda";
+
 type RequestBody = {
   sites?: string[];
   large?: string[];
@@ -99,74 +103,18 @@ function buildAllOnlyLayers(
   }));
 }
 
-/** 数字文字列 → number */
-function parseNumberLike(input: string | null | undefined): number | null {
-  if (!input) return null;
-  const m = input.replace(/[^\d]/g, "");
-  if (!m) return null;
-  const n = Number(m);
-  return Number.isFinite(n) ? n : null;
-}
-
-/** fetch with 簡易タイムアウト */
-async function fetchWithTimeout(
-  url: string,
-  ms = 15000
-): Promise<string | null> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), ms);
-  try {
-    const res = await fetch(url, {
-      method: "GET",
-      headers: {
-        "user-agent":
-          "Mozilla/5.0 (compatible; LotusJobBoardBot/1.0; +https://example.com/)",
-      },
-      cache: "no-store",
-      signal: controller.signal,
-    });
-    if (!res.ok) return null;
-    const text = await res.text();
-    return text;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 /** ========== マイナビ転職 ========== */
 /**
- * いまの実装では：
- * - 職種 / 都道府県はまだ URL パラメータに反映していません（今後 srAreaCdList 等にマッピングする想定）
- * - 総件数は js__searchRecruit--count から取得
- * - 年齢層 / 雇用形態 / 年収帯 は「すべて」のみ埋める
+ * マイナビ転職:
+ * - URL 生成＆HTML 解析は server/job-boards/mynavi.ts 側に委譲
+ * - ここでは「この条件の求人数」の総件数だけ受け取り、
+ *   年齢層 / 雇用形態 / 年収帯 は「すべて」のみ埋める
  */
 async function fetchMynaviStats(cond: ManualCondition): Promise<SiteStats> {
-  const baseUrl =
-    "https://tenshoku.mynavi.jp/list/?jobsearchType=14&searchType=18";
-
-  // TODO: cond.internalLarge / internalSmall / prefecture を
-  //  マイナビの職種コード・エリアコードにマッピングする場合はここで URL を組み立てる
-  const html = await fetchWithTimeout(baseUrl);
-  if (!html) {
-    const layersEmpty = buildAllOnlyLayers(AGE_BANDS, null);
-    return {
-      jobsTotal: null,
-      ageLayers: layersEmpty,
-      empLayers: buildAllOnlyLayers(EMP_TYPES, null),
-      salaryLayers: buildAllOnlyLayers(SALARY_BANDS, null),
-    };
-  }
-
-  const totalMatch = html.match(
-    /js__searchRecruit--count[^>]*>([\d,]+)<\/span>/
-  );
-  const total = parseNumberLike(totalMatch?.[1] ?? "");
+  const total = await fetchMynaviJobsCount(cond);
 
   return {
     jobsTotal: total,
-    // いったん「すべて」だけ入れておく（その他の層は null）
     ageLayers: buildAllOnlyLayers(AGE_BANDS, total),
     empLayers: buildAllOnlyLayers(EMP_TYPES, total),
     salaryLayers: buildAllOnlyLayers(SALARY_BANDS, total),
@@ -176,93 +124,18 @@ async function fetchMynaviStats(cond: ManualCondition): Promise<SiteStats> {
 /** ========== doda ========== */
 /**
  * doda:
- * - URL は提示いただいた検索結果 URL
- * - 総件数：サイドバー「この条件の求人数 〜件」の数字
- * - 雇用形態：サイドバー「雇用形態」内の checkBox に書かれている件数をパース
- * - 年齢層 / 年収帯：現時点では該当する分布のカウント情報が HTML から取れないため「すべて」のみ
+ * - URL 生成＆HTML 解析は server/job-boards/doda.ts 側に委譲
+ * - ここでは総件数だけ受け取り、
+ *   雇用形態などの分布は現時点では「すべて」のみ埋める簡易版
  */
 async function fetchDodaStats(cond: ManualCondition): Promise<SiteStats> {
-  const baseUrl =
-    "https://doda.jp/DodaFront/View/JobSearchList.action?sid=TopSearch&usrclk=PC_logout_kyujinSearchArea_searchButton";
-
-  // TODO: cond.internalLarge / internalSmall / prefecture を
-  // doda のパラメータ（職種・勤務地）にマッピングする場合はここで URL を組み立てる
-  const html = await fetchWithTimeout(baseUrl);
-  if (!html) {
-    const layersEmpty = buildAllOnlyLayers(AGE_BANDS, null);
-    return {
-      jobsTotal: null,
-      ageLayers: layersEmpty,
-      empLayers: buildAllOnlyLayers(EMP_TYPES, null),
-      salaryLayers: buildAllOnlyLayers(SALARY_BANDS, null),
-    };
-  }
-
-  // 総件数
-  const totalMatch = html.match(
-    /この条件の求人数<span[^>]*class="search-sidebar__total-count__number"[^>]*>([\d,]+)<\/span>件/
-  );
-  const total = parseNumberLike(totalMatch?.[1] ?? "");
-
-  // 雇用形態 部分だけをざっくり切り出し
-  const sectionIndex = html.indexOf("雇用形態");
-  let empSection = "";
-  if (sectionIndex !== -1) {
-    const after = html.slice(sectionIndex);
-    const ulIndex = after.indexOf("searchCheckboxList__container");
-    if (ulIndex !== -1) {
-      const part = after.slice(ulIndex);
-      const endIndex = part.indexOf("</ul>");
-      if (endIndex !== -1) {
-        empSection = part.slice(0, endIndex + 5);
-      }
-    }
-  }
-
-  const empCountMap: Record<string, number> = {};
-
-  if (empSection) {
-    const re =
-      /<span class="checkboxItem__title">([^<]+)<\/span><span class="checkboxItem__numberOfJobs">\((?:<!-- -->)?([\d,]+)(?:<!-- -->)?\)<\/span>/g;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(empSection))) {
-      const title = m[1]?.trim() ?? "";
-      const num = parseNumberLike(m[2]) ?? 0;
-      let key: string;
-
-      if (title.includes("正社員")) key = "fulltime";
-      else if (title.includes("契約社員")) key = "contract";
-      else if (title.includes("派遣")) key = "haken";
-      else if (title.includes("アルバイト") || title.includes("パート"))
-        key = "part";
-      else if (title.includes("FCオーナー") || title.includes("業務委託"))
-        key = "outsourcing";
-      else key = "other"; // アプリで個別定義していない雇用形態
-
-      empCountMap[key] = (empCountMap[key] ?? 0) + num;
-    }
-  }
-
-  const ageLayers = buildAllOnlyLayers(AGE_BANDS, total);
-
-  const empLayers: ManualLayerCount[] = EMP_TYPES.map((e, idx) => ({
-    key: e.key,
-    label: e.label,
-    jobs_count:
-      idx === 0
-        ? total
-        : typeof empCountMap[e.key] === "number"
-        ? empCountMap[e.key]
-        : null,
-  }));
-
-  const salaryLayers = buildAllOnlyLayers(SALARY_BANDS, total);
+  const total = await fetchDodaJobsCount(cond);
 
   return {
     jobsTotal: total,
-    ageLayers,
-    empLayers,
-    salaryLayers,
+    ageLayers: buildAllOnlyLayers(AGE_BANDS, total),
+    empLayers: buildAllOnlyLayers(EMP_TYPES, total),
+    salaryLayers: buildAllOnlyLayers(SALARY_BANDS, total),
   };
 }
 
