@@ -515,11 +515,11 @@ const LayerTable: React.FC<{
           <tbody>
             {list.map((l, idx) => (
               <tr
-                key={`${title}-${idx}-${l.label}`}
+                key={`${title}-${l.key}-${idx}`}
                 className="border-t border-neutral-100"
               >
                 <td className="px-3 py-1.5 whitespace-nowrap">
-                  {idx === 0 ? (
+                  {idx === 0 && l.key === "all" ? (
                     <span className="inline-flex items-center gap-1">
                       <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-indigo-100 text-[10px] text-indigo-700">
                         全
@@ -545,6 +545,64 @@ const LayerTable: React.FC<{
     </div>
   );
 };
+
+/** =========================
+ * 条件ごとの結果 → 1つの集計にまとめる
+ * ========================= */
+
+function aggregateManualRows(rows: ManualResultRow[]): ManualResultRow | null {
+  if (!rows || rows.length === 0) return null;
+
+  const total = rows.reduce(
+    (sum, r) => sum + (typeof r.jobs_total === "number" ? r.jobs_total : 0),
+    0
+  );
+
+  const mergeLayers = (
+    getLayers: (r: ManualResultRow) => ManualLayerCount[] | undefined
+  ): ManualLayerCount[] => {
+    const map = new Map<string, ManualLayerCount>();
+
+    for (const r of rows) {
+      const layers = getLayers(r) ?? [];
+      for (const l of layers) {
+        const key = l.key || l.label;
+        const base = map.get(key);
+        const add = typeof l.jobs_count === "number" ? l.jobs_count : 0;
+
+        if (!base) {
+          map.set(key, {
+            key,
+            label: l.label,
+            jobs_count: add || null,
+          });
+        } else {
+          const current =
+            typeof base.jobs_count === "number" ? base.jobs_count : 0;
+          const next = current + add;
+          base.jobs_count = next || null;
+        }
+      }
+    }
+
+    return Array.from(map.values());
+  };
+
+  const ageLayers = mergeLayers((r) => r.age_layers);
+  const empLayers = mergeLayers((r) => r.employment_layers);
+  const salaryLayers = mergeLayers((r) => r.salary_layers);
+
+  return {
+    site_key: "all",
+    internal_large: null,
+    internal_small: null,
+    prefecture: null,
+    jobs_total: total,
+    age_layers: ageLayers,
+    employment_layers: empLayers,
+    salary_layers: salaryLayers,
+  };
+}
 
 /** =========================
  * 手動実行ページ本体
@@ -605,7 +663,7 @@ export default function JobBoardsManualPage() {
     const smallCount = small.length || 1;
     const prefCount = prefs.length || 1;
     const baseUnits = siteCount * largeCount * smallCount * prefCount;
-    const totalSteps = baseUnits > 0 ? baseUnits * 10 : 0; // 1条件あたり10ステップ相当とみなす
+    const totalSteps = baseUnits > 0 ? baseUnits * 10 : 0;
     setProgressTotal(totalSteps);
 
     try {
@@ -681,6 +739,8 @@ export default function JobBoardsManualPage() {
         )}%)`
       : "";
 
+  const summary = useMemo(() => aggregateManualRows(rows), [rows]);
+
   return (
     <>
       <AppHeader showBack />
@@ -691,7 +751,7 @@ export default function JobBoardsManualPage() {
               転職サイト 手動実行
             </h1>
             <p className="mt-1 text-sm text-neutral-500">
-              ログイン情報を利用して件数を取得。結果は「手動実行履歴」に保存予定です。
+              ログイン情報を利用して件数を取得。設定した条件すべてを集計し、1つの表で表示します。
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -806,72 +866,71 @@ export default function JobBoardsManualPage() {
           )}
         </section>
 
-        {/* 結果表示 */}
+        {/* 結果表示：設定した条件すべての集計を 1 表だけ表示 */}
         <section className="mt-6 rounded-2xl border border-neutral-200 p-4">
           <div className="text-sm font-semibold mb-3">
-            取得結果（今回の手動実行）
+            取得結果（設定した条件すべての集計）
           </div>
 
-          {rows.length === 0 ? (
+          {!summary ? (
             <div className="px-4 py-10 text-center text-neutral-400 text-sm">
               まだ結果がありません。「求人件数を取得する」を実行してください。
             </div>
           ) : (
-            <div className="space-y-4">
-              {rows.map((r, i) => {
-                const siteLabel =
-                  SITE_OPTIONS.find((s) => s.value === r.site_key)?.label ||
-                  r.site_key;
-
-                return (
-                  <div
-                    key={i}
-                    className="rounded-xl border border-neutral-200 p-4"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <div className="text-xs font-semibold text-neutral-500 mb-1">
-                          条件
-                        </div>
-                        <div className="text-sm text-neutral-900">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="inline-flex items-center rounded-full border border-neutral-300 px-2 py-0.5 text-[11px]">
-                              サイト: {siteLabel}
-                            </span>
-                            <span className="inline-flex items-center rounded-full border border-neutral-300 px-2 py-0.5 text-[11px]">
-                              職種: {r.internal_large ?? "すべて"}
-                              {r.internal_small ? ` > ${r.internal_small}` : ""}
-                            </span>
-                            <span className="inline-flex items-center rounded-full border border-neutral-300 px-2 py-0.5 text-[11px]">
-                              都道府県: {r.prefecture ?? "全国"}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="text-right">
-                        <div className="text-xs text-neutral-500">
-                          合計（すべて）
-                        </div>
-                        <div className="text-lg font-semibold tabular-nums">
-                          {typeof r.jobs_total === "number"
-                            ? `${r.jobs_total.toLocaleString()}件`
-                            : "-"}
-                        </div>
-                      </div>
+            <div className="rounded-xl border border-neutral-200 p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-xs font-semibold text-neutral-500 mb-1">
+                    集計条件
+                  </div>
+                  <div className="text-sm text-neutral-900 space-y-1">
+                    <div>
+                      サイト:{" "}
+                      {sites.length
+                        ? SITE_OPTIONS.filter((s) => sites.includes(s.value))
+                            .map((s) => s.label)
+                            .join(" / ")
+                        : "未選択"}
                     </div>
-
-                    <div className="mt-3 grid gap-3 md:grid-cols-3">
-                      <LayerTable title="年齢層" layers={r.age_layers} />
-                      <LayerTable
-                        title="雇用形態"
-                        layers={r.employment_layers}
-                      />
-                      <LayerTable title="年収帯" layers={r.salary_layers} />
+                    <div>
+                      職種: 大分類 {large.length || 0} / 小分類{" "}
+                      {small.length || 0}
+                    </div>
+                    <div>
+                      都道府県:{" "}
+                      {prefs.length
+                        ? `${prefs.slice(0, 5).join("、")}${
+                            prefs.length > 5 ? ` ほか${prefs.length - 5}件` : ""
+                          }`
+                        : "全国（指定なし）"}
+                    </div>
+                    <div className="text-xs text-neutral-500 mt-1">
+                      ※ サイト × 職種 × 都道府県 の {rows.length}
+                      パターンを合算した値です
                     </div>
                   </div>
-                );
-              })}
+                </div>
+
+                <div className="text-right">
+                  <div className="text-xs text-neutral-500">
+                    合計（すべての条件）
+                  </div>
+                  <div className="text-lg font-semibold tabular-nums">
+                    {typeof summary.jobs_total === "number"
+                      ? `${summary.jobs_total.toLocaleString()}件`
+                      : "-"}
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-3 grid gap-3 md:grid-cols-3">
+                <LayerTable title="年齢層" layers={summary.age_layers} />
+                <LayerTable
+                  title="雇用形態"
+                  layers={summary.employment_layers}
+                />
+                <LayerTable title="年収帯" layers={summary.salary_layers} />
+              </div>
             </div>
           )}
         </section>

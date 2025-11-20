@@ -14,13 +14,17 @@ export type ManualCondition = {
   salaryBand: string | null;
 };
 
-/** 結果表示用：層ごとの件数 */
+/** 層ごとの件数 */
 export type ManualLayerCount = {
+  /** アプリ内部用キー（集計用） */
+  key: string;
+  /** 表示ラベル */
   label: string;
+  /** 件数（不明の場合は null） */
   jobs_count: number | null;
 };
 
-/** API から返す 1 行分（画面でカード表示） */
+/** API から返す 1 行分（条件ごと） */
 export type ManualResultRow = {
   site_key: string;
   internal_large: string | null;
@@ -48,14 +52,17 @@ export const AGE_BANDS = [
   { key: "65-plus", label: "65歳以上" },
 ] as const;
 
-/** UI / 集計用：雇用形態（表示ラベル用） */
+/** UI / 集計用：雇用形態（表示ラベル用）
+ *  other … アプリで個別定義していない雇用形態（人材紹介、FCオーナーなど）を合算
+ */
 export const EMP_TYPES = [
   { key: "all", label: "すべて" },
   { key: "fulltime", label: "正社員" },
   { key: "contract", label: "契約社員" },
   { key: "haken", label: "派遣社員" },
-  { key: "part", label: "アルバイト" },
-  { key: "outsourcing", label: "業務委託" },
+  { key: "part", label: "アルバイト・パート" },
+  { key: "outsourcing", label: "業務委託・FC" },
+  { key: "other", label: "その他" },
 ] as const;
 
 /** UI / 集計用：年収帯（表示ラベル用） */
