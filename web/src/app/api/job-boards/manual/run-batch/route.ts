@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 import { NextRequest, NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
 
 /**
  * 手動ページ側の rows と揃えた型
@@ -28,7 +29,7 @@ type RunBatchRequestBody = {
   sal?: string[]; // ["~300万", "300~400万", ...]
   pref?: string[]; // ["東京都", "大阪府", ...]
   want?: number; // 上限件数（例: 200） ※なければ 200
-  saveMode?: "history" | "none"; // 将来 DB 保存するかどうかのフラグ用（今は未使用）
+  saveMode?: "history" | "none"; // "history" のとき job_board_manual_runs に保存
 };
 
 /** ====== 職種の合成キーを分解 ====== */
@@ -116,7 +117,6 @@ function buildMynaviUrl(opt: MynaviSearchOptions): string {
 
   // --------------------------
   // 都道府県 → キーワードで代用
-  //  ※ 本来はパス(/tokyo/list/...)やクエリ(pref=13 等)で指定するのが理想
   // --------------------------
   if (opt.prefecture) {
     jobWords.push(opt.prefecture);
@@ -124,8 +124,6 @@ function buildMynaviUrl(opt: MynaviSearchOptions): string {
 
   // --------------------------
   // 雇用形態 / 年収帯 / 年齢層 もキーワードに付けておく
-  //  ※ 本来はそれぞれ専用パラメータがあるはずなので
-  //     そこは実際の HTML を見て name=... を調整してください。
   // --------------------------
   if (opt.employment_type) {
     jobWords.push(opt.employment_type);
@@ -140,7 +138,6 @@ function buildMynaviUrl(opt: MynaviSearchOptions): string {
   const freeWord = jobWords.join(" ");
 
   // TODO: 実サイトの HTML から、キーワード検索の name 属性を確認して書き換える
-  // 例: <input name="fw" ...> なら fw にセット
   if (freeWord) {
     url.searchParams.set("fw", freeWord);
   }
@@ -153,7 +150,6 @@ async function fetchMynaviJobsCount(opt: MynaviSearchOptions): Promise<number> {
   const url = buildMynaviUrl(opt);
 
   const res = await fetch(url, {
-    // Bot 判定を避けるために User-Agent をそれっぽくする
     headers: {
       "User-Agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
@@ -177,6 +173,31 @@ function normalizeDimension(values?: string[] | null): (string | null)[] {
   return values;
 }
 
+/** ===== Supabase / tenant utilities ===== */
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+
+function isValidUuid(v: unknown): v is string {
+  if (typeof v !== "string") return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    v
+  );
+}
+
+function resolveTenantId(req: NextRequest, body?: any): string | null {
+  const h = (req.headers.get("x-tenant-id") || "").trim();
+  if (isValidUuid(h)) return h;
+
+  const cookie = req.headers.get("cookie") || "";
+  const m = cookie.match(/(?:^|;\s*)(x-tenant-id|tenant_id)=([^;]+)/i);
+  if (m && isValidUuid(decodeURIComponent(m[2])))
+    return decodeURIComponent(m[2]);
+
+  if (isValidUuid(body?.tenant_id)) return String(body?.tenant_id);
+
+  return null;
+}
+
 /**
  * POST /api/job-boards/manual/run-batch
  *
@@ -184,6 +205,7 @@ function normalizeDimension(values?: string[] | null): (string | null)[] {
  *  - 今回は「マイナビ（mynavi）」のみ対応。
  *  - 年齢層/雇用形態/年収帯/都道府県/職種の全組み合わせで
  *    マイナビの検索を実行し、求人数を取得する。
+ *  - saveMode === "history" のとき job_board_manual_runs に保存する。
  */
 export async function POST(req: NextRequest) {
   try {
@@ -191,6 +213,7 @@ export async function POST(req: NextRequest) {
 
     const sites = body.sites ?? [];
     const want = body.want && body.want > 0 ? body.want : 200;
+    const saveMode = body.saveMode ?? "none";
 
     // 今回はマイナビのみ対応
     if (!sites.includes("mynavi")) {
@@ -201,15 +224,6 @@ export async function POST(req: NextRequest) {
     }
 
     // ---- 職種の次元（small が優先。なければ large 単位。どちらも空なら 1 パターン null） ----
-    const smallKeys = normalizeDimension(body.small ?? []);
-    const largeOnly = normalizeDimension(
-      body.large &&
-        body.large.length > 0 &&
-        (!body.small || body.small.length === 0)
-        ? body.large
-        : []
-    );
-
     type JobDimension = {
       internal_large: string | null;
       internal_small: string | null;
@@ -217,19 +231,16 @@ export async function POST(req: NextRequest) {
 
     const jobDims: JobDimension[] = [];
 
-    // small（合成キー）優先
     if (body.small && body.small.length > 0) {
       for (const sk of body.small) {
         const { internal_large, internal_small } = decodeJobKey(sk);
         jobDims.push({ internal_large, internal_small });
       }
     } else if (body.large && body.large.length > 0) {
-      // large だけ指定されている場合は、大分類単位の集計として扱う
       for (const lg of body.large) {
         jobDims.push({ internal_large: lg, internal_small: null });
       }
     } else {
-      // 職種条件なし
       jobDims.push({ internal_large: null, internal_small: null });
     }
 
@@ -306,6 +317,51 @@ export async function POST(req: NextRequest) {
       if (results.length >= want) break;
     }
 
+    let historyId: string | null = null;
+
+    // ====== job_board_manual_runs へ保存（saveMode === "history" のとき） ======
+    if (saveMode === "history") {
+      const tenantId = resolveTenantId(req, body);
+
+      if (tenantId && isValidUuid(tenantId)) {
+        try {
+          const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+          const params = {
+            sites,
+            large: body.large ?? [],
+            small: body.small ?? [],
+            age: body.age ?? [],
+            emp: body.emp ?? [],
+            sal: body.sal ?? [],
+            pref: body.pref ?? [],
+            want,
+            site_key: "mynavi",
+            via: "manual-run-batch",
+          };
+
+          const { data, error } = await admin
+            .from("job_board_manual_runs")
+            .insert({
+              tenant_id: tenantId,
+              params,
+              results,
+              result_count: results.length,
+            })
+            .select("id")
+            .single();
+
+          if (error) throw error;
+          historyId = data?.id ?? null;
+        } catch (e) {
+          console.error("[manual-run] failed to save history", e);
+        }
+      } else {
+        console.warn(
+          "[manual-run] saveMode=history だが tenant_id が解決できませんでした。保存はスキップします。"
+        );
+      }
+    }
+
     const note = [
       "マイナビから求人数を取得しました。",
       `試行した組み合わせ数: ${processed}`,
@@ -313,17 +369,18 @@ export async function POST(req: NextRequest) {
       totalComb > results.length
         ? `※ want=${want} の上限に達したため、全組み合わせ(${totalComb})の一部のみ実行しています。`
         : "",
+      historyId
+        ? `job_board_manual_runs に保存しました（ID: ${historyId}）`
+        : "",
     ]
       .filter(Boolean)
       .join("\n");
 
-    // ここでは DB への保存は行わず、プレビューとして返す。
-    // 将来 job_board_counts 等への保存をする場合は、この位置で Supabase を呼ぶ。
     return NextResponse.json({
       ok: true,
       preview: results,
       note,
-      history_id: null, // 将来「手動実行履歴」テーブルに保存する場合用
+      history_id: historyId,
     });
   } catch (e: any) {
     console.error("[manual-run] error", e);

@@ -312,8 +312,6 @@ async function resolveTenantIdViaSupabase(): Promise<string | null> {
     const user = userData?.user;
     if (!user?.id) return null;
 
-    // ★ ここが今回の修正ポイント：
-    // Supabase の戻り値に明示的な型を与えて 'never' 推論を防ぐ
     type ProfileRow = { tenant_id: string | null };
 
     const resp = await supabase
@@ -322,7 +320,6 @@ async function resolveTenantIdViaSupabase(): Promise<string | null> {
       .eq("id", user.id)
       .single();
 
-    // resp.data を安全にキャストして取り出す
     const row = (resp.data as ProfileRow | null) ?? null;
     if (!row) return null;
 
@@ -429,7 +426,6 @@ export default function JobBoardsManualPage() {
     setMsg("");
     setRows([]);
     try {
-      // ここで最終的に tenant_id を確定させる
       const tenant = await ensureTenantId();
       if (!isValidUuid(tenant)) {
         setRunning(false);
@@ -457,8 +453,10 @@ export default function JobBoardsManualPage() {
           saveMode: "history", // 履歴へ保存
         }),
       });
+
       const j = await resp.json();
       if (!resp.ok || !j?.ok) throw new Error(j?.error || "run failed");
+
       setRows((j?.preview as ManualFetchRow[]) ?? []);
       setMsg(
         j?.note ||
@@ -477,7 +475,6 @@ export default function JobBoardsManualPage() {
       <main className="mx-auto max-w-6xl p-6">
         <div className="mb-4 flex items-center justify-between">
           <div>
-            {/* 他ページと同トーン（黒）に統一 */}
             <h1 className="text-2xl font-semibold text-neutral-900">
               転職サイト 手動実行
             </h1>
@@ -527,7 +524,7 @@ export default function JobBoardsManualPage() {
             </div>
           </div>
 
-          {/* 職種（同UIモーダル） */}
+          {/* 職種 */}
           <div>
             <div className="mb-1 text-xs font-medium text-neutral-600">
               職種
@@ -541,7 +538,7 @@ export default function JobBoardsManualPage() {
             </button>
           </div>
 
-          {/* 都道府県（同UIモーダル） */}
+          {/* 都道府県 */}
           <div>
             <div className="mb-1 text-xs font-medium text-neutral-600">
               都道府県
@@ -564,7 +561,7 @@ export default function JobBoardsManualPage() {
             </div>
           </div>
 
-          {/* 年齢/雇用/年収（バッチ選択） */}
+          {/* 年齢/雇用/年収 */}
           <div>
             <div className="mb-1 text-xs font-medium text-neutral-600">
               年齢層

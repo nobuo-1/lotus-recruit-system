@@ -18,11 +18,14 @@ function isValidUuid(v: unknown): v is string {
 function resolveTenantId(req: Request, body?: any): string | null {
   const h = (req.headers.get("x-tenant-id") || "").trim();
   if (isValidUuid(h)) return h;
+
   const cookie = req.headers.get("cookie") || "";
   const m = cookie.match(/(?:^|;\s*)(x-tenant-id|tenant_id)=([^;]+)/i);
   if (m && isValidUuid(decodeURIComponent(m[2])))
     return decodeURIComponent(m[2]);
+
   if (isValidUuid(body?.tenant_id)) return String(body?.tenant_id);
+
   return null;
 }
 
@@ -43,12 +46,16 @@ export async function GET(req: Request) {
 
     const { data, error } = await admin
       .from("job_board_manual_runs")
-      .select("id, created_at, tenant_id, params, result_count")
+      .select(
+        // UIから結果一覧も見えるように results も返す
+        "id, created_at, tenant_id, params, result_count, results"
+      )
       .eq("tenant_id", tenantId)
       .order("created_at", { ascending: false })
       .limit(limit);
 
     if (error) throw error;
+
     return NextResponse.json({ ok: true, rows: data ?? [] });
   } catch (e: any) {
     return NextResponse.json(
@@ -63,6 +70,7 @@ export async function POST(req: Request) {
     const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
     const body = await req.json().catch(() => ({}));
     const tenantId = resolveTenantId(req, body);
+
     if (!tenantId) {
       return NextResponse.json(
         {
@@ -89,6 +97,7 @@ export async function POST(req: Request) {
       .single();
 
     if (error) throw error;
+
     return NextResponse.json({ ok: true, id: data?.id || null });
   } catch (e: any) {
     return NextResponse.json(
