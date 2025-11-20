@@ -263,7 +263,14 @@ const SITE_OPTIONS: { value: string; label: string }[] = [
   { value: "doda", label: "doda" },
   { value: "type", label: "type" },
   { value: "womantype", label: "女の転職type" },
+  // 今後エン転職などを追加する場合はここに value を追加
 ];
+
+// ★追加: site_key → 表示用ラベルのマップ
+const SITE_LABEL_MAP: Record<string, string> = SITE_OPTIONS.reduce((acc, s) => {
+  acc[s.value] = s.label;
+  return acc;
+}, {} as Record<string, string>);
 
 /** ===== UUID / Tenant ユーティリティ ===== */
 function isValidUuid(v: string | null | undefined): v is string {
@@ -604,6 +611,43 @@ function aggregateManualRows(rows: ManualResultRow[]): ManualResultRow | null {
   };
 }
 
+// ★追加: サイト別サマリ用型 & ビルダー
+type SiteSummary = {
+  siteKey: string;
+  label: string;
+  summary: ManualResultRow;
+  patternCount: number;
+};
+
+function buildSiteSummaries(rows: ManualResultRow[]): SiteSummary[] {
+  if (!rows || rows.length === 0) return [];
+
+  const bySite = new Map<string, ManualResultRow[]>();
+
+  for (const r of rows) {
+    const key = r.site_key || "unknown";
+    const list = bySite.get(key);
+    if (list) list.push(r);
+    else bySite.set(key, [r]);
+  }
+
+  const result: SiteSummary[] = [];
+  for (const [siteKey, siteRows] of bySite.entries()) {
+    const agg = aggregateManualRows(siteRows);
+    if (!agg) continue;
+
+    result.push({
+      siteKey,
+      label: SITE_LABEL_MAP[siteKey] ?? siteKey,
+      summary: { ...agg, site_key: siteKey },
+      patternCount: siteRows.length,
+    });
+  }
+
+  // サイト名で安定ソート（日本語優先）
+  return result.sort((a, b) => a.label.localeCompare(b.label, "ja"));
+}
+
 /** =========================
  * 手動実行ページ本体
  * ========================= */
@@ -739,7 +783,9 @@ export default function JobBoardsManualPage() {
         )}%)`
       : "";
 
-  const summary = useMemo(() => aggregateManualRows(rows), [rows]);
+  // ★変更: 全体集計とサイト別集計をそれぞれ計算
+  const summaryAll = useMemo(() => aggregateManualRows(rows), [rows]);
+  const perSiteSummaries = useMemo(() => buildSiteSummaries(rows), [rows]);
 
   return (
     <>
@@ -751,7 +797,7 @@ export default function JobBoardsManualPage() {
               転職サイト 手動実行
             </h1>
             <p className="mt-1 text-sm text-neutral-500">
-              ログイン情報を利用して件数を取得。設定した条件すべてを集計し、1つの表で表示します。
+              ログイン情報を利用して件数を取得。設定した条件すべてを集計し、サイトごとに結果を表示します。
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -866,72 +912,152 @@ export default function JobBoardsManualPage() {
           )}
         </section>
 
-        {/* 結果表示：設定した条件すべての集計を 1 表だけ表示 */}
+        {/* ★変更: 結果表示 → 全体集計 + サイト別集計 */}
         <section className="mt-6 rounded-2xl border border-neutral-200 p-4">
-          <div className="text-sm font-semibold mb-3">
-            取得結果（設定した条件すべての集計）
-          </div>
+          <div className="text-sm font-semibold mb-3">取得結果</div>
 
-          {!summary ? (
+          {!summaryAll && perSiteSummaries.length === 0 ? (
             <div className="px-4 py-10 text-center text-neutral-400 text-sm">
               まだ結果がありません。「求人件数を取得する」を実行してください。
             </div>
           ) : (
-            <div className="rounded-xl border border-neutral-200 p-4">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <div className="text-xs font-semibold text-neutral-500 mb-1">
-                    集計条件
+            <>
+              {/* 全サイト合計 */}
+              {summaryAll && (
+                <div className="rounded-xl border border-neutral-200 p-4 mb-6">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-xs font-semibold text-neutral-500 mb-1">
+                        全サイト合計の集計条件
+                      </div>
+                      <div className="text-sm text-neutral-900 space-y-1">
+                        <div>
+                          サイト:{" "}
+                          {sites.length
+                            ? SITE_OPTIONS.filter((s) =>
+                                sites.includes(s.value)
+                              )
+                                .map((s) => s.label)
+                                .join(" / ")
+                            : "未選択"}
+                        </div>
+                        <div>
+                          職種: 大分類 {large.length || 0} / 小分類{" "}
+                          {small.length || 0}
+                        </div>
+                        <div>
+                          都道府県:{" "}
+                          {prefs.length
+                            ? `${prefs.slice(0, 5).join("、")}${
+                                prefs.length > 5
+                                  ? ` ほか${prefs.length - 5}件`
+                                  : ""
+                              }`
+                            : "全国（指定なし）"}
+                        </div>
+                        <div className="text-xs text-neutral-500 mt-1">
+                          ※ サイト × 職種 × 都道府県 の {rows.length}
+                          パターンを合算した値です
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="text-right">
+                      <div className="text-xs text-neutral-500">
+                        合計（すべての条件）
+                      </div>
+                      <div className="text-lg font-semibold tabular-nums">
+                        {typeof summaryAll.jobs_total === "number"
+                          ? `${summaryAll.jobs_total.toLocaleString()}件`
+                          : "-"}
+                      </div>
+                    </div>
                   </div>
-                  <div className="text-sm text-neutral-900 space-y-1">
-                    <div>
-                      サイト:{" "}
-                      {sites.length
-                        ? SITE_OPTIONS.filter((s) => sites.includes(s.value))
-                            .map((s) => s.label)
-                            .join(" / ")
-                        : "未選択"}
-                    </div>
-                    <div>
-                      職種: 大分類 {large.length || 0} / 小分類{" "}
-                      {small.length || 0}
-                    </div>
-                    <div>
-                      都道府県:{" "}
-                      {prefs.length
-                        ? `${prefs.slice(0, 5).join("、")}${
-                            prefs.length > 5 ? ` ほか${prefs.length - 5}件` : ""
-                          }`
-                        : "全国（指定なし）"}
-                    </div>
-                    <div className="text-xs text-neutral-500 mt-1">
-                      ※ サイト × 職種 × 都道府県 の {rows.length}
-                      パターンを合算した値です
-                    </div>
+
+                  <div className="mt-3 grid gap-3 md:grid-cols-3">
+                    <LayerTable title="年齢層" layers={summaryAll.age_layers} />
+                    <LayerTable
+                      title="雇用形態"
+                      layers={summaryAll.employment_layers}
+                    />
+                    <LayerTable
+                      title="年収帯"
+                      layers={summaryAll.salary_layers}
+                    />
                   </div>
                 </div>
+              )}
 
-                <div className="text-right">
-                  <div className="text-xs text-neutral-500">
-                    合計（すべての条件）
+              {/* サイト別内訳 */}
+              {perSiteSummaries.length > 0 && (
+                <div className="space-y-4">
+                  <div className="text-xs font-semibold text-neutral-600">
+                    サイト別の内訳
                   </div>
-                  <div className="text-lg font-semibold tabular-nums">
-                    {typeof summary.jobs_total === "number"
-                      ? `${summary.jobs_total.toLocaleString()}件`
-                      : "-"}
-                  </div>
+                  {perSiteSummaries.map((site) => (
+                    <div
+                      key={site.siteKey}
+                      className="rounded-xl border border-neutral-200 p-4"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="text-xs font-semibold text-neutral-500 mb-1">
+                            {site.label} の集計条件
+                          </div>
+                          <div className="text-sm text-neutral-900 space-y-1">
+                            <div>サイト: {site.label}</div>
+                            <div>
+                              職種: 大分類 {large.length || 0} / 小分類{" "}
+                              {small.length || 0}
+                            </div>
+                            <div>
+                              都道府県:{" "}
+                              {prefs.length
+                                ? `${prefs.slice(0, 5).join("、")}${
+                                    prefs.length > 5
+                                      ? ` ほか${prefs.length - 5}件`
+                                      : ""
+                                  }`
+                                : "全国（指定なし）"}
+                            </div>
+                            <div className="text-xs text-neutral-500 mt-1">
+                              ※ このサイト内の {site.patternCount}
+                              パターンを合算した値です
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="text-right">
+                          <div className="text-xs text-neutral-500">
+                            {site.label} 合計
+                          </div>
+                          <div className="text-lg font-semibold tabular-nums">
+                            {typeof site.summary.jobs_total === "number"
+                              ? `${site.summary.jobs_total.toLocaleString()}件`
+                              : "-"}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="mt-3 grid gap-3 md:grid-cols-3">
+                        <LayerTable
+                          title="年齢層"
+                          layers={site.summary.age_layers}
+                        />
+                        <LayerTable
+                          title="雇用形態"
+                          layers={site.summary.employment_layers}
+                        />
+                        <LayerTable
+                          title="年収帯"
+                          layers={site.summary.salary_layers}
+                        />
+                      </div>
+                    </div>
+                  ))}
                 </div>
-              </div>
-
-              <div className="mt-3 grid gap-3 md:grid-cols-3">
-                <LayerTable title="年齢層" layers={summary.age_layers} />
-                <LayerTable
-                  title="雇用形態"
-                  layers={summary.employment_layers}
-                />
-                <LayerTable title="年収帯" layers={summary.salary_layers} />
-              </div>
-            </div>
+              )}
+            </>
           )}
         </section>
       </main>
