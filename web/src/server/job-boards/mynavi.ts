@@ -73,6 +73,67 @@ function buildJobParams(
   return out;
 }
 
+/** =========================
+ * 都道府県名 → マイナビコード対応
+ * =========================
+ *
+ * マイナビの勤務地モーダルでは、
+ *   中分類（都道府県）: <input name="mcatareaP01" value="P01" ...>
+ * のように P01〜P47 が使われている。
+ *
+ * フロント（/job-boards/manual）では「北海道」「東京都」などの
+ * 名称を渡しているので、ここで Pxx に変換する。
+ */
+const PREF_NAME_TO_CODE: Record<string, string> = {
+  北海道: "P01",
+  青森県: "P02",
+  岩手県: "P03",
+  宮城県: "P04",
+  秋田県: "P05",
+  山形県: "P06",
+  福島県: "P07",
+  茨城県: "P08",
+  栃木県: "P09",
+  群馬県: "P10",
+  埼玉県: "P11",
+  千葉県: "P12",
+  東京都: "P13",
+  神奈川県: "P14",
+  新潟県: "P15",
+  富山県: "P16",
+  石川県: "P17",
+  福井県: "P18",
+  山梨県: "P19",
+  長野県: "P20",
+  岐阜県: "P21",
+  静岡県: "P22",
+  愛知県: "P23",
+  三重県: "P24",
+  滋賀県: "P25",
+  京都府: "P26",
+  大阪府: "P27",
+  兵庫県: "P28",
+  奈良県: "P29",
+  和歌山県: "P30",
+  鳥取県: "P31",
+  島根県: "P32",
+  岡山県: "P33",
+  広島県: "P34",
+  山口県: "P35",
+  徳島県: "P36",
+  香川県: "P37",
+  愛媛県: "P38",
+  高知県: "P39",
+  福岡県: "P40",
+  佐賀県: "P41",
+  長崎県: "P42",
+  熊本県: "P43",
+  大分県: "P44",
+  宮崎県: "P45",
+  鹿児島県: "P46",
+  沖縄県: "P47",
+};
+
 /**
  * prefecture から勤務地（都道府県）用パラメータを組み立てる
  *
@@ -82,8 +143,13 @@ function buildJobParams(
  * - 小分類（市区町村など）: <input name="scatareaC01100" value="C01100" ...>
  *   → scatarea{code} = code
  *
- * prefecture に "P01" / "C01100" などのコードが入っている前提。
- * 「北海道」「大阪府」などの名称の場合は、後続の fw 側に回す。
+ * prefecture には
+ *   - "P01" / "C01100" などのコード
+ *   - または「北海道」「大阪府」などの名称
+ * が入ってくる想定。
+ *
+ * 名称の場合は PREF_NAME_TO_CODE で Pxx に変換してから
+ * モーダル相当パラメータにする。
  */
 function buildAreaParams(
   cond: ManualCondition
@@ -93,21 +159,32 @@ function buildAreaParams(
 
   if (!raw) return out;
 
-  // コード形式（P01, C01100 など）の場合のみモーダル相当パラメータにする
-  if (/^[PC][0-9A-Z]+$/i.test(raw)) {
-    if (raw.startsWith("C")) {
-      // 市区町村などの小分類
-      out.push({
-        name: `scatarea${raw}`,
-        value: raw,
-      });
-    } else {
-      // P01 などの中分類（都道府県）
-      out.push({
-        name: `mcatarea${raw}`,
-        value: raw,
-      });
+  let code = raw;
+
+  // すでに Pxx / Cxxxxx などのコード形式ならそのまま扱う
+  if (!/^[PC][0-9A-Z]+$/i.test(raw)) {
+    // コード形式でなければ都道府県名として Pxx に変換を試みる
+    const mapped = PREF_NAME_TO_CODE[raw];
+    if (!mapped) {
+      // マッピングできない場合は勤務地条件は指定せず、
+      // （後続のフリーワード処理で必要なら拾われる）
+      return out;
     }
+    code = mapped;
+  }
+
+  if (code.startsWith("C")) {
+    // 市区町村などの小分類
+    out.push({
+      name: `scatarea${code}`,
+      value: code,
+    });
+  } else {
+    // P01 などの中分類（都道府県）
+    out.push({
+      name: `mcatarea${code}`,
+      value: code,
+    });
   }
 
   return out;
@@ -182,7 +259,9 @@ function buildMynaviFormBody(cond: ManualCondition, baseHtml: string): string {
     pushIfFreeText(cond.internalSmall);
   }
 
-  // 都道府県もコードでなければフリーワードへ
+  // 都道府県もコードでなければフリーワードへ、だが
+  // buildAreaParams で名称 → コード変換するため、
+  // ここに到達するのは「マッピングできなかった名称」のみ
   if (areaParams.length === 0) {
     pushIfFreeText(cond.prefecture);
   }
