@@ -6,7 +6,8 @@ import type { ManualCondition } from "./types";
  * マイナビの検索結果ページ HTML から
  * 「条件に合う求人 ○○件を検索する」の ○○件 を抜き出す
  *
- * ※ 都道府県が未指定のときだけ使う（全体件数用フォールバック）。
+ * ※ 都道府県が未指定のときだけ使う（全体件数用フォールバック）だったが、
+ *    現在は「都道府県ありの場合のフォールバック」としても必ず呼ぶ。
  */
 export function parseMynaviJobsCount(html: string): number | null {
   // ① js__searchRecruit--count を最優先
@@ -222,6 +223,7 @@ function getMynaviPrefectureCode(cond: ManualCondition): string | null {
   const raw = cond.prefecture?.trim();
   if (!raw) return null;
 
+  // すでに Pxx 形式ならそのまま
   if (/^P\d{2}$/i.test(raw)) {
     return `P${raw.slice(1).padStart(2, "0")}`.toUpperCase();
   }
@@ -233,6 +235,13 @@ function getMynaviPrefectureCode(cond: ManualCondition): string | null {
 /**
  * internalLarge / internalSmall から
  * マイナビの「職種」用クエリパラメータを組み立てる。
+ *
+ * external_large_code = "11"
+ * external_small_code = "11105"
+ * のようなコード前提で、
+ *   sr_occ_cd   : 小分類
+ *   sr_occ_l_cd : 大分類
+ * を優先的に指定する。
  */
 function buildMynaviJobQueryParams(cond: ManualCondition): URLSearchParams {
   const params = new URLSearchParams();
@@ -240,10 +249,12 @@ function buildMynaviJobQueryParams(cond: ManualCondition): URLSearchParams {
   const large = cond.internalLarge?.trim() || "";
   const small = cond.internalSmall?.trim() || "";
 
-  if (small && /^[0-9A-Z]+$/.test(small)) {
+  // 小分類（例: 11105）
+  if (small && /^[0-9A-Z]+$/i.test(small)) {
     params.set("sr_occ_cd", small);
   }
-  if (large && /^[0-9A-Z]+$/.test(large)) {
+  // 大分類（例: 11）
+  if (large && /^[0-9A-Z]+$/i.test(large)) {
     params.set("sr_occ_l_cd", large);
   }
 
@@ -254,14 +265,19 @@ function buildMynaviJobQueryParams(cond: ManualCondition): URLSearchParams {
  * マイナビの検索件数を取得するメイン関数
  *
  * - 職種条件のみ付けて一覧を開く
- * - 都道府県指定がある場合: 「勤務地を選ぶ」モーダルの都道府県横の labelNumber を返す
- * - 都道府県指定なし: 一覧上部の「条件に合う求人 ○○件」などから全体件数を返す
+ * - 都道府県指定がある場合:
+ *     ① 可能なら「勤務地モーダルの都道府県横の数字(labelNumber)」を使う
+ *     ② 取れない場合はヘッダーの「条件に合う求人 ○○件」をフォールバックで返す
+ * - 都道府県指定なし:
+ *     ヘッダーの「条件に合う求人 ○○件」を返す
  */
 export async function fetchMynaviJobsCount(
   cond: ManualCondition
 ): Promise<number | null> {
-  const jobsearchType = "4";
-  const searchType = "8";
+  // 実際の画面と同じ値に合わせる
+  // https://tenshoku.mynavi.jp/list/?jobsearchType=14&searchType=18
+  const jobsearchType = "14";
+  const searchType = "18";
 
   const params = buildMynaviJobQueryParams(cond);
   params.set("jobsearchType", jobsearchType);
@@ -292,16 +308,29 @@ export async function fetchMynaviJobsCount(
     }
 
     const html = await res.text();
-
     const prefCode = getMynaviPrefectureCode(cond);
 
+    let primary: number | null = null;
+    let fallback: number | null = null;
+
+    // ✅ 都道府県指定がある場合は、まずモーダルから都道府県別件数を試す
     if (prefCode) {
-      // ✅ 都道府県指定がある場合は、必ず「勤務地モーダルの都道府県横の数字」を使う
-      return parseMynaviPrefectureCountFromModal(html, prefCode);
+      primary = parseMynaviPrefectureCountFromModal(html, prefCode);
     }
 
-    // ✅ 都道府県指定なしのときだけ、全体件数としてヘッダーの数字を使う
-    return parseMynaviJobsCount(html);
+    // ✅ どちらの場合でも、ヘッダーの「条件に合う求人 ○○件」を必ずフォールバックで見る
+    fallback = parseMynaviJobsCount(html);
+
+    const result = primary ?? fallback;
+
+    if (result == null) {
+      console.error("mynavi jobs count parse failed", {
+        url,
+        prefCode,
+      });
+    }
+
+    return result;
   } catch (err) {
     console.error("mynavi fetch error", err, { url });
     return null;
