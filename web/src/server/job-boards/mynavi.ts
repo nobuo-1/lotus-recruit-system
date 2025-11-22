@@ -46,13 +46,164 @@ export function parseMynaviJobsCount(html: string): number | null {
   return null;
 }
 
+/**
+ * Pコード（P13 など） → 地域コード（data-large-cd="04" など）の対応
+ *
+ * 地域リスト：
+ *  01: 北海道
+ *  02: 東北
+ *  03: 北関東
+ *  04: 首都圏
+ *  15: 甲信越
+ *  14: 北陸
+ *  08: 東海
+ *  09: 関西
+ *  10: 中国
+ *  11: 四国
+ *  12: 九州（＋沖縄）
+ */
+const PREF_CODE_TO_AREA_LARGE: Record<string, string> = {
+  P01: "01", // 北海道
+  P02: "02",
+  P03: "02",
+  P04: "02",
+  P05: "02",
+  P06: "02",
+  P07: "02", // 東北
+
+  P08: "03",
+  P09: "03",
+  P10: "03", // 北関東
+
+  P11: "04",
+  P12: "04",
+  P13: "04",
+  P14: "04", // 首都圏
+
+  P15: "15",
+  P19: "15",
+  P20: "15", // 甲信越
+
+  P16: "14",
+  P17: "14",
+  P18: "14", // 北陸
+
+  P21: "08",
+  P22: "08",
+  P23: "08",
+  P24: "08", // 東海
+
+  P25: "09",
+  P26: "09",
+  P27: "09",
+  P28: "09",
+  P29: "09",
+  P30: "09", // 関西
+
+  P31: "10",
+  P32: "10",
+  P33: "10",
+  P34: "10",
+  P35: "10", // 中国
+
+  P36: "11",
+  P37: "11",
+  P38: "11",
+  P39: "11", // 四国
+
+  P40: "12",
+  P41: "12",
+  P42: "12",
+  P43: "12",
+  P44: "12",
+  P45: "12",
+  P46: "12",
+  P47: "12", // 九州・沖縄
+};
+
+/**
+ * 「勤務地を選ぶ」モーダル内の
+ *   ① 地域（data-large-cd="04" など）
+ *   ② その地域の中の都道府県（data-middle-cd="P13" など）
+ *   ③ その中の <span class="labelNumber">○○件</span>
+ * を 1 回のパースで取得する。
+ *
+ * 例：
+ * <div class="js__selectCondition--large" data-large-cd="04" ...>
+ *   ...
+ *   <section class="choiceContent__section js__selectCondition--middle" data-middle-cd="P13" ...>
+ *     <h4 class="choiceContent__sectionTitle">
+ *       <label ...>東京都</label>
+ *       <span class="labelNumber">2732</span>
+ *     </h4>
+ *     ...
+ *   </section>
+ *   ...
+ * </div>
+ */
+function parseMynaviPrefectureCountFromModal(
+  html: string,
+  prefCode: string
+): number | null {
+  // prefCode は "P13" のような形式を想定
+  const prefEscaped = prefCode.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
+  const upperPref = prefCode.toUpperCase();
+
+  const areaLarge = PREF_CODE_TO_AREA_LARGE[upperPref];
+
+  // ① 地域コードが分かっている場合は、
+  //    data-large-cd="XX" ブロックの中にある data-middle-cd="Pxx" を探す
+  if (areaLarge) {
+    const areaEscaped = areaLarge.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
+
+    const reAreaAndPref = new RegExp(
+      `<div[^>]*class=["'][^"']*js__selectCondition--large[^"']*["'][^>]*data-large-cd=["']${areaEscaped}["'][^>]*>[\\s\\S]*?<section[^>]*class=["'][^"']*choiceContent__section[^"']*js__selectCondition--middle[^"']*["'][^>]*data-middle-cd=["']${prefEscaped}["'][^>]*>[\\s\\S]*?<span[^>]*class=["'][^"']*labelNumber[^"']*["'][^>]*>\\s*([\\d,]+)\\s*<\\/span>`,
+      "i"
+    );
+
+    const mArea = html.match(reAreaAndPref);
+    if (mArea?.[1]) {
+      const n = Number(mArea[1].replace(/,/g, ""));
+      if (!Number.isNaN(n)) return n;
+    }
+  }
+
+  // ② フォールバック:
+  //   地域が判別できない / マッチしなかった場合は、
+  //   これまで通り「都道府県セクションだけを見る」パターンで検索する。
+  const reSectionOnly = new RegExp(
+    `<section[^>]*class=["'][^"']*choiceContent__section[^"']*js__selectCondition--middle[^"']*["'][^>]*data-middle-cd=["']${prefEscaped}["'][^>]*>[\\s\\S]*?<span[^>]*class=["'][^"']*labelNumber[^"']*["'][^>]*>\\s*([\\d,]+)\\s*<\\/span>`,
+    "i"
+  );
+  const m1 = html.match(reSectionOnly);
+  if (m1?.[1]) {
+    const n = Number(m1[1].replace(/,/g, ""));
+    if (!Number.isNaN(n)) return n;
+  }
+
+  // ③ さらにフォールバック:
+  //   input name="mcatareaP13" の直後から labelNumber を探すパターンも残しておく。
+  const reInput = new RegExp(
+    `<input[^>]*name=["']mcatarea${prefEscaped}["'][^>]*>[\\s\\S]*?<span[^>]*class=["'][^"']*labelNumber[^"']*["'][^>]*>\\s*([\\d,]+)\\s*<\\/span>`,
+    "i"
+  );
+  const m2 = html.match(reInput);
+  if (m2?.[1]) {
+    const n = Number(m2[1].replace(/,/g, ""));
+    if (!Number.isNaN(n)) return n;
+  }
+
+  return null;
+}
+
 /** =========================
  * 都道府県名 → マイナビ P コード対応
  * =========================
  *
- * tenshoku.mynavi.jp の URL では
- *   /list/p13/   … 東京都
- * のように pXX が使われるため、名称や PXX を pXX に変換する。
+ * tenshoku.mynavi.jp の URL / モーダル内では
+ *   data-middle-cd="P13"   … 東京都
+ *   value="P13"            … 東京都
+ * のように PXX が使われるため、名称から PXX を引く。
  */
 const PREF_NAME_TO_CODE: Record<string, string> = {
   北海道: "P01",
@@ -106,42 +257,29 @@ const PREF_NAME_TO_CODE: Record<string, string> = {
 
 /**
  * ManualCondition.prefecture（「大阪府」や「P27」など）から
- * /list/p27/ のようなパスを生成する。
+ * マイナビの P コード（"P27"）を返す。
  *
- * - prefecture が未指定 → "/list/"
- * - "大阪府" など名称     → PREF_NAME_TO_CODE で Pxx に変換 → "/list/pxx/"
- * - "P27" など Pxx        → "/list/p27/"
- * - それ以外（市区町村コードなど）は、現状はパス指定せず "/list/" に落とす
+ * - 未指定・不明 → null
  */
-function buildMynaviPathFromPrefecture(cond: ManualCondition): string {
+function getMynaviPrefectureCode(cond: ManualCondition): string | null {
   const raw = cond.prefecture?.trim();
-  if (!raw) return "/list/";
+  if (!raw) return null;
 
-  let code = raw;
-
-  // コード形式でなければ都道府県名として Pxx に変換を試みる
-  if (!/^P\d{2}$/i.test(raw)) {
-    const mapped = PREF_NAME_TO_CODE[raw];
-    if (!mapped) {
-      // マッピングできない場合は都道府県条件は無視（フリーワードなどで拾われるケースのみ）
-      return "/list/";
-    }
-    code = mapped;
+  // すでに P コード形式ならそれを使う
+  if (/^P\d{2}$/i.test(raw)) {
+    return `P${raw.slice(1).padStart(2, "0")}`.toUpperCase();
   }
 
-  // P13 → p13 に
-  const num = code.slice(1);
-  if (!/^\d{2}$/.test(num)) return "/list/";
-
-  return `/list/p${num}/`;
+  const mapped = PREF_NAME_TO_CODE[raw];
+  return mapped ?? null;
 }
 
 /**
  * internalLarge / internalSmall から
  * マイナビの「職種」用クエリパラメータを組み立てる。
  *
- * - 大分類コード: sr_occ_l_cd=13 など
- * - 小分類コード: sr_occ_cd=1303 など（仮定：small はこちらに載せる）
+ * - 大分類コード: sr_occ_l_cd=11 など
+ * - 小分類コード: sr_occ_cd=11105 など
  *
  *  ※ job_board_mappings の external_large_code / external_small_code に
  *     マイナビの職種コードを入れておく前提。
@@ -168,20 +306,19 @@ function buildMynaviJobQueryParams(cond: ManualCondition): URLSearchParams {
 /**
  * マイナビの検索件数を取得するメイン関数
  *
- * 以前は:
- *   ① /list/ を GET -> hidden や token をパース
- *   ② /search/list/ に POST
- * という複雑なフローだったが、
+ * 以前:
+ *   /list/p13/?... のように勤務地付き URL を組み立てて
+ *   検索結果の件数をそのまま読んでいた。
  *
- * 現在は、
- *   https://tenshoku.mynavi.jp/list/pg4/?jobsearchType=4&searchType=8&sr_occ_l_cd=13
- * のようなクエリで職種指定が行われているため、
- *
- *   - 職種:  sr_occ_l_cd / sr_occ_cd
- *   - 勤務地: /list/p13/ のようなパス
- *
- * を直接組み立てて /list/ を GET し、その HTML から
- * js__searchRecruit--count をパースするようにする。
+ * 修正後:
+ *   ① 職種だけを付けて /list/?jobsearchType=4&searchType=8&sr_occ_l_cd=.. などを GET
+ *   ② 取得した HTML から
+ *        - 都道府県指定がある場合:
+ *          「勤務地を選ぶ」モーダルの
+ *            地域(data-large-cd="XX") → 都道府県(data-middle-cd="Pxx")
+ *          の順で labelNumber を取得
+ *        - 取れなかった場合 / 都道府県未指定の場合:
+ *          従来通り「条件に合う求人 ○○件を検索する」などから件数を読む
  */
 export async function fetchMynaviJobsCount(
   cond: ManualCondition
@@ -190,15 +327,14 @@ export async function fetchMynaviJobsCount(
   const jobsearchType = "4";
   const searchType = "8";
 
-  // 1) 勤務地から /list/ or /list/p13/ のパスを決定
-  const path = buildMynaviPathFromPrefecture(cond);
-
-  // 2) 職種コードからクエリパラメータを組み立て
+  // 1) 職種コードからクエリパラメータを組み立て
   const params = buildMynaviJobQueryParams(cond);
   params.set("jobsearchType", jobsearchType);
   params.set("searchType", searchType);
 
-  const url = `https://tenshoku.mynavi.jp${path}?${params.toString()}`;
+  // ※勤務地は URL パス / クエリには付けない。
+  //   ページ内の「勤務地を選ぶ」モーダルの地域→都道府県ごとの件数(labelNumber)を使う。
+  const url = `https://tenshoku.mynavi.jp/list/?${params.toString()}`;
 
   const controller = new AbortController();
   const timeoutMs = 15000;
@@ -223,9 +359,22 @@ export async function fetchMynaviJobsCount(
     }
 
     const html = await res.text();
+
+    // 2) 都道府県が指定されている場合は
+    //    「地域を選択した上で都道府県を選ぶ」イメージで labelNumber を取得
+    const prefCode = getMynaviPrefectureCode(cond);
+    if (prefCode) {
+      const countFromModal = parseMynaviPrefectureCountFromModal(
+        html,
+        prefCode
+      );
+      if (countFromModal != null) return countFromModal;
+    }
+
+    // 3) フォールバック: 一覧ページ上部の「条件に合う求人 ○○件」などから取得
     return parseMynaviJobsCount(html);
   } catch (err) {
-    console.error("mynavi fetch error", err);
+    console.error("mynavi fetch error", err, { url });
     return null;
   } finally {
     clearTimeout(timer);
