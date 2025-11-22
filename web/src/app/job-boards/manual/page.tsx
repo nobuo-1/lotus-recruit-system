@@ -564,7 +564,7 @@ function buildSiteSummaries(rows: ManualResultRow[]): SiteSummary[] {
 }
 
 /** =========================
- * 条件別 詳細テーブル
+ * 条件別 詳細テーブル（色グルーピング & サイト名略記）
  * ========================= */
 
 const DetailedResultTable: React.FC<{ rows: ManualResultRow[] }> = ({
@@ -592,10 +592,9 @@ const DetailedResultTable: React.FC<{ rows: ManualResultRow[] }> = ({
     return aPref.localeCompare(bPref, "ja");
   });
 
-  // 前行との比較で大分類・小分類を「〃」省略表示
-  let prevSite = "";
-  let prevLarge = "";
-  let prevSmall = "";
+  // グループ（サイト × 大分類 × 小分類）ごとに色分け
+  let prevGroupKey = "";
+  let groupIndex = -1;
 
   return (
     <div className="border rounded-lg overflow-hidden">
@@ -625,44 +624,51 @@ const DetailedResultTable: React.FC<{ rows: ManualResultRow[] }> = ({
           </thead>
           <tbody>
             {sorted.map((r, idx) => {
-              const jobs =
-                typeof r.jobs_total === "number"
-                  ? r.jobs_total.toLocaleString()
-                  : "-";
-              const siteLabel =
+              const siteLabelRaw =
                 SITE_LABEL_MAP[r.site_key ?? ""] ?? r.site_key ?? "-";
+              const largeTextRaw = r.internal_large ?? "（指定なし）";
+              const smallTextRaw = r.internal_small ?? "（指定なし）";
 
-              const largeText = r.internal_large ?? "（指定なし）";
-              const smallText = r.internal_small ?? "（指定なし）";
+              // サイト × 大分類 × 小分類 で1グループ
+              const groupKey = `${siteLabelRaw}||${largeTextRaw}||${smallTextRaw}`;
+              const isNewGroup = groupKey !== prevGroupKey;
+              if (isNewGroup) {
+                groupIndex += 1;
+                prevGroupKey = groupKey;
+              }
 
-              const siteChanged = siteLabel !== prevSite;
-              const largeChanged = siteChanged || largeText !== prevLarge;
-              const smallChanged = siteChanged || smallText !== prevSmall;
+              const groupBgClass =
+                groupIndex % 2 === 0 ? "bg-white" : "bg-indigo-50/40"; // まとまりごとに薄く色を変える
 
-              const displayLarge = largeChanged ? largeText : "〃";
-              const displaySmall = smallChanged ? smallText : "〃";
+              // 同じグループの2行目以降は サイト名・職種を省略表示
+              const siteLabel = isNewGroup ? siteLabelRaw : "";
+              const largeText = isNewGroup ? largeTextRaw : "";
+              const smallText = isNewGroup ? smallTextRaw : "";
 
-              prevSite = siteLabel;
-              prevLarge = largeText;
-              prevSmall = smallText;
+              const jobsValue =
+                typeof r.jobs_total === "number"
+                  ? `${r.jobs_total.toLocaleString()}件`
+                  : "取得失敗"; // null は「取得失敗」と明示
 
               return (
                 <tr
                   key={`${r.site_key}-${r.internal_large}-${r.internal_small}-${r.prefecture}-${idx}`}
-                  className="border-t border-neutral-100 hover:bg-neutral-50/60"
+                  className={`border-t border-neutral-100 ${groupBgClass} hover:bg-neutral-50/80`}
                 >
-                  <td className="px-3 py-1.5 whitespace-nowrap">{siteLabel}</td>
                   <td className="px-3 py-1.5 whitespace-nowrap">
-                    {displayLarge}
+                    {siteLabel || <span className="text-neutral-300">﹡</span>}
                   </td>
                   <td className="px-3 py-1.5 whitespace-nowrap">
-                    {displaySmall}
+                    {largeText || <span className="text-neutral-300">﹡</span>}
+                  </td>
+                  <td className="px-3 py-1.5 whitespace-nowrap">
+                    {smallText || <span className="text-neutral-300">﹡</span>}
                   </td>
                   <td className="px-3 py-1.5 whitespace-nowrap">
                     {r.prefecture ?? "全国（指定なし）"}
                   </td>
                   <td className="px-3 py-1.5 text-right tabular-nums">
-                    {jobs !== "-" ? `${jobs}件` : "-"}
+                    {jobsValue}
                   </td>
                 </tr>
               );

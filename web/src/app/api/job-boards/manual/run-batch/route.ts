@@ -179,7 +179,7 @@ async function loadJobBoardMappings(
  *
  * - internal_small が指定されていれば small 優先でマッピング
  * - internal_small がなく internal_large のみの場合は large 基準でマッピング
- * - マッピングが見つからない場合は元の値をそのまま返す（従来通り fw などに落ちる）
+ * - マッピングが見つからない場合は元の値をそのまま返す（従来通り）
  */
 function resolveExternalJobCodes(
   base: BaseCondition,
@@ -318,6 +318,7 @@ export async function POST(req: Request) {
     // 職種フィルターに対応する job_board_mappings を事前に読み込む
     const mappingsBySite = await loadJobBoardMappings(rawSites, body);
 
+    // デバッグログを蓄積する配列
     const debugLogs: string[] = [];
 
     // 条件ごとにサイトへアクセス → 結果を rows に格納
@@ -326,29 +327,52 @@ export async function POST(req: Request) {
         // 1. internal_large / internal_small → サイト固有の external コードへ変換
         const mapped = resolveExternalJobCodes(base, mappingsBySite);
 
-        // 2. ManualCondition に反映（ここで渡す値が、mynavi/doda 側で URL パラメータになる）
-        const cond: ManualCondition = {
+        // 2. external コードを使った条件
+        let cond: ManualCondition = {
           ...toManualCondition(base),
           internalLarge: mapped.large,
           internalSmall: mapped.small,
         };
 
-        const stats = await fetchStatsForSite(cond);
+        // まずはマッピング後のコードで取得
+        let stats = await fetchStatsForSite(cond);
 
-        // デバッグログ（画面に返す）
-        debugLogs.push(
-          [
-            `[${base.siteKey}]`,
-            `internalLarge=${base.internalLarge ?? "-"} → externalLarge=${
-              mapped.large ?? "-"
-            }`,
-            `internalSmall=${base.internalSmall ?? "-"} → externalSmall=${
-              mapped.small ?? "-"
-            }`,
-            `prefecture=${base.prefecture ?? "（指定なし）"}`,
-            `jobs_total=${stats.jobsTotal ?? "null"}`,
-          ].join(" / ")
-        );
+        // 件数が null の場合、internal 値での fallback も試す（マイナビ / doda 対象）
+        if (
+          (stats.jobsTotal == null || Number.isNaN(stats.jobsTotal)) &&
+          (base.siteKey === "mynavi" || base.siteKey === "doda")
+        ) {
+          const fallbackCond: ManualCondition = toManualCondition(base);
+          const fallbackStats = await fetchStatsForSite(fallbackCond);
+
+          debugLogs.push(
+            `[${base.siteKey}] fallback試行 / internalLarge=${
+              base.internalLarge ?? "-"
+            } → externalLarge=${mapped.large ?? "-"} / internalSmall=${
+              base.internalSmall ?? "-"
+            } → externalSmall=${mapped.small ?? "-"} / prefecture=${
+              base.prefecture ?? "（指定なし）"
+            } / primary=${String(stats.jobsTotal)} / fallback=${String(
+              fallbackStats.jobsTotal
+            )}`
+          );
+
+          // fallback で取れた数値があればそちらを採用
+          if (typeof fallbackStats.jobsTotal === "number") {
+            stats = fallbackStats;
+            cond = fallbackCond;
+          }
+        } else {
+          debugLogs.push(
+            `[${base.siteKey}] / internalLarge=${
+              base.internalLarge ?? "-"
+            } → externalLarge=${mapped.large ?? "-"} / internalSmall=${
+              base.internalSmall ?? "-"
+            } → externalSmall=${mapped.small ?? "-"} / prefecture=${
+              base.prefecture ?? "（指定なし）"
+            } / jobs_total=${String(stats.jobsTotal)}`
+          );
+        }
 
         return {
           site_key: base.siteKey,

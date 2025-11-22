@@ -119,15 +119,41 @@ export function JobCategoryModal(props: JobCategoryModalProps) {
 
   /** =========================
    * 小分類のON/OFF（アクティブ大分類のみ対象）
+   * → 親の大分類も自動でON/OFFを同期
    * ========================= */
 
   const toggleSmall = (sm: string) => {
     const key = enc(activeL, sm);
-    setSKeys((cur) => {
-      const next = new Set(cur);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
+
+    setSKeys((prevKeys) => {
+      const nextKeys = new Set(prevKeys);
+      const nowChecked = !nextKeys.has(key);
+
+      if (nowChecked) {
+        nextKeys.add(key);
+      } else {
+        nextKeys.delete(key);
+      }
+
+      // 親の大分類もセット側にあわせて同期
+      setL((prevL) => {
+        const children = JOB_CATEGORIES[activeL] || [];
+
+        if (nowChecked) {
+          // 小分類をONにしたら、必ず親の大分類もON
+          if (prevL.includes(activeL)) return prevL;
+          return [...prevL, activeL];
+        } else {
+          // 小分類をOFFにしたとき、同じ大分類配下に 1つも選択がなければ 大分類もOFF
+          const stillHasAny = children.some((childSm) =>
+            nextKeys.has(enc(activeL, childSm))
+          );
+          if (stillHasAny) return prevL;
+          return prevL.filter((id) => id !== activeL);
+        }
+      });
+
+      return nextKeys;
     });
   };
 
@@ -149,6 +175,8 @@ export function JobCategoryModal(props: JobCategoryModalProps) {
         }
       } else {
         for (const sm of children) next.delete(enc(activeL, sm));
+        // すべて外したので大分類もOFF
+        setL((prev) => prev.filter((id) => id !== activeL));
       }
       return next;
     });
@@ -165,7 +193,7 @@ export function JobCategoryModal(props: JobCategoryModalProps) {
 
   const handleApply = () => {
     const largeIds = [...L];
-    // smallIds は「小分類ラベルのみ」を返す（重複が気になる場合はここを composite に変えてもOK）
+    // smallIds は「小分類ラベルのみ」を返す
     const smallIds = Array.from(SKeys).map((key) => {
       const parts = key.split(SEP);
       return parts[1] ?? key;
