@@ -6,13 +6,11 @@ import AppHeader from "@/components/AppHeader";
 import { JOB_LARGE, JOB_CATEGORIES } from "@/constants/jobCategories";
 
 /** =========================
- * 型定義（クライアント側にローカルで持つ）
+ * 型定義
  * ========================= */
 
-// server/job-boards/types.ts と同じ union をここでも定義
 type SiteKey = "mynavi" | "doda" | "type" | "womantype";
 
-// job_board_mappings テーブルに対応する型
 type JobBoardMappingRow = {
   id?: string;
   site_key: SiteKey;
@@ -30,8 +28,9 @@ type JobBoardMappingRow = {
   updated_at?: string;
 };
 
+// 削除や新規追加がなくなったため、_isNew は不要ですが、
+// 既存のロジック構造を維持するため _dirty のみ残します
 type EditingRow = JobBoardMappingRow & {
-  _isNew?: boolean;
   _dirty?: boolean;
 };
 
@@ -97,7 +96,6 @@ export default function JobBoardMappingsPage() {
       setRows(
         data.map((r) => ({
           ...r,
-          _isNew: false,
           _dirty: false,
         }))
       );
@@ -144,60 +142,6 @@ export default function JobBoardMappingsPage() {
     );
   };
 
-  const handleAddRow = () => {
-    const firstLarge = JOB_LARGE[0] ?? "";
-    const firstSmall = (firstLarge && JOB_CATEGORIES[firstLarge]?.[0]) ?? "";
-
-    const tmpId = `new-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-    const newRow: EditingRow = {
-      id: tmpId, // 一時ID（保存時に削除して insert 扱いにする）
-      _isNew: true,
-      _dirty: true,
-      site_key: site,
-      external_large_code: null,
-      external_large_label: "",
-      external_middle_code: null,
-      external_middle_label: "",
-      external_small_code: null,
-      external_small_label: "",
-      internal_large: firstLarge,
-      internal_small: firstSmall,
-      enabled: true,
-      note: "",
-    };
-
-    setRows((prev) => [newRow, ...prev]);
-  };
-
-  const handleDeleteLocal = (id: string | undefined) => {
-    if (!id || id.startsWith("new-")) {
-      // まだ DB に保存されていない行はローカルで消すだけ
-      setRows((prev) => prev.filter((r) => r.id !== id));
-      return;
-    }
-
-    if (!window.confirm("このマッピングを削除しますか？")) return;
-
-    (async () => {
-      try {
-        const resp = await fetch(
-          `/api/job-boards/mappings?id=${encodeURIComponent(id)}`,
-          { method: "DELETE" }
-        );
-        const j = await resp.json();
-        if (!resp.ok || !j.ok) {
-          throw new Error(j?.error || "削除に失敗しました。");
-        }
-        setRows((prev) => prev.filter((r) => r.id !== id));
-        setMessage("削除しました。");
-      } catch (e: any) {
-        console.error(e);
-        setMessage(String(e?.message ?? e));
-      }
-    })();
-  };
-
   const handleSave = async () => {
     const targets = rows.filter((r) => r._dirty);
     if (targets.length === 0) return;
@@ -205,12 +149,9 @@ export default function JobBoardMappingsPage() {
     setSaving(true);
     setMessage(null);
     try {
+      // API側は変更のあった行だけ受け取る仕様と想定
       const payload: JobBoardMappingRow[] = targets.map((r) => {
-        const { _dirty, _isNew, ...rest } = r;
-        // new- で始まる一時IDは undefined にして insert 扱いにする
-        if (rest.id && String(rest.id).startsWith("new-")) {
-          (rest as any).id = undefined;
-        }
+        const { _dirty, ...rest } = r;
         return rest;
       });
 
@@ -249,7 +190,9 @@ export default function JobBoardMappingsPage() {
           </h1>
           <p className="mt-1 text-sm text-neutral-500">
             転職サイトごとの職種カテゴリと、自社側の職種カテゴリ（JOB_LARGE /
-            JOB_CATEGORIES） とのマッピングを一覧・編集できます。
+            JOB_CATEGORIES） とのマッピングを編集します。
+            <br />
+            ※サイト側の定義やマッピングの削除はできません。
           </p>
         </div>
 
@@ -282,7 +225,7 @@ export default function JobBoardMappingsPage() {
                 </div>
                 <input
                   className="w-64 rounded-lg border border-neutral-300 px-3 py-2 text-sm"
-                  placeholder="例: 営業, バックエンド, ITエンジニア..."
+                  placeholder="例: 営業, バックエンド..."
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                 />
@@ -291,13 +234,6 @@ export default function JobBoardMappingsPage() {
 
             {/* アクションボタン */}
             <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleAddRow}
-                className="rounded-lg border border-indigo-500 px-3 py-2 text-xs font-medium text-indigo-700 hover:bg-indigo-50"
-              >
-                + マッピングを追加
-              </button>
               <button
                 type="button"
                 onClick={handleSave}
@@ -323,16 +259,6 @@ export default function JobBoardMappingsPage() {
               </button>
             </div>
           </div>
-
-          <div className="mt-2 text-xs text-neutral-500">
-            ・マイナビの全職種をもれなく対応させるには、マイナビ側の large_cd /
-            middle_cd / small_cd をこのテーブルにすべて登録してください。
-            ・「自社側の職種」は
-            <code className="mx-1 rounded bg-neutral-100 px-1">
-              JOB_LARGE / JOB_CATEGORIES
-            </code>
-            に連動しています。
-          </div>
         </section>
 
         {/* メッセージ */}
@@ -345,33 +271,48 @@ export default function JobBoardMappingsPage() {
         {/* 一覧テーブル */}
         <section className="rounded-2xl border border-neutral-200 overflow-hidden">
           <div className="max-h-[640px] overflow-auto">
-            <table className="min-w-[960px] w-full text-xs">
-              <thead className="bg-neutral-50 text-neutral-600">
+            {/* min-w を広げて横スクロールを誘発させる */}
+            <table className="min-w-[1400px] w-full text-xs">
+              <thead className="bg-neutral-50 text-neutral-600 sticky top-0 z-10 shadow-sm">
                 <tr>
-                  <th className="px-3 py-2 text-left w-[10%]">サイト</th>
-                  <th className="px-3 py-2 text-left w-[10%]">大分類コード</th>
-                  <th className="px-3 py-2 text-left w-[14%]">
+                  {/* カラム名は折り返さない (whitespace-nowrap) */}
+                  <th className="px-3 py-3 text-left whitespace-nowrap w-[80px]">
+                    サイト
+                  </th>
+                  <th className="px-3 py-3 text-left whitespace-nowrap w-[80px]">
+                    大分類CD
+                  </th>
+                  <th className="px-3 py-3 text-left whitespace-nowrap w-[180px]">
                     大分類ラベル（サイト側）
                   </th>
-                  <th className="px-3 py-2 text-left w-[10%]">中分類コード</th>
-                  <th className="px-3 py-2 text-left w-[14%]">
+                  <th className="px-3 py-3 text-left whitespace-nowrap w-[80px]">
+                    中分類CD
+                  </th>
+                  <th className="px-3 py-3 text-left whitespace-nowrap w-[200px]">
                     中分類ラベル（サイト側）
                   </th>
-                  <th className="px-3 py-2 text-left w-[10%]">小分類コード</th>
-                  <th className="px-3 py-2 text-left w-[14%]">
+                  <th className="px-3 py-3 text-left whitespace-nowrap w-[80px]">
+                    小分類CD
+                  </th>
+                  <th className="px-3 py-3 text-left whitespace-nowrap w-[200px]">
                     小分類ラベル（サイト側）
                   </th>
-                  <th className="px-3 py-2 text-left w-[10%]">自社・大分類</th>
-                  <th className="px-3 py-2 text-left w-[14%]">自社・小分類</th>
-                  <th className="px-3 py-2 text-left w-[6%]">有効</th>
-                  <th className="px-3 py-2 text-left w-[8%]">操作</th>
+                  <th className="px-3 py-3 text-left whitespace-nowrap w-[180px] bg-indigo-50/50">
+                    自社・大分類（編集可）
+                  </th>
+                  <th className="px-3 py-3 text-left whitespace-nowrap w-[200px] bg-indigo-50/50">
+                    自社・小分類（編集可）
+                  </th>
+                  <th className="px-3 py-3 text-left whitespace-nowrap w-[60px]">
+                    有効
+                  </th>
                 </tr>
               </thead>
               <tbody>
                 {loading ? (
                   <tr>
                     <td
-                      colSpan={11}
+                      colSpan={10}
                       className="px-4 py-8 text-center text-neutral-400"
                     >
                       読み込み中です…
@@ -380,10 +321,10 @@ export default function JobBoardMappingsPage() {
                 ) : filteredRows.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={11}
+                      colSpan={10}
                       className="px-4 py-8 text-center text-neutral-400"
                     >
-                      マッピングがありません。右上の「マッピングを追加」から新規登録してください。
+                      データが見つかりません。
                     </td>
                   </tr>
                 ) : (
@@ -400,93 +341,33 @@ export default function JobBoardMappingsPage() {
                         className={
                           r._dirty
                             ? "bg-indigo-50/40 border-t border-neutral-200"
-                            : "border-t border-neutral-200"
+                            : "border-t border-neutral-200 hover:bg-neutral-50"
                         }
                       >
                         <td className="px-3 py-2 align-top">{siteLabel}</td>
-                        <td className="px-3 py-2 align-top">
-                          <input
-                            className="w-full rounded border border-neutral-300 px-1 py-1"
-                            value={r.external_large_code ?? ""}
-                            onChange={(e) =>
-                              handleChange(
-                                r.id,
-                                "external_large_code",
-                                e.target.value
-                              )
-                            }
-                          />
+                        <td className="px-3 py-2 align-top text-neutral-500">
+                          {r.external_large_code}
+                        </td>
+                        <td className="px-3 py-2 align-top font-medium">
+                          {r.external_large_label}
+                        </td>
+                        <td className="px-3 py-2 align-top text-neutral-500">
+                          {r.external_middle_code}
                         </td>
                         <td className="px-3 py-2 align-top">
-                          <input
-                            className="w-full rounded border border-neutral-300 px-1 py-1"
-                            value={r.external_large_label ?? ""}
-                            onChange={(e) =>
-                              handleChange(
-                                r.id,
-                                "external_large_label",
-                                e.target.value
-                              )
-                            }
-                          />
+                          {r.external_middle_label}
+                        </td>
+                        <td className="px-3 py-2 align-top text-neutral-500">
+                          {r.external_small_code}
                         </td>
                         <td className="px-3 py-2 align-top">
-                          <input
-                            className="w-full rounded border border-neutral-300 px-1 py-1"
-                            value={r.external_middle_code ?? ""}
-                            onChange={(e) =>
-                              handleChange(
-                                r.id,
-                                "external_middle_code",
-                                e.target.value
-                              )
-                            }
-                          />
-                        </td>
-                        <td className="px-3 py-2 align-top">
-                          <input
-                            className="w-full rounded border border-neutral-300 px-1 py-1"
-                            value={r.external_middle_label ?? ""}
-                            onChange={(e) =>
-                              handleChange(
-                                r.id,
-                                "external_middle_label",
-                                e.target.value
-                              )
-                            }
-                          />
-                        </td>
-                        <td className="px-3 py-2 align-top">
-                          <input
-                            className="w-full rounded border border-neutral-300 px-1 py-1"
-                            value={r.external_small_code ?? ""}
-                            onChange={(e) =>
-                              handleChange(
-                                r.id,
-                                "external_small_code",
-                                e.target.value
-                              )
-                            }
-                          />
-                        </td>
-                        <td className="px-3 py-2 align-top">
-                          <input
-                            className="w-full rounded border border-neutral-300 px-1 py-1"
-                            value={r.external_small_label ?? ""}
-                            onChange={(e) =>
-                              handleChange(
-                                r.id,
-                                "external_small_label",
-                                e.target.value
-                              )
-                            }
-                          />
+                          {r.external_small_label}
                         </td>
 
-                        {/* 自社・大分類 */}
-                        <td className="px-3 py-2 align-top">
+                        {/* 自社・大分類（編集可能） */}
+                        <td className="px-3 py-2 align-top bg-indigo-50/30">
                           <select
-                            className="w-full rounded border border-neutral-300 px-1 py-1"
+                            className="w-full rounded border border-neutral-300 px-1 py-1 bg-white focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
                             value={r.internal_large}
                             onChange={(e) =>
                               handleChange(
@@ -504,10 +385,10 @@ export default function JobBoardMappingsPage() {
                           </select>
                         </td>
 
-                        {/* 自社・小分類 */}
-                        <td className="px-3 py-2 align-top">
+                        {/* 自社・小分類（編集可能） */}
+                        <td className="px-3 py-2 align-top bg-indigo-50/30">
                           <select
-                            className="w-full rounded border border-neutral-300 px-1 py-1"
+                            className="w-full rounded border border-neutral-300 px-1 py-1 bg-white focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
                             value={r.internal_small}
                             onChange={(e) =>
                               handleChange(
@@ -528,26 +409,14 @@ export default function JobBoardMappingsPage() {
                           </select>
                         </td>
 
-                        {/* 有効フラグ */}
+                        {/* 有効フラグ（編集不可） */}
                         <td className="px-3 py-2 align-top text-center">
                           <input
                             type="checkbox"
                             checked={r.enabled}
-                            onChange={(e) =>
-                              handleChange(r.id, "enabled", e.target.checked)
-                            }
+                            disabled
+                            className="cursor-not-allowed opacity-50"
                           />
-                        </td>
-
-                        {/* 操作 */}
-                        <td className="px-3 py-2 align-top">
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteLocal(r.id)}
-                            className="text-[11px] text-red-600 underline underline-offset-2 hover:text-red-700"
-                          >
-                            削除
-                          </button>
                         </td>
                       </tr>
                     );
