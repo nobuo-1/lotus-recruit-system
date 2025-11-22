@@ -8,9 +8,13 @@ import dynamic from "next/dynamic";
 import { supabase } from "@/lib/supabaseClient";
 import type { ManualResultRow } from "@/server/job-boards/types";
 
-// 職種モーダル（既存）
+// 職種モーダル
+// ※ job/JobCategoryModal の named export を使う
 const JobCategoryModal = dynamic(
-  () => import("@/components/job-boards/JobCategoryModal"),
+  () =>
+    import("@/components/job/JobCategoryModal").then(
+      (mod) => mod.JobCategoryModal
+    ),
   { ssr: false }
 );
 
@@ -503,9 +507,15 @@ const ConditionModal: React.FC<ConditionModalProps> = ({
 function aggregateManualRows(rows: ManualResultRow[]): ManualResultRow | null {
   if (!rows || rows.length === 0) return null;
 
-  const total = rows.reduce(
-    (sum, r) => sum + (typeof r.jobs_total === "number" ? r.jobs_total : 0),
-    0
+  const { total, hasAny } = rows.reduce(
+    (acc, r) => {
+      if (typeof r.jobs_total === "number") {
+        acc.total += r.jobs_total;
+        acc.hasAny = true;
+      }
+      return acc;
+    },
+    { total: 0, hasAny: false }
   );
 
   return {
@@ -513,7 +523,7 @@ function aggregateManualRows(rows: ManualResultRow[]): ManualResultRow | null {
     internal_large: null,
     internal_small: null,
     prefecture: null,
-    jobs_total: total,
+    jobs_total: hasAny ? total : null,
   } as ManualResultRow;
 }
 
@@ -582,6 +592,11 @@ const DetailedResultTable: React.FC<{ rows: ManualResultRow[] }> = ({
     return aPref.localeCompare(bPref, "ja");
   });
 
+  // 前行との比較で大分類・小分類を「〃」省略表示
+  let prevSite = "";
+  let prevLarge = "";
+  let prevSmall = "";
+
   return (
     <div className="border rounded-lg overflow-hidden">
       <div className="px-3 py-2 bg-neutral-50 text-xs font-semibold text-neutral-700">
@@ -616,6 +631,21 @@ const DetailedResultTable: React.FC<{ rows: ManualResultRow[] }> = ({
                   : "-";
               const siteLabel =
                 SITE_LABEL_MAP[r.site_key ?? ""] ?? r.site_key ?? "-";
+
+              const largeText = r.internal_large ?? "（指定なし）";
+              const smallText = r.internal_small ?? "（指定なし）";
+
+              const siteChanged = siteLabel !== prevSite;
+              const largeChanged = siteChanged || largeText !== prevLarge;
+              const smallChanged = siteChanged || smallText !== prevSmall;
+
+              const displayLarge = largeChanged ? largeText : "〃";
+              const displaySmall = smallChanged ? smallText : "〃";
+
+              prevSite = siteLabel;
+              prevLarge = largeText;
+              prevSmall = smallText;
+
               return (
                 <tr
                   key={`${r.site_key}-${r.internal_large}-${r.internal_small}-${r.prefecture}-${idx}`}
@@ -623,10 +653,10 @@ const DetailedResultTable: React.FC<{ rows: ManualResultRow[] }> = ({
                 >
                   <td className="px-3 py-1.5 whitespace-nowrap">{siteLabel}</td>
                   <td className="px-3 py-1.5 whitespace-nowrap">
-                    {r.internal_large ?? "（指定なし）"}
+                    {displayLarge}
                   </td>
                   <td className="px-3 py-1.5 whitespace-nowrap">
-                    {r.internal_small ?? "（指定なし）"}
+                    {displaySmall}
                   </td>
                   <td className="px-3 py-1.5 whitespace-nowrap">
                     {r.prefecture ?? "全国（指定なし）"}
@@ -737,10 +767,18 @@ export default function JobBoardsManualPage() {
       }
 
       setRows((j?.preview as ManualResultRow[]) ?? []);
-      setMsg(
+
+      // note + debugLogs をまとめて表示
+      let text =
         j?.note ||
-          (j?.history_id ? `履歴に保存しました（ID: ${j.history_id}）` : "")
-      );
+        (j?.history_id ? `履歴に保存しました（ID: ${j.history_id}）` : "");
+
+      if (Array.isArray(j?.debugLogs) && j.debugLogs.length > 0) {
+        text += (text ? "\n\n" : "") + "デバッグログ:\n";
+        text += j.debugLogs.join("\n");
+      }
+
+      setMsg(text);
 
       setProgressDisplay(totalSteps);
     } catch (e: any) {
@@ -777,8 +815,8 @@ export default function JobBoardsManualPage() {
         )}%)`
       : "";
 
-  const summaryAll = useMemo(() => aggregateManualRows(rows), [rows]);
   const perSiteSummaries = useMemo(() => buildSiteSummaries(rows), [rows]);
+  const hasResults = rows.length > 0;
 
   return (
     <>
@@ -904,70 +942,16 @@ export default function JobBoardsManualPage() {
           )}
         </section>
 
-        {/* 結果表示 → 全体集計 + サイト別集計 + 条件別テーブル */}
+        {/* 結果表示 → サイト別集計 + 条件別テーブル */}
         <section className="mt-6 rounded-2xl border border-neutral-200 p-4 space-y-6">
           <div className="text-sm font-semibold">取得結果</div>
 
-          {!summaryAll && perSiteSummaries.length === 0 ? (
+          {!hasResults ? (
             <div className="px-4 py-10 text-center text-neutral-400 text-sm">
               まだ結果がありません。「求人件数を取得する」を実行してください。
             </div>
           ) : (
             <>
-              {/* 全サイト合計 */}
-              {summaryAll && (
-                <div className="rounded-xl border border-neutral-200 p-4">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <div className="text-xs font-semibold text-neutral-500 mb-1">
-                        全サイト合計の集計条件
-                      </div>
-                      <div className="text-sm text-neutral-900 space-y-1">
-                        <div>
-                          サイト:{" "}
-                          {sites.length
-                            ? SITE_OPTIONS.filter((s) =>
-                                sites.includes(s.value)
-                              )
-                                .map((s) => s.label)
-                                .join(" / ")
-                            : "未選択"}
-                        </div>
-                        <div>
-                          職種: 大分類 {large.length || 0} / 小分類{" "}
-                          {small.length || 0}
-                        </div>
-                        <div>
-                          都道府県:{" "}
-                          {prefs.length
-                            ? `${prefs.slice(0, 5).join("、")}${
-                                prefs.length > 5
-                                  ? ` ほか${prefs.length - 5}件`
-                                  : ""
-                              }`
-                            : "全国（指定なし）"}
-                        </div>
-                        <div className="text-xs text-neutral-500 mt-1">
-                          ※ サイト × 職種 × 都道府県 の {rows.length}
-                          パターンを合算した値です
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="text-right">
-                      <div className="text-xs text-neutral-500">
-                        合計（すべての条件）
-                      </div>
-                      <div className="text-lg font-semibold tabular-nums">
-                        {typeof summaryAll.jobs_total === "number"
-                          ? `${summaryAll.jobs_total.toLocaleString()}件`
-                          : "-"}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
-
               {/* サイト別内訳（合計だけ） */}
               {perSiteSummaries.length > 0 && (
                 <div className="space-y-4">
@@ -1025,6 +1009,41 @@ export default function JobBoardsManualPage() {
 
               {/* 条件別テーブル */}
               <DetailedResultTable rows={rows} />
+
+              {/* デバッグ用の要約（画面側で把握しやすく）*/}
+              <section className="mt-4 rounded-lg border border-dashed border-neutral-300 bg-neutral-50 px-3 py-2 text-[11px] text-neutral-600">
+                <div className="font-semibold mb-1">デバッグ情報（画面側）</div>
+                <ul className="list-disc pl-4 space-y-0.5">
+                  <li>
+                    職種（大分類）
+                    {large.length
+                      ? `: ${large.length}件（ID: ${large.join(", ")}）`
+                      : ": 未指定（すべて）"}
+                  </li>
+                  <li>
+                    職種（小分類）
+                    {small.length
+                      ? `: ${small.length}件（ID: ${small.join(", ")}）`
+                      : ": 未指定（すべて）"}
+                  </li>
+                  <li>
+                    都道府県
+                    {prefs.length
+                      ? `: ${prefs.length}件（${prefs.join(" / ")}）`
+                      : ": 未指定（全国）"}
+                  </li>
+                  <li>
+                    件数の取得方法（マイナビ）:
+                    「勤務地を選ぶ」モーダル内の都道府県横の数字（labelNumber）
+                    を最優先。取得できない場合はページ上部の 「条件に合う求人
+                    ○○件」などから取得。
+                  </li>
+                  <li>
+                    件数の取得方法（doda）:
+                    検索結果画面上部などに表示される件数を取得（サーバー側ロジックに依存）。
+                  </li>
+                </ul>
+              </section>
             </>
           )}
         </section>
@@ -1050,13 +1069,13 @@ export default function JobBoardsManualPage() {
       {/* 職種モーダル */}
       {openCat && (
         <JobCategoryModal
-          large={large}
-          small={small}
-          onCloseAction={() => setOpenCat(false)}
-          onApplyAction={(L, S) => {
-            // ※小分類→大分類の自動チェックは JobCategoryModal 内で対応（修正1）
-            setLarge(L);
-            setSmall(S);
+          onClose={() => setOpenCat(false)}
+          initialSelectedLargeIds={large}
+          initialSelectedSmallIds={small}
+          onApply={({ largeIds, smallIds }) => {
+            // 小分類 → 親の大分類にチェックが入るロジックは JobCategoryModal 内で実装済み
+            setLarge(largeIds);
+            setSmall(smallIds);
             setOpenCat(false);
           }}
         />

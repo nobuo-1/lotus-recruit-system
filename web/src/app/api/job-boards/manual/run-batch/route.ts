@@ -58,7 +58,6 @@ function isValidSiteKey(v: string): v is SiteKey {
 }
 
 /** body から BaseCondition の組み合わせを作る（サイト × 大分類 × 小分類 × 都道府県） */
-// 変更後（want によるカットを廃止）
 function buildBaseConditions(
   sites: SiteKey[],
   body: RequestBody
@@ -319,6 +318,8 @@ export async function POST(req: Request) {
     // 職種フィルターに対応する job_board_mappings を事前に読み込む
     const mappingsBySite = await loadJobBoardMappings(rawSites, body);
 
+    const debugLogs: string[] = [];
+
     // 条件ごとにサイトへアクセス → 結果を rows に格納
     const preview: ManualResultRow[] = await Promise.all(
       baseConditions.map(async (base): Promise<ManualResultRow> => {
@@ -333,6 +334,21 @@ export async function POST(req: Request) {
         };
 
         const stats = await fetchStatsForSite(cond);
+
+        // デバッグログ（画面に返す）
+        debugLogs.push(
+          [
+            `[${base.siteKey}]`,
+            `internalLarge=${base.internalLarge ?? "-"} → externalLarge=${
+              mapped.large ?? "-"
+            }`,
+            `internalSmall=${base.internalSmall ?? "-"} → externalSmall=${
+              mapped.small ?? "-"
+            }`,
+            `prefecture=${base.prefecture ?? "（指定なし）"}`,
+            `jobs_total=${stats.jobsTotal ?? "null"}`,
+          ].join(" / ")
+        );
 
         return {
           site_key: base.siteKey,
@@ -356,6 +372,7 @@ export async function POST(req: Request) {
       ok: true,
       preview,
       note,
+      debugLogs,
     });
   } catch (e: any) {
     console.error("manual run-batch error", e);
