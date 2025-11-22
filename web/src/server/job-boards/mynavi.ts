@@ -6,11 +6,7 @@ import type { ManualCondition } from "./types";
  * マイナビの検索結果ページ HTML から
  * 「条件に合う求人 ○○件を検索する」の ○○件 を抜き出す
  *
- * 最優先ターゲット：
- *   <span class="js__searchRecruit--count">45035</span>
- *
- * それが見つからない場合は、「該当求人数 ○○件中」「該当の求人 ○○件」など
- * テキストパターンもフォールバックで見る。
+ * ※ 都道府県が未指定のときだけ使う（全体件数用フォールバック）。
  */
 export function parseMynaviJobsCount(html: string): number | null {
   // ① js__searchRecruit--count を最優先
@@ -48,19 +44,6 @@ export function parseMynaviJobsCount(html: string): number | null {
 
 /**
  * Pコード（P13 など） → 地域コード（data-large-cd="04" など）の対応
- *
- * 地域リスト：
- *  01: 北海道
- *  02: 東北
- *  03: 北関東
- *  04: 首都圏
- *  15: 甲信越
- *  14: 北陸
- *  08: 東海
- *  09: 関西
- *  10: 中国
- *  11: 四国
- *  12: 九州（＋沖縄）
  */
 const PREF_CODE_TO_AREA_LARGE: Record<string, string> = {
   P01: "01", // 北海道
@@ -127,32 +110,17 @@ const PREF_CODE_TO_AREA_LARGE: Record<string, string> = {
  *   ② その地域の中の都道府県（data-middle-cd="P13" など）
  *   ③ その中の <span class="labelNumber">○○件</span>
  * を 1 回のパースで取得する。
- *
- * 例：
- * <div class="js__selectCondition--large" data-large-cd="04" ...>
- *   ...
- *   <section class="choiceContent__section js__selectCondition--middle" data-middle-cd="P13" ...>
- *     <h4 class="choiceContent__sectionTitle">
- *       <label ...>東京都</label>
- *       <span class="labelNumber">2732</span>
- *     </h4>
- *     ...
- *   </section>
- *   ...
- * </div>
  */
 function parseMynaviPrefectureCountFromModal(
   html: string,
   prefCode: string
 ): number | null {
-  // prefCode は "P13" のような形式を想定
   const prefEscaped = prefCode.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
   const upperPref = prefCode.toUpperCase();
 
   const areaLarge = PREF_CODE_TO_AREA_LARGE[upperPref];
 
-  // ① 地域コードが分かっている場合は、
-  //    data-large-cd="XX" ブロックの中にある data-middle-cd="Pxx" を探す
+  // ① 地域ブロック内の該当都道府県の labelNumber を探す
   if (areaLarge) {
     const areaEscaped = areaLarge.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
 
@@ -168,9 +136,7 @@ function parseMynaviPrefectureCountFromModal(
     }
   }
 
-  // ② フォールバック:
-  //   地域が判別できない / マッチしなかった場合は、
-  //   これまで通り「都道府県セクションだけを見る」パターンで検索する。
+  // ② 地域が取れない場合は、都道府県セクション単体で検索
   const reSectionOnly = new RegExp(
     `<section[^>]*class=["'][^"']*choiceContent__section[^"']*js__selectCondition--middle[^"']*["'][^>]*data-middle-cd=["']${prefEscaped}["'][^>]*>[\\s\\S]*?<span[^>]*class=["'][^"']*labelNumber[^"']*["'][^>]*>\\s*([\\d,]+)\\s*<\\/span>`,
     "i"
@@ -181,8 +147,7 @@ function parseMynaviPrefectureCountFromModal(
     if (!Number.isNaN(n)) return n;
   }
 
-  // ③ さらにフォールバック:
-  //   input name="mcatareaP13" の直後から labelNumber を探すパターンも残しておく。
+  // ③ input name="mcatareaP13" パターン（保険）
   const reInput = new RegExp(
     `<input[^>]*name=["']mcatarea${prefEscaped}["'][^>]*>[\\s\\S]*?<span[^>]*class=["'][^"']*labelNumber[^"']*["'][^>]*>\\s*([\\d,]+)\\s*<\\/span>`,
     "i"
@@ -198,13 +163,7 @@ function parseMynaviPrefectureCountFromModal(
 
 /** =========================
  * 都道府県名 → マイナビ P コード対応
- * =========================
- *
- * tenshoku.mynavi.jp の URL / モーダル内では
- *   data-middle-cd="P13"   … 東京都
- *   value="P13"            … 東京都
- * のように PXX が使われるため、名称から PXX を引く。
- */
+ * ========================= */
 const PREF_NAME_TO_CODE: Record<string, string> = {
   北海道: "P01",
   青森県: "P02",
@@ -258,14 +217,11 @@ const PREF_NAME_TO_CODE: Record<string, string> = {
 /**
  * ManualCondition.prefecture（「大阪府」や「P27」など）から
  * マイナビの P コード（"P27"）を返す。
- *
- * - 未指定・不明 → null
  */
 function getMynaviPrefectureCode(cond: ManualCondition): string | null {
   const raw = cond.prefecture?.trim();
   if (!raw) return null;
 
-  // すでに P コード形式ならそれを使う
   if (/^P\d{2}$/i.test(raw)) {
     return `P${raw.slice(1).padStart(2, "0")}`.toUpperCase();
   }
@@ -277,12 +233,6 @@ function getMynaviPrefectureCode(cond: ManualCondition): string | null {
 /**
  * internalLarge / internalSmall から
  * マイナビの「職種」用クエリパラメータを組み立てる。
- *
- * - 大分類コード: sr_occ_l_cd=11 など
- * - 小分類コード: sr_occ_cd=11105 など
- *
- *  ※ job_board_mappings の external_large_code / external_small_code に
- *     マイナビの職種コードを入れておく前提。
  */
 function buildMynaviJobQueryParams(cond: ManualCondition): URLSearchParams {
   const params = new URLSearchParams();
@@ -290,12 +240,9 @@ function buildMynaviJobQueryParams(cond: ManualCondition): URLSearchParams {
   const large = cond.internalLarge?.trim() || "";
   const small = cond.internalSmall?.trim() || "";
 
-  // 小分類コードがあれば sr_occ_cd を優先
   if (small && /^[0-9A-Z]+$/.test(small)) {
     params.set("sr_occ_cd", small);
   }
-
-  // 大分類コードがあれば sr_occ_l_cd を付与
   if (large && /^[0-9A-Z]+$/.test(large)) {
     params.set("sr_occ_l_cd", large);
   }
@@ -306,34 +253,20 @@ function buildMynaviJobQueryParams(cond: ManualCondition): URLSearchParams {
 /**
  * マイナビの検索件数を取得するメイン関数
  *
- * 以前:
- *   /list/p13/?... のように勤務地付き URL を組み立てて
- *   検索結果の件数をそのまま読んでいた。
- *
- * 修正後:
- *   ① 職種だけを付けて /list/?jobsearchType=4&searchType=8&sr_occ_l_cd=.. などを GET
- *   ② 取得した HTML から
- *        - 都道府県指定がある場合:
- *          「勤務地を選ぶ」モーダルの
- *            地域(data-large-cd="XX") → 都道府県(data-middle-cd="Pxx")
- *          の順で labelNumber を取得
- *        - 取れなかった場合 / 都道府県未指定の場合:
- *          従来通り「条件に合う求人 ○○件を検索する」などから件数を読む
+ * - 職種条件のみ付けて一覧を開く
+ * - 都道府県指定がある場合: 「勤務地を選ぶ」モーダルの都道府県横の labelNumber を返す
+ * - 都道府県指定なし: 一覧上部の「条件に合う求人 ○○件」などから全体件数を返す
  */
 export async function fetchMynaviJobsCount(
   cond: ManualCondition
 ): Promise<number | null> {
-  // jobsearchType / searchType は検索条件付き一覧の基本的な値
   const jobsearchType = "4";
   const searchType = "8";
 
-  // 1) 職種コードからクエリパラメータを組み立て
   const params = buildMynaviJobQueryParams(cond);
   params.set("jobsearchType", jobsearchType);
   params.set("searchType", searchType);
 
-  // ※勤務地は URL パス / クエリには付けない。
-  //   ページ内の「勤務地を選ぶ」モーダルの地域→都道府県ごとの件数(labelNumber)を使う。
   const url = `https://tenshoku.mynavi.jp/list/?${params.toString()}`;
 
   const controller = new AbortController();
@@ -360,18 +293,14 @@ export async function fetchMynaviJobsCount(
 
     const html = await res.text();
 
-    // 2) 都道府県が指定されている場合は
-    //    「地域を選択した上で都道府県を選ぶ」イメージで labelNumber を取得
     const prefCode = getMynaviPrefectureCode(cond);
+
     if (prefCode) {
-      const countFromModal = parseMynaviPrefectureCountFromModal(
-        html,
-        prefCode
-      );
-      if (countFromModal != null) return countFromModal;
+      // ✅ 都道府県指定がある場合は、必ず「勤務地モーダルの都道府県横の数字」を使う
+      return parseMynaviPrefectureCountFromModal(html, prefCode);
     }
 
-    // 3) フォールバック: 一覧ページ上部の「条件に合う求人 ○○件」などから取得
+    // ✅ 都道府県指定なしのときだけ、全体件数としてヘッダーの数字を使う
     return parseMynaviJobsCount(html);
   } catch (err) {
     console.error("mynavi fetch error", err, { url });

@@ -11,21 +11,63 @@ import {
 type JobCategoryModalProps = {
   /** モーダルを閉じる時に呼ばれる */
   onClose: () => void;
-  /** 適用（決定）時に呼ばれる。自社小分類IDの配列を返す */
-  onApply: (selectedSmallIds: string[]) => void;
+  /**
+   * 適用（決定）時に呼ばれる。
+   * - largeIds: 選択された大分類ID
+   * - smallIds: 選択された小分類ID
+   */
+  onApply: (params: { largeIds: string[]; smallIds: string[] }) => void;
   /** すでに選択済みの小分類ID（編集時など） */
   initialSelectedSmallIds?: string[];
+  /** すでに選択済みの大分類ID（任意） */
+  initialSelectedLargeIds?: string[];
 };
 
 export function JobCategoryModal(props: JobCategoryModalProps) {
-  const { onClose, onApply, initialSelectedSmallIds = [] } = props;
+  const {
+    onClose,
+    onApply,
+    initialSelectedSmallIds = [],
+    initialSelectedLargeIds = [],
+  } = props;
 
-  const [activeLargeId, setActiveLargeId] = useState<string>(
-    JOB_CATEGORY_TREE[0]?.id ?? ""
-  );
+  /** =========================
+   * 初期状態
+   * ========================= */
 
+  // 小分類 → 親の大分類IDを引くためのマップ
+  const smallToLargeMap = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const large of JOB_CATEGORY_TREE) {
+      for (const small of large.smallCategories) {
+        m.set(small.id, large.id);
+      }
+    }
+    return m;
+  }, []);
+
+  // 大分類の初期セット
+  const [selectedLargeIds, setSelectedLargeIds] = useState<Set<string>>(() => {
+    // 明示的に渡された大分類があればそれを優先
+    const base = new Set(initialSelectedLargeIds);
+
+    // 小分類の初期選択から親の大分類もONにしておく
+    for (const smallId of initialSelectedSmallIds) {
+      const parentLargeId = smallToLargeMap.get(smallId);
+      if (parentLargeId) base.add(parentLargeId);
+    }
+    return base;
+  });
+
+  // 小分類の選択セット
   const [selectedSmallIds, setSelectedSmallIds] = useState<Set<string>>(
     () => new Set(initialSelectedSmallIds)
+  );
+
+  // 左ペインでアクティブな大分類
+  const [activeLargeId, setActiveLargeId] = useState<string>(
+    // すでに選択済みの大分類があればそこを優先、なければ先頭
+    initialSelectedLargeIds[0] || JOB_CATEGORY_TREE[0]?.id || ""
   );
 
   const activeLarge: JobLargeCategory | undefined = useMemo(
@@ -33,22 +75,97 @@ export function JobCategoryModal(props: JobCategoryModalProps) {
     [activeLargeId]
   );
 
-  const handleToggleSmall = (smallId: string) => {
+  /** =========================
+   * 大分類のON/OFF
+   * ========================= */
+
+  const handleToggleLarge = (largeId: string, checked: boolean) => {
+    const large = JOB_CATEGORY_TREE.find((l) => l.id === largeId);
+    if (!large) return;
+
+    setSelectedLargeIds((prev) => {
+      const next = new Set(prev);
+      if (checked) {
+        next.add(largeId);
+      } else {
+        next.delete(largeId);
+      }
+      return next;
+    });
+
+    // 大分類ON → 子の小分類もすべてON
+    // 大分類OFF → 子の小分類はすべてOFF
     setSelectedSmallIds((prev) => {
       const next = new Set(prev);
-      if (next.has(smallId)) {
-        next.delete(smallId);
+      if (checked) {
+        for (const s of large.smallCategories) {
+          next.add(s.id);
+        }
       } else {
-        next.add(smallId);
+        for (const s of large.smallCategories) {
+          next.delete(s.id);
+        }
       }
       return next;
     });
   };
 
+  /** =========================
+   * 小分類のON/OFF
+   * ========================= */
+
+  const handleToggleSmall = (smallId: string, checked: boolean) => {
+    const parentLargeId = smallToLargeMap.get(smallId);
+
+    setSelectedSmallIds((prev) => {
+      const next = new Set(prev);
+      if (checked) {
+        next.add(smallId);
+      } else {
+        next.delete(smallId);
+      }
+
+      // 小分類をONにしたら、必ず親の大分類もON
+      if (parentLargeId) {
+        setSelectedLargeIds((prevLarge) => {
+          const nextLarge = new Set(prevLarge);
+          if (checked) {
+            nextLarge.add(parentLargeId);
+          } else {
+            // OFFにした場合、同じ大分類配下に他の小分類が一つも残っていなければ大分類もOFF
+            const large = JOB_CATEGORY_TREE.find((l) => l.id === parentLargeId);
+            if (large) {
+              const hasOtherSelected = large.smallCategories.some((s) =>
+                next.has(s.id)
+              );
+              if (!hasOtherSelected) {
+                nextLarge.delete(parentLargeId);
+              }
+            }
+          }
+          return nextLarge;
+        });
+      }
+
+      return next;
+    });
+  };
+
+  /** =========================
+   * 適用
+   * ========================= */
+
   const handleApply = () => {
-    onApply(Array.from(selectedSmallIds));
+    onApply({
+      largeIds: Array.from(selectedLargeIds),
+      smallIds: Array.from(selectedSmallIds),
+    });
     onClose();
   };
+
+  /** =========================
+   * 描画
+   * ========================= */
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
@@ -70,6 +187,11 @@ export function JobCategoryModal(props: JobCategoryModalProps) {
           <div className="w-1/3 border-r overflow-y-auto">
             {JOB_CATEGORY_TREE.map((large) => {
               const isActive = large.id === activeLargeId;
+              const isChecked = selectedLargeIds.has(large.id);
+              const hasAnySmallSelected = large.smallCategories.some((s) =>
+                selectedSmallIds.has(s.id)
+              );
+
               return (
                 <button
                   key={large.id}
@@ -80,11 +202,19 @@ export function JobCategoryModal(props: JobCategoryModalProps) {
                     isActive ? "bg-blue-50 font-semibold" : "hover:bg-gray-50",
                   ].join(" ")}
                 >
-                  <span>{large.name}</span>
-                  {/* 任意で「選択中」ラベル */}
-                  {large.smallCategories.some((s) =>
-                    selectedSmallIds.has(s.id)
-                  ) && (
+                  <span className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4"
+                      checked={isChecked}
+                      onChange={(e) =>
+                        handleToggleLarge(large.id, e.target.checked)
+                      }
+                      onClick={(e) => e.stopPropagation()} // 行クリックと分離
+                    />
+                    {large.name}
+                  </span>
+                  {hasAnySmallSelected && (
                     <span className="rounded bg-blue-100 px-2 text-xs text-blue-700">
                       選択中
                     </span>
@@ -94,7 +224,7 @@ export function JobCategoryModal(props: JobCategoryModalProps) {
             })}
           </div>
 
-          {/* 右側：小分類（=中分類）リスト */}
+          {/* 右側：小分類リスト */}
           <div className="w-2/3 overflow-y-auto px-4 py-3">
             {activeLarge ? (
               <>
@@ -114,7 +244,9 @@ export function JobCategoryModal(props: JobCategoryModalProps) {
                             type="checkbox"
                             className="h-4 w-4"
                             checked={checked}
-                            onChange={() => handleToggleSmall(small.id)}
+                            onChange={(e) =>
+                              handleToggleSmall(small.id, e.target.checked)
+                            }
                           />
                           <span>{small.name}</span>
                         </label>
