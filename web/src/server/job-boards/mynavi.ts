@@ -6,8 +6,7 @@ import type { ManualCondition } from "./types";
  * マイナビの検索結果ページ HTML から
  * 「条件に合う求人 ○○件を検索する」の ○○件 を抜き出す
  *
- * ※ 都道府県が未指定のときだけ使う（全体件数用フォールバック）だったが、
- *    現在は「都道府県ありの場合のフォールバック」としても必ず呼ぶ。
+ * ※ 都道府県が未指定のときだけ使う（全体件数用フォールバック）。
  */
 export function parseMynaviJobsCount(html: string): number | null {
   // ① js__searchRecruit--count を最優先
@@ -45,6 +44,8 @@ export function parseMynaviJobsCount(html: string): number | null {
 
 /**
  * Pコード（P13 など） → 地域コード（data-large-cd="04" など）の対応
+ * （※今回の実装では「近くの labelNumber」を取るので、
+ *     areaLarge が取れなくても致命的にはならない）
  */
 const PREF_CODE_TO_AREA_LARGE: Record<string, string> = {
   P01: "01", // 北海道
@@ -105,58 +106,95 @@ const PREF_CODE_TO_AREA_LARGE: Record<string, string> = {
   P47: "12", // 九州・沖縄
 };
 
+function safeParseCount(raw: string | undefined | null): number | null {
+  if (!raw) return null;
+  const n = Number(raw.replace(/,/g, ""));
+  if (Number.isNaN(n)) return null;
+  return n;
+}
+
 /**
  * 「勤務地を選ぶ」モーダル内の
- *   ① 地域（data-large-cd="04" など）
- *   ② その地域の中の都道府県（data-middle-cd="P13" など）
- *   ③ その中の <span class="labelNumber">○○件</span>
- * を 1 回のパースで取得する。
+ *   ・data-middle-cd="P13" 付近
+ *   ・name/id="mcatareaP13" 付近
+ *   ・「東京都 / 東京」などのテキスト付近
+ * にある <span class="labelNumber">○○件</span> を拾う。
+ *
+ * ※ 完全に UI と同じ「ボタンを押してモーダルを開く」ことは
+ *   サーバー側ではできないので、
+ *   「モーダルに埋め込まれているHTMLを直接パース」する方針です。
  */
 function parseMynaviPrefectureCountFromModal(
   html: string,
-  prefCode: string
+  prefCode: string | null,
+  rawPrefName?: string | null
 ): number | null {
-  const prefEscaped = prefCode.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
-  const upperPref = prefCode.toUpperCase();
+  // 1. data-middle-cd="P13" 〜 labelNumber
+  if (prefCode) {
+    const prefEscaped = prefCode.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
 
-  const areaLarge = PREF_CODE_TO_AREA_LARGE[upperPref];
-
-  // ① 地域ブロック内の該当都道府県の labelNumber を探す
-  if (areaLarge) {
-    const areaEscaped = areaLarge.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
-
-    const reAreaAndPref = new RegExp(
-      `<div[^>]*class=["'][^"']*js__selectCondition--large[^"']*["'][^>]*data-large-cd=["']${areaEscaped}["'][^>]*>[\\s\\S]*?<section[^>]*class=["'][^"']*choiceContent__section[^"']*js__selectCondition--middle[^"']*["'][^>]*data-middle-cd=["']${prefEscaped}["'][^>]*>[\\s\\S]*?<span[^>]*class=["'][^"']*labelNumber[^"']*["'][^>]*>\\s*([\\d,]+)\\s*<\\/span>`,
+    const reMiddle = new RegExp(
+      `data-middle-cd=["']${prefEscaped}["'][\\s\\S]{0,400}?<span[^>]*class=["'][^"']*labelNumber[^"']*["'][^>]*>\\s*([\\d,]+)\\s*<\\/span>`,
       "i"
     );
+    const mMiddle = html.match(reMiddle);
+    const nMiddle = safeParseCount(mMiddle?.[1]);
+    if (nMiddle != null) return nMiddle;
 
-    const mArea = html.match(reAreaAndPref);
-    if (mArea?.[1]) {
-      const n = Number(mArea[1].replace(/,/g, ""));
-      if (!Number.isNaN(n)) return n;
+    // 2. name/id="mcatareaP13" 〜 labelNumber（保険）
+    const reInput = new RegExp(
+      `(?:name|id)=["']mcatarea${prefEscaped}["'][^>]*>[\\s\\S]{0,200}?<span[^>]*class=["'][^"']*labelNumber[^"']*["'][^>]*>\\s*([\\d,]+)\\s*<\\/span>`,
+      "i"
+    );
+    const mInput = html.match(reInput);
+    const nInput = safeParseCount(mInput?.[1]);
+    if (nInput != null) return nInput;
+
+    // 3. 地域ブロック（data-large-cd="xx"）が取れる場合は、その中だけを対象に再検索（ゆるめ）
+    const upperPref = prefCode.toUpperCase();
+    const areaLarge = PREF_CODE_TO_AREA_LARGE[upperPref];
+    if (areaLarge) {
+      const areaEscaped = areaLarge.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
+      const reAreaBlock = new RegExp(
+        `<div[^>]*data-large-cd=["']${areaEscaped}["'][^>]*>[\\s\\S]*?<\\/div>`,
+        "i"
+      );
+      const areaMatch = html.match(reAreaBlock);
+      if (areaMatch?.[0]) {
+        const areaHtml = areaMatch[0];
+        const mAreaMiddle = areaHtml.match(
+          new RegExp(
+            `data-middle-cd=["']${prefEscaped}["'][\\s\\S]{0,400}?<span[^>]*class=["'][^"']*labelNumber[^"']*["'][^>]*>\\s*([\\d,]+)\\s*<\\/span>`,
+            "i"
+          )
+        );
+        const nArea = safeParseCount(mAreaMiddle?.[1]);
+        if (nArea != null) return nArea;
+      }
     }
   }
 
-  // ② 地域が取れない場合は、都道府県セクション単体で検索
-  const reSectionOnly = new RegExp(
-    `<section[^>]*class=["'][^"']*choiceContent__section[^"']*js__selectCondition--middle[^"']*["'][^>]*data-middle-cd=["']${prefEscaped}["'][^>]*>[\\s\\S]*?<span[^>]*class=["'][^"']*labelNumber[^"']*["'][^>]*>\\s*([\\d,]+)\\s*<\\/span>`,
-    "i"
-  );
-  const m1 = html.match(reSectionOnly);
-  if (m1?.[1]) {
-    const n = Number(m1[1].replace(/,/g, ""));
-    if (!Number.isNaN(n)) return n;
-  }
+  // 4. 都道府県名ベースでのゆるい検索（東京都 / 東京 など）
+  const prefName = rawPrefName?.trim();
+  if (prefName) {
+    const baseName =
+      /[都道府県]$/.test(prefName) && prefName.length > 1
+        ? prefName.slice(0, -1)
+        : prefName;
 
-  // ③ input name="mcatareaP13" パターン（保険）
-  const reInput = new RegExp(
-    `<input[^>]*name=["']mcatarea${prefEscaped}["'][^>]*>[\\s\\S]*?<span[^>]*class=["'][^"']*labelNumber[^"']*["'][^>]*>\\s*([\\d,]+)\\s*<\\/span>`,
-    "i"
-  );
-  const m2 = html.match(reInput);
-  if (m2?.[1]) {
-    const n = Number(m2[1].replace(/,/g, ""));
-    if (!Number.isNaN(n)) return n;
+    const nameEscaped = prefName.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
+    const baseEscaped =
+      baseName === prefName
+        ? nameEscaped
+        : baseName.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
+
+    const reName = new RegExp(
+      `(${nameEscaped}|${baseEscaped})[\\s\\S]{0,160}?<span[^>]*class=["'][^"']*labelNumber[^"']*["'][^>]*>\\s*([\\d,]+)\\s*<\\/span>`,
+      "i"
+    );
+    const mName = html.match(reName);
+    const nName = safeParseCount(mName?.[2]);
+    if (nName != null) return nName;
   }
 
   return null;
@@ -223,7 +261,7 @@ function getMynaviPrefectureCode(cond: ManualCondition): string | null {
   const raw = cond.prefecture?.trim();
   if (!raw) return null;
 
-  // すでに Pxx 形式ならそのまま
+  // すでに Pコード形式のとき
   if (/^P\d{2}$/i.test(raw)) {
     return `P${raw.slice(1).padStart(2, "0")}`.toUpperCase();
   }
@@ -235,13 +273,6 @@ function getMynaviPrefectureCode(cond: ManualCondition): string | null {
 /**
  * internalLarge / internalSmall から
  * マイナビの「職種」用クエリパラメータを組み立てる。
- *
- * external_large_code = "11"
- * external_small_code = "11105"
- * のようなコード前提で、
- *   sr_occ_cd   : 小分類
- *   sr_occ_l_cd : 大分類
- * を優先的に指定する。
  */
 function buildMynaviJobQueryParams(cond: ManualCondition): URLSearchParams {
   const params = new URLSearchParams();
@@ -249,11 +280,10 @@ function buildMynaviJobQueryParams(cond: ManualCondition): URLSearchParams {
   const large = cond.internalLarge?.trim() || "";
   const small = cond.internalSmall?.trim() || "";
 
-  // 小分類（例: 11105）
+  // マッピング済みのコード（数値 or 英大文字）を想定
   if (small && /^[0-9A-Z]+$/i.test(small)) {
     params.set("sr_occ_cd", small);
   }
-  // 大分類（例: 11）
   if (large && /^[0-9A-Z]+$/i.test(large)) {
     params.set("sr_occ_l_cd", large);
   }
@@ -265,17 +295,14 @@ function buildMynaviJobQueryParams(cond: ManualCondition): URLSearchParams {
  * マイナビの検索件数を取得するメイン関数
  *
  * - 職種条件のみ付けて一覧を開く
- * - 都道府県指定がある場合:
- *     ① 可能なら「勤務地モーダルの都道府県横の数字(labelNumber)」を使う
- *     ② 取れない場合はヘッダーの「条件に合う求人 ○○件」をフォールバックで返す
- * - 都道府県指定なし:
- *     ヘッダーの「条件に合う求人 ○○件」を返す
+ * - 都道府県指定がある場合: 「勤務地を選ぶ」モーダルの都道府県横の labelNumber を返す
+ * - 都道府県指定なし: 一覧上部の「条件に合う求人 ○○件」などから全体件数を返す
  */
 export async function fetchMynaviJobsCount(
   cond: ManualCondition
 ): Promise<number | null> {
-  // 実際の画面と同じ値に合わせる
-  // https://tenshoku.mynavi.jp/list/?jobsearchType=14&searchType=18
+  // ★ 実際の画面と同じ値に合わせる（ユーザー指定のURL）
+  //   https://tenshoku.mynavi.jp/list/?jobsearchType=14&searchType=18
   const jobsearchType = "14";
   const searchType = "18";
 
@@ -308,29 +335,32 @@ export async function fetchMynaviJobsCount(
     }
 
     const html = await res.text();
+
     const prefCode = getMynaviPrefectureCode(cond);
 
-    let primary: number | null = null;
-    let fallback: number | null = null;
-
-    // ✅ 都道府県指定がある場合は、まずモーダルから都道府県別件数を試す
-    if (prefCode) {
-      primary = parseMynaviPrefectureCountFromModal(html, prefCode);
-    }
-
-    // ✅ どちらの場合でも、ヘッダーの「条件に合う求人 ○○件」を必ずフォールバックで見る
-    fallback = parseMynaviJobsCount(html);
-
-    const result = primary ?? fallback;
-
-    if (result == null) {
-      console.error("mynavi jobs count parse failed", {
-        url,
+    if (prefCode || cond.prefecture) {
+      // ✅ 都道府県指定がある場合は、まず「勤務地モーダルの都道府県横の数字」を強制的に取りにいく
+      const countFromModal = parseMynaviPrefectureCountFromModal(
+        html,
         prefCode,
-      });
+        cond.prefecture ?? null
+      );
+      if (countFromModal != null) {
+        return countFromModal;
+      }
+
+      // どうしてもモーダルの数字が拾えない場合の最後の保険として、
+      // ページ上部の全体件数を返す（≒ UI とは少し違うが数値ゼロよりはマシ）
+      const fallback = parseMynaviJobsCount(html);
+      if (fallback != null) {
+        return fallback;
+      }
+
+      return null;
     }
 
-    return result;
+    // ✅ 都道府県指定なしのときだけ、全体件数としてヘッダーの数字を使う
+    return parseMynaviJobsCount(html);
   } catch (err) {
     console.error("mynavi fetch error", err, { url });
     return null;
