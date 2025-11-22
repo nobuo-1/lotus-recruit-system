@@ -58,6 +58,7 @@ function isValidSiteKey(v: string): v is SiteKey {
 }
 
 /** body から BaseCondition の組み合わせを作る（サイト × 大分類 × 小分類 × 都道府県） */
+// 変更後（want によるカットを廃止）
 function buildBaseConditions(
   sites: SiteKey[],
   body: RequestBody
@@ -65,8 +66,6 @@ function buildBaseConditions(
   const largeList = body.large && body.large.length > 0 ? body.large : [null];
   const smallList = body.small && body.small.length > 0 ? body.small : [null];
   const prefList = body.pref && body.pref.length > 0 ? body.pref : [null];
-
-  const max = typeof body.want === "number" && body.want > 0 ? body.want : 50;
 
   const out: BaseCondition[] = [];
 
@@ -80,7 +79,6 @@ function buildBaseConditions(
             internalSmall: S,
             prefecture: P,
           });
-          if (out.length >= max) return out;
         }
       }
     }
