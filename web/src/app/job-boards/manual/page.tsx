@@ -6,10 +6,7 @@ import AppHeader from "@/components/AppHeader";
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { supabase } from "@/lib/supabaseClient";
-import type {
-  ManualResultRow,
-  ManualLayerCount,
-} from "@/server/job-boards/types";
+import type { ManualResultRow } from "@/server/job-boards/types";
 
 // 職種モーダル（既存）
 const JobCategoryModal = dynamic(
@@ -263,7 +260,6 @@ const SITE_OPTIONS: { value: string; label: string }[] = [
   { value: "doda", label: "doda" },
   { value: "type", label: "type" },
   { value: "womantype", label: "女の転職type" },
-  // 今後エン転職などを追加する場合はここに value を追加
 ];
 
 // site_key → 表示用ラベルのマップ
@@ -501,65 +497,7 @@ const ConditionModal: React.FC<ConditionModalProps> = ({
 };
 
 /** =========================
- * 層別テーブル表示コンポーネント
- * ========================= */
-
-const LayerTable: React.FC<{
-  title: string;
-  layers: ManualLayerCount[] | null | undefined;
-}> = ({ title, layers }) => {
-  const list = layers ?? [];
-  if (list.length === 0) {
-    return (
-      <div className="text-xs text-neutral-400 border rounded-lg p-3">
-        {title} のデータがありません
-      </div>
-    );
-  }
-
-  return (
-    <div className="border rounded-lg overflow-hidden">
-      <div className="px-3 py-2 bg-neutral-50 text-xs font-semibold text-neutral-700">
-        {title}
-      </div>
-      <div className="max-h-[260px] overflow-auto">
-        <table className="w-full text-xs">
-          <tbody>
-            {list.map((l, idx) => (
-              <tr
-                key={`${title}-${l.key}-${idx}`}
-                className="border-t border-neutral-100"
-              >
-                <td className="px-3 py-1.5 whitespace-nowrap">
-                  {idx === 0 && l.key === "all" ? (
-                    <span className="inline-flex items-center gap-1">
-                      <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-indigo-100 text-[10px] text-indigo-700">
-                        全
-                      </span>
-                      <span>{l.label}</span>
-                    </span>
-                  ) : (
-                    l.label
-                  )}
-                </td>
-                <td className="px-3 py-1.5 text-right tabular-nums">
-                  {typeof l.jobs_count === "number" ? (
-                    `${l.jobs_count.toLocaleString()}件`
-                  ) : (
-                    <span className="text-neutral-400">-</span>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-};
-
-/** =========================
- * 条件ごとの結果 → 1つの集計にまとめる
+ * 条件ごとの結果 → 1つの集計にまとめる（合計件数のみ）
  * ========================= */
 
 function aggregateManualRows(rows: ManualResultRow[]): ManualResultRow | null {
@@ -570,50 +508,13 @@ function aggregateManualRows(rows: ManualResultRow[]): ManualResultRow | null {
     0
   );
 
-  const mergeLayers = (
-    getLayers: (r: ManualResultRow) => ManualLayerCount[] | undefined
-  ): ManualLayerCount[] => {
-    const map = new Map<string, ManualLayerCount>();
-
-    for (const r of rows) {
-      const layers = getLayers(r) ?? [];
-      for (const l of layers) {
-        const key = l.key || l.label;
-        const base = map.get(key);
-        const add = typeof l.jobs_count === "number" ? l.jobs_count : 0;
-
-        if (!base) {
-          map.set(key, {
-            key,
-            label: l.label,
-            jobs_count: add || null,
-          });
-        } else {
-          const current =
-            typeof base.jobs_count === "number" ? base.jobs_count : 0;
-          const next = current + add;
-          base.jobs_count = next || null;
-        }
-      }
-    }
-
-    return Array.from(map.values());
-  };
-
-  const ageLayers = mergeLayers((r) => r.age_layers);
-  const empLayers = mergeLayers((r) => r.employment_layers);
-  const salaryLayers = mergeLayers((r) => r.salary_layers);
-
   return {
     site_key: "all",
     internal_large: null,
     internal_small: null,
     prefecture: null,
     jobs_total: total,
-    age_layers: ageLayers,
-    employment_layers: empLayers,
-    salary_layers: salaryLayers,
-  };
+  } as ManualResultRow;
 }
 
 // サイト別サマリ用型 & ビルダー
@@ -649,9 +550,99 @@ function buildSiteSummaries(rows: ManualResultRow[]): SiteSummary[] {
     });
   }
 
-  // サイト名で安定ソート（日本語優先）
   return result.sort((a, b) => a.label.localeCompare(b.label, "ja"));
 }
+
+/** =========================
+ * 条件別 詳細テーブル
+ * ========================= */
+
+const DetailedResultTable: React.FC<{ rows: ManualResultRow[] }> = ({
+  rows,
+}) => {
+  if (!rows || rows.length === 0) {
+    return null;
+  }
+
+  const sorted = [...rows].sort((a, b) => {
+    const aSite = a.site_key || "";
+    const bSite = b.site_key || "";
+    if (aSite !== bSite) return aSite.localeCompare(bSite, "ja");
+
+    const aLarge = a.internal_large || "";
+    const bLarge = b.internal_large || "";
+    if (aLarge !== bLarge) return aLarge.localeCompare(bLarge, "ja");
+
+    const aSmall = a.internal_small || "";
+    const bSmall = b.internal_small || "";
+    if (aSmall !== bSmall) return aSmall.localeCompare(bSmall, "ja");
+
+    const aPref = a.prefecture || "";
+    const bPref = b.prefecture || "";
+    return aPref.localeCompare(bPref, "ja");
+  });
+
+  return (
+    <div className="border rounded-lg overflow-hidden">
+      <div className="px-3 py-2 bg-neutral-50 text-xs font-semibold text-neutral-700">
+        条件別の内訳
+      </div>
+      <div className="max-h-[420px] overflow-auto">
+        <table className="w-full text-xs">
+          <thead className="bg-neutral-50 border-b border-neutral-200">
+            <tr>
+              <th className="px-3 py-2 text-left font-medium text-neutral-600 whitespace-nowrap">
+                サイト
+              </th>
+              <th className="px-3 py-2 text-left font-medium text-neutral-600 whitespace-nowrap">
+                職種（大分類コード）
+              </th>
+              <th className="px-3 py-2 text-left font-medium text-neutral-600 whitespace-nowrap">
+                職種（小分類コード）
+              </th>
+              <th className="px-3 py-2 text-left font-medium text-neutral-600 whitespace-nowrap">
+                都道府県
+              </th>
+              <th className="px-3 py-2 text-right font-medium text-neutral-600 whitespace-nowrap">
+                求人件数
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((r, idx) => {
+              const jobs =
+                typeof r.jobs_total === "number"
+                  ? r.jobs_total.toLocaleString()
+                  : "-";
+              const siteLabel =
+                SITE_LABEL_MAP[r.site_key ?? ""] ?? r.site_key ?? "-";
+              return (
+                <tr
+                  key={`${r.site_key}-${r.internal_large}-${r.internal_small}-${r.prefecture}-${idx}`}
+                  className="border-t border-neutral-100 hover:bg-neutral-50/60"
+                >
+                  <td className="px-3 py-1.5 whitespace-nowrap">{siteLabel}</td>
+                  <td className="px-3 py-1.5 whitespace-nowrap">
+                    {r.internal_large ?? "（指定なし）"}
+                  </td>
+                  <td className="px-3 py-1.5 whitespace-nowrap">
+                    {r.internal_small ?? "（指定なし）"}
+                  </td>
+                  <td className="px-3 py-1.5 whitespace-nowrap">
+                    {r.prefecture ?? "全国（指定なし）"}
+                  </td>
+                  <td className="px-3 py-1.5 text-right tabular-nums">
+                    {jobs !== "-" ? `${jobs}件` : "-"}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
 
 /** =========================
  * 手動実行ページ本体
@@ -684,7 +675,7 @@ export default function JobBoardsManualPage() {
     })();
   }, []);
 
-  // 疑似プログレス（モーダルを閉じていてもわかるように）
+  // 疑似プログレス
   useEffect(() => {
     if (!running || progressTotal <= 0) return;
 
@@ -706,7 +697,6 @@ export default function JobBoardsManualPage() {
     setMsg("");
     setRows([]);
 
-    // 進捗の「分母」をざっくり計算（サイト × 大分類 × 小分類 × 都道府県）
     const siteCount = sites.length || 0;
     const largeCount = large.length || 1;
     const smallCount = small.length || 1;
@@ -752,7 +742,6 @@ export default function JobBoardsManualPage() {
           (j?.history_id ? `履歴に保存しました（ID: ${j.history_id}）` : "")
       );
 
-      // 完了時は 100% に寄せる
       setProgressDisplay(totalSteps);
     } catch (e: any) {
       setMsg(String(e?.message || e));
@@ -788,7 +777,6 @@ export default function JobBoardsManualPage() {
         )}%)`
       : "";
 
-  // 全体集計とサイト別集計をそれぞれ計算
   const summaryAll = useMemo(() => aggregateManualRows(rows), [rows]);
   const perSiteSummaries = useMemo(() => buildSiteSummaries(rows), [rows]);
 
@@ -815,7 +803,6 @@ export default function JobBoardsManualPage() {
           </div>
         </div>
 
-        {/* 進捗インジケータ（モーダルを閉じても見える） */}
         {(running || progressTotal > 0) && (
           <div className="mb-4 flex items-center justify-between rounded-xl border border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800">
             <div className="flex items-center gap-2">
@@ -917,9 +904,9 @@ export default function JobBoardsManualPage() {
           )}
         </section>
 
-        {/* 結果表示 → 全体集計 + サイト別集計 */}
-        <section className="mt-6 rounded-2xl border border-neutral-200 p-4">
-          <div className="text-sm font-semibold mb-3">取得結果</div>
+        {/* 結果表示 → 全体集計 + サイト別集計 + 条件別テーブル */}
+        <section className="mt-6 rounded-2xl border border-neutral-200 p-4 space-y-6">
+          <div className="text-sm font-semibold">取得結果</div>
 
           {!summaryAll && perSiteSummaries.length === 0 ? (
             <div className="px-4 py-10 text-center text-neutral-400 text-sm">
@@ -929,7 +916,7 @@ export default function JobBoardsManualPage() {
             <>
               {/* 全サイト合計 */}
               {summaryAll && (
-                <div className="rounded-xl border border-neutral-200 p-4 mb-6">
+                <div className="rounded-xl border border-neutral-200 p-4">
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-xs font-semibold text-neutral-500 mb-1">
@@ -978,26 +965,14 @@ export default function JobBoardsManualPage() {
                       </div>
                     </div>
                   </div>
-
-                  <div className="mt-3 grid gap-3 md:grid-cols-3">
-                    <LayerTable title="年齢層" layers={summaryAll.age_layers} />
-                    <LayerTable
-                      title="雇用形態"
-                      layers={summaryAll.employment_layers}
-                    />
-                    <LayerTable
-                      title="年収帯"
-                      layers={summaryAll.salary_layers}
-                    />
-                  </div>
                 </div>
               )}
 
-              {/* サイト別内訳 */}
+              {/* サイト別内訳（合計だけ） */}
               {perSiteSummaries.length > 0 && (
                 <div className="space-y-4">
                   <div className="text-xs font-semibold text-neutral-600">
-                    サイト別の内訳
+                    サイト別の合計
                   </div>
                   {perSiteSummaries.map((site) => (
                     <div
@@ -1043,25 +1018,13 @@ export default function JobBoardsManualPage() {
                           </div>
                         </div>
                       </div>
-
-                      <div className="mt-3 grid gap-3 md:grid-cols-3">
-                        <LayerTable
-                          title="年齢層"
-                          layers={site.summary.age_layers}
-                        />
-                        <LayerTable
-                          title="雇用形態"
-                          layers={site.summary.employment_layers}
-                        />
-                        <LayerTable
-                          title="年収帯"
-                          layers={site.summary.salary_layers}
-                        />
-                      </div>
                     </div>
                   ))}
                 </div>
               )}
+
+              {/* 条件別テーブル */}
+              <DetailedResultTable rows={rows} />
             </>
           )}
         </section>
@@ -1091,6 +1054,7 @@ export default function JobBoardsManualPage() {
           small={small}
           onCloseAction={() => setOpenCat(false)}
           onApplyAction={(L, S) => {
+            // ※小分類→大分類の自動チェックは JobCategoryModal 内で対応（修正1）
             setLarge(L);
             setSmall(S);
             setOpenCat(false);
