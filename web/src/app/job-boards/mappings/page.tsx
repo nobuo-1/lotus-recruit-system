@@ -53,7 +53,32 @@ export default function JobBoardMappingsPage() {
   const [query, setQuery] = useState("");
   const [message, stringSetMessage] = useState<string | null>(null);
 
+  // 自社側（内部）カテゴリ選択用
+  const [internalLargeFilter, setInternalLargeFilter] = useState<string>(
+    JOB_LARGE[0] ?? ""
+  );
+  const [internalSmallFilter, setInternalSmallFilter] = useState<string>("");
+
   const setMessage = (msg: string | null) => stringSetMessage(msg);
+
+  /** =========================
+   * 内部カテゴリ選択の補助
+   * ========================= */
+
+  // 大分類が変わったら、その大分類に属する小分類のうち
+  // 1件目をデフォルト選択（既存があれば維持）
+  useEffect(() => {
+    const smalls = JOB_CATEGORIES[internalLargeFilter] ?? [];
+    setInternalSmallFilter((prev) => {
+      if (prev && smalls.includes(prev)) return prev;
+      return smalls[0] ?? "";
+    });
+  }, [internalLargeFilter]);
+
+  const internalSmallOptions = useMemo(
+    () => JOB_CATEGORIES[internalLargeFilter] ?? [],
+    [internalLargeFilter]
+  );
 
   const dirtyCount = useMemo(() => rows.filter((r) => r._dirty).length, [rows]);
 
@@ -76,6 +101,17 @@ export default function JobBoardMappingsPage() {
       return targets.includes(lower);
     });
   }, [rows, query]);
+
+  // 自社大分類 + 小分類 + サイト の組み合わせに紐づく行だけ抽出
+  const selectedMappings = useMemo(() => {
+    if (!internalLargeFilter || !internalSmallFilter) return [];
+    return rows.filter(
+      (r) =>
+        r.site_key === site &&
+        r.internal_large === internalLargeFilter &&
+        r.internal_small === internalSmallFilter
+    );
+  }, [rows, site, internalLargeFilter, internalSmallFilter]);
 
   /** =========================
    * データ取得
@@ -196,28 +232,177 @@ export default function JobBoardMappingsPage() {
           </p>
         </div>
 
-        {/* コントロールバー */}
+        {/* 自社カテゴリ × サイトごとのマッピングプレビュー */}
+        <section className="mb-4 rounded-2xl border border-indigo-100 bg-indigo-50/40 p-4">
+          <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+            <div className="space-y-3">
+              <div className="text-xs font-semibold text-indigo-800">
+                自社カテゴリでの割り当て状況
+              </div>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                {/* 対象サイト */}
+                <div>
+                  <div className="mb-1 text-xs font-medium text-neutral-700">
+                    対象サイト
+                  </div>
+                  <select
+                    className="w-full rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm"
+                    value={site}
+                    onChange={(e) => setSite(e.target.value as SiteKey)}
+                  >
+                    {SITE_OPTIONS.map((s) => (
+                      <option key={s.value} value={s.value}>
+                        {s.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* 自社・大分類 */}
+                <div>
+                  <div className="mb-1 text-xs font-medium text-neutral-700">
+                    自社・大分類
+                  </div>
+                  <select
+                    className="w-full rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm"
+                    value={internalLargeFilter}
+                    onChange={(e) => setInternalLargeFilter(e.target.value)}
+                  >
+                    {JOB_LARGE.map((L) => (
+                      <option key={L} value={L}>
+                        {L}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* 自社・小分類 */}
+                <div>
+                  <div className="mb-1 text-xs font-medium text-neutral-700">
+                    自社・小分類
+                  </div>
+                  <select
+                    className="w-full rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm"
+                    value={internalSmallFilter}
+                    onChange={(e) => setInternalSmallFilter(e.target.value)}
+                  >
+                    {internalSmallOptions.length === 0 && (
+                      <option value="">（小分類なし）</option>
+                    )}
+                    {internalSmallOptions.map((s) => (
+                      <option key={s} value={s}>
+                        {s}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <p className="text-[11px] text-neutral-600">
+                対象サイトと自社の大分類・小分類を選択すると、その組み合わせに割り当てられている
+                サイト側の職種（大分類 / 中分類 /
+                小分類）が下に一覧表示されます。
+              </p>
+            </div>
+
+            {/* サマリ情報 */}
+            <div className="min-w-[260px] rounded-xl border border-indigo-100 bg-white px-3 py-2 text-xs text-neutral-700">
+              <div className="font-semibold text-neutral-800 mb-1">
+                現在の選択
+              </div>
+              <div>
+                サイト:{" "}
+                {SITE_OPTIONS.find((s) => s.value === site)?.label ?? site}
+              </div>
+              <div>自社・大分類: {internalLargeFilter || "未選択"}</div>
+              <div>自社・小分類: {internalSmallFilter || "未選択"}</div>
+              <div className="mt-1 text-[11px] text-neutral-500">
+                対応するマッピング行数:{" "}
+                <span className="font-semibold">
+                  {selectedMappings.length} 件
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* 対応マッピング一覧 */}
+          <div className="mt-3 rounded-lg border border-neutral-200 bg-white max-h-[240px] overflow-auto">
+            {selectedMappings.length === 0 ? (
+              <div className="px-4 py-6 text-center text-xs text-neutral-400">
+                このサイト × 自社大分類 × 自社小分類の組み合わせに
+                割り当てられている職種はまだありません。
+              </div>
+            ) : (
+              <table className="min-w-full text-[11px]">
+                <thead className="bg-neutral-50 text-neutral-600 sticky top-0 z-10">
+                  <tr>
+                    <th className="px-3 py-2 text-left whitespace-nowrap w-[80px]">
+                      大分類CD
+                    </th>
+                    <th className="px-3 py-2 text-left whitespace-nowrap w-[180px]">
+                      大分類ラベル（サイト側）
+                    </th>
+                    <th className="px-3 py-2 text-left whitespace-nowrap w-[80px]">
+                      中分類CD
+                    </th>
+                    <th className="px-3 py-2 text-left whitespace-nowrap w-[200px]">
+                      中分類ラベル（サイト側）
+                    </th>
+                    <th className="px-3 py-2 text-left whitespace-nowrap w-[80px]">
+                      小分類CD
+                    </th>
+                    <th className="px-3 py-2 text-left whitespace-nowrap w-[220px]">
+                      小分類ラベル（サイト側）
+                    </th>
+                    <th className="px-3 py-2 text-center whitespace-nowrap w-[60px]">
+                      有効
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {selectedMappings.map((r) => (
+                    <tr
+                      key={r.id}
+                      className="border-t border-neutral-200 hover:bg-neutral-50"
+                    >
+                      <td className="px-3 py-1.5 align-top text-neutral-500">
+                        {r.external_large_code}
+                      </td>
+                      <td className="px-3 py-1.5 align-top font-medium">
+                        {r.external_large_label}
+                      </td>
+                      <td className="px-3 py-1.5 align-top text-neutral-500">
+                        {r.external_middle_code}
+                      </td>
+                      <td className="px-3 py-1.5 align-top">
+                        {r.external_middle_label}
+                      </td>
+                      <td className="px-3 py-1.5 align-top text-neutral-500">
+                        {r.external_small_code}
+                      </td>
+                      <td className="px-3 py-1.5 align-top">
+                        {r.external_small_label}
+                      </td>
+                      <td className="px-3 py-1.5 align-top text-center">
+                        <input
+                          type="checkbox"
+                          checked={r.enabled}
+                          readOnly
+                          className="cursor-default"
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </section>
+
+        {/* コントロールバー（一覧テーブル用のフィルタ & 保存） */}
         <section className="mb-4 rounded-2xl border border-neutral-200 p-4 bg-neutral-50/40">
           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div className="flex flex-wrap items-center gap-3">
-              {/* サイト選択 */}
-              <div>
-                <div className="text-xs font-medium text-neutral-600 mb-1">
-                  対象サイト
-                </div>
-                <select
-                  className="rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm"
-                  value={site}
-                  onChange={(e) => setSite(e.target.value as SiteKey)}
-                >
-                  {SITE_OPTIONS.map((s) => (
-                    <option key={s.value} value={s.value}>
-                      {s.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
               {/* 検索 */}
               <div>
                 <div className="text-xs font-medium text-neutral-600 mb-1">
