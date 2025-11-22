@@ -1,20 +1,16 @@
 // web/src/components/job/JobCategoryModal.tsx
 "use client";
 
-import React, { useMemo, useState } from "react";
-import {
-  JOB_CATEGORY_TREE,
-  JobLargeCategory,
-  JobSmallCategory,
-} from "@/features/jobCategories/jobCategoryTree";
+import React, { useEffect, useState } from "react";
+import { JOB_LARGE, JOB_CATEGORIES } from "@/constants/jobCategories";
 
 type JobCategoryModalProps = {
   /** モーダルを閉じる時に呼ばれる */
   onClose: () => void;
   /**
    * 適用（決定）時に呼ばれる。
-   * - largeIds: 選択された大分類ID
-   * - smallIds: 選択された小分類ID
+   * - largeIds: 選択された大分類ID（ここでは大分類ラベルをそのままIDとして扱う）
+   * - smallIds: 選択された小分類ID（小分類ラベルのみを返す）
    */
   onApply: (params: { largeIds: string[]; smallIds: string[] }) => void;
   /** すでに選択済みの小分類ID（編集時など） */
@@ -22,6 +18,10 @@ type JobCategoryModalProps = {
   /** すでに選択済みの大分類ID（任意） */
   initialSelectedLargeIds?: string[];
 };
+
+const SEP = ":::";
+const enc = (lg: string, sm: string) => `${lg}${SEP}${sm}`;
+const isComposite = (v: string) => v.includes(SEP);
 
 export function JobCategoryModal(props: JobCategoryModalProps) {
   const {
@@ -31,135 +31,147 @@ export function JobCategoryModal(props: JobCategoryModalProps) {
     initialSelectedLargeIds = [],
   } = props;
 
-  /** =========================
-   * 初期状態
-   * ========================= */
+  // 大分類の選択
+  const [L, setL] = useState<string[]>(initialSelectedLargeIds ?? []);
+  // 小分類は合成キー "大分類:::小分類" で内部管理
+  const [SKeys, setSKeys] = useState<Set<string>>(new Set());
+  // 右側で表示するアクティブ大分類
+  const [activeL, setActiveL] = useState<string>(
+    initialSelectedLargeIds[0] || JOB_LARGE[0]
+  );
 
-  // 小分類 → 親の大分類IDを引くためのマップ
-  const smallToLargeMap = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const large of JOB_CATEGORY_TREE) {
-      for (const small of large.smallCategories) {
-        m.set(small.id, large.id);
+  /** =========================
+   * 初期値の取り込み
+   * ========================= */
+  useEffect(() => {
+    const large = initialSelectedLargeIds ?? [];
+    const small = initialSelectedSmallIds ?? [];
+    setL(large);
+
+    const provided = Array.isArray(small) ? small : [];
+    const hasComposite = provided.some(isComposite);
+
+    const next = new Set<string>();
+
+    if (hasComposite) {
+      // すでに "大分類:::小分類" 形式で渡されている場合はそのまま採用
+      for (const k of provided) {
+        if (!isComposite(k)) continue;
+        const [lg, sm] = k.split(SEP);
+        if (JOB_LARGE.includes(lg) && (JOB_CATEGORIES[lg] || []).includes(sm)) {
+          next.add(enc(lg, sm));
+        }
+      }
+    } else {
+      // 従来形式（小分類ラベルのみ）の後方互換:
+      // initialSelectedLargeIds に含まれる大分類の配下から、同名の小分類だけを合成キー化
+      for (const lg of large) {
+        const children = JOB_CATEGORIES[lg] || [];
+        for (const sm of provided) {
+          if (children.includes(sm)) {
+            next.add(enc(lg, sm));
+          }
+        }
       }
     }
-    return m;
-  }, []);
 
-  // 大分類の初期セット
-  const [selectedLargeIds, setSelectedLargeIds] = useState<Set<string>>(() => {
-    // 明示的に渡された大分類があればそれを優先
-    const base = new Set(initialSelectedLargeIds);
+    setSKeys(next);
 
-    // 小分類の初期選択から親の大分類もONにしておく
-    for (const smallId of initialSelectedSmallIds) {
-      const parentLargeId = smallToLargeMap.get(smallId);
-      if (parentLargeId) base.add(parentLargeId);
-    }
-    return base;
-  });
-
-  // 小分類の選択セット
-  const [selectedSmallIds, setSelectedSmallIds] = useState<Set<string>>(
-    () => new Set(initialSelectedSmallIds)
-  );
-
-  // 左ペインでアクティブな大分類
-  const [activeLargeId, setActiveLargeId] = useState<string>(
-    // すでに選択済みの大分類があればそこを優先、なければ先頭
-    initialSelectedLargeIds[0] || JOB_CATEGORY_TREE[0]?.id || ""
-  );
-
-  const activeLarge: JobLargeCategory | undefined = useMemo(
-    () => JOB_CATEGORY_TREE.find((l) => l.id === activeLargeId),
-    [activeLargeId]
-  );
+    if (large.length > 0) setActiveL(large[0]);
+    else setActiveL(JOB_LARGE[0]);
+  }, [initialSelectedLargeIds, initialSelectedSmallIds]);
 
   /** =========================
    * 大分類のON/OFF
    * ========================= */
 
-  const handleToggleLarge = (largeId: string, checked: boolean) => {
-    const large = JOB_CATEGORY_TREE.find((l) => l.id === largeId);
-    if (!large) return;
+  const toggleLarge = (lg: string) => {
+    const checked = !L.includes(lg);
+    const nextL = checked ? [...L, lg] : L.filter((x) => x !== lg);
+    setL(nextL);
 
-    setSelectedLargeIds((prev) => {
-      const next = new Set(prev);
+    const children = JOB_CATEGORIES[lg] ?? [];
+    setSKeys((cur) => {
+      const next = new Set(cur);
       if (checked) {
-        next.add(largeId);
+        for (const sm of children) next.add(enc(lg, sm));
       } else {
-        next.delete(largeId);
+        for (const sm of children) next.delete(enc(lg, sm));
       }
       return next;
     });
+  };
 
-    // 大分類ON → 子の小分類もすべてON
-    // 大分類OFF → 子の小分類はすべてOFF
-    setSelectedSmallIds((prev) => {
-      const next = new Set(prev);
+  /** 「大分類 すべて選択/解除」 */
+  const allLarge = L.length === JOB_LARGE.length;
+  const toggleAllLarge = (checked: boolean) => {
+    if (checked) {
+      setL([...JOB_LARGE]);
+      const allSmKeys = JOB_LARGE.flatMap((lg) =>
+        (JOB_CATEGORIES[lg] || []).map((sm) => enc(lg, sm))
+      );
+      setSKeys(new Set(allSmKeys));
+    } else {
+      setL([]);
+      setSKeys(new Set());
+    }
+  };
+
+  /** =========================
+   * 小分類のON/OFF（アクティブ大分類のみ対象）
+   * ========================= */
+
+  const toggleSmall = (sm: string) => {
+    const key = enc(activeL, sm);
+    setSKeys((cur) => {
+      const next = new Set(cur);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  // アクティブ大分類グループ内の全小分類が選ばれているか
+  const activeChildren = JOB_CATEGORIES[activeL] || [];
+  const activeAllSmall =
+    activeChildren.every((sm) => SKeys.has(enc(activeL, sm))) &&
+    activeChildren.length > 0;
+
+  const toggleActiveAllSmall = (checked: boolean) => {
+    const children = JOB_CATEGORIES[activeL] || [];
+    setSKeys((cur) => {
+      const next = new Set(cur);
       if (checked) {
-        for (const s of large.smallCategories) {
-          next.add(s.id);
+        for (const sm of children) next.add(enc(activeL, sm));
+        // 小分類をすべてONにしたら、大分類もONにしておく
+        if (!L.includes(activeL)) {
+          setL((prev) => [...prev, activeL]);
         }
       } else {
-        for (const s of large.smallCategories) {
-          next.delete(s.id);
-        }
+        for (const sm of children) next.delete(enc(activeL, sm));
       }
       return next;
     });
   };
 
   /** =========================
-   * 小分類のON/OFF
+   * クリア & 適用
    * ========================= */
 
-  const handleToggleSmall = (smallId: string, checked: boolean) => {
-    const parentLargeId = smallToLargeMap.get(smallId);
-
-    setSelectedSmallIds((prev) => {
-      const next = new Set(prev);
-      if (checked) {
-        next.add(smallId);
-      } else {
-        next.delete(smallId);
-      }
-
-      // 小分類をONにしたら、必ず親の大分類もON
-      if (parentLargeId) {
-        setSelectedLargeIds((prevLarge) => {
-          const nextLarge = new Set(prevLarge);
-          if (checked) {
-            nextLarge.add(parentLargeId);
-          } else {
-            // OFFにした場合、同じ大分類配下に他の小分類が一つも残っていなければ大分類もOFF
-            const large = JOB_CATEGORY_TREE.find((l) => l.id === parentLargeId);
-            if (large) {
-              const hasOtherSelected = large.smallCategories.some((s) =>
-                next.has(s.id)
-              );
-              if (!hasOtherSelected) {
-                nextLarge.delete(parentLargeId);
-              }
-            }
-          }
-          return nextLarge;
-        });
-      }
-
-      return next;
-    });
+  const handleClear = () => {
+    setL([]);
+    setSKeys(new Set());
   };
-
-  /** =========================
-   * 適用
-   * ========================= */
 
   const handleApply = () => {
-    onApply({
-      largeIds: Array.from(selectedLargeIds),
-      smallIds: Array.from(selectedSmallIds),
+    const largeIds = [...L];
+    // smallIds は「小分類ラベルのみ」を返す（重複が気になる場合はここを composite に変えてもOK）
+    const smallIds = Array.from(SKeys).map((key) => {
+      const parts = key.split(SEP);
+      return parts[1] ?? key;
     });
+
+    onApply({ largeIds, smallIds });
     onClose();
   };
 
@@ -167,122 +179,109 @@ export function JobCategoryModal(props: JobCategoryModalProps) {
    * 描画
    * ========================= */
 
+  const rightGroup = activeL;
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-      <div className="max-h-[80vh] w-[900px] rounded-md bg-white shadow-lg flex flex-col">
+      <div className="w-[980px] max-w-[96vw] rounded-2xl bg-white shadow-xl border border-neutral-200 overflow-hidden">
         {/* ヘッダー */}
-        <div className="flex items-center justify-between border-b px-4 py-3">
-          <h2 className="text-lg font-semibold">職種を選ぶ</h2>
+        <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200">
+          <div className="font-semibold">職種選択</div>
           <button
-            type="button"
             onClick={onClose}
-            className="text-sm text-gray-500 hover:text-gray-800"
+            className="rounded-lg px-2 py-1 border border-neutral-300 hover:bg-neutral-50 text-sm"
           >
             閉じる
           </button>
         </div>
 
-        <div className="flex flex-1 overflow-hidden">
-          {/* 左側：大分類リスト */}
-          <div className="w-1/3 border-r overflow-y-auto">
-            {JOB_CATEGORY_TREE.map((large) => {
-              const isActive = large.id === activeLargeId;
-              const isChecked = selectedLargeIds.has(large.id);
-              const hasAnySmallSelected = large.smallCategories.some((s) =>
-                selectedSmallIds.has(s.id)
-              );
-
-              return (
-                <button
-                  key={large.id}
-                  type="button"
-                  onClick={() => setActiveLargeId(large.id)}
-                  className={[
-                    "flex w-full items-center justify-between px-3 py-2 text-sm text-left",
-                    isActive ? "bg-blue-50 font-semibold" : "hover:bg-gray-50",
-                  ].join(" ")}
-                >
-                  <span className="flex items-center gap-2">
+        {/* 本体：左＝大分類 / 右＝小分類 */}
+        <div className="grid grid-cols-12 gap-4 p-4">
+          {/* 左：大分類（独立スクロール） */}
+          <div className="col-span-4">
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-sm inline-flex items-center">
+                <input
+                  type="checkbox"
+                  className="mr-2"
+                  checked={allLarge}
+                  onChange={(e) => toggleAllLarge(e.target.checked)}
+                />
+                大分類 すべて選択
+              </label>
+            </div>
+            <div className="rounded-xl border border-neutral-200 divide-y divide-neutral-200 max-h-[520px] overflow-auto">
+              {JOB_LARGE.map((lg) => {
+                const checked = L.includes(lg);
+                const active = rightGroup === lg;
+                return (
+                  <div
+                    key={lg}
+                    onClick={() => setActiveL(lg)}
+                    className={`flex items-center justify-between px-3 py-2 cursor-pointer ${
+                      active ? "bg-neutral-100" : "bg-white"
+                    }`}
+                  >
+                    <div className="text-sm font-medium">{lg}</div>
                     <input
                       type="checkbox"
-                      className="h-4 w-4"
-                      checked={isChecked}
-                      onChange={(e) =>
-                        handleToggleLarge(large.id, e.target.checked)
-                      }
-                      onClick={(e) => e.stopPropagation()} // 行クリックと分離
+                      checked={checked}
+                      onChange={() => toggleLarge(lg)}
+                      onClick={(e) => e.stopPropagation()}
                     />
-                    {large.name}
-                  </span>
-                  {hasAnySmallSelected && (
-                    <span className="rounded bg-blue-100 px-2 text-xs text-blue-700">
-                      選択中
-                    </span>
-                  )}
-                </button>
-              );
-            })}
+                  </div>
+                );
+              })}
+            </div>
           </div>
 
-          {/* 右側：小分類リスト */}
-          <div className="w-2/3 overflow-y-auto px-4 py-3">
-            {activeLarge ? (
-              <>
-                <h3 className="mb-3 text-base font-semibold">
-                  {activeLarge.name}
-                </h3>
-                <div className="space-y-2">
-                  {activeLarge.smallCategories.map(
-                    (small: JobSmallCategory) => {
-                      const checked = selectedSmallIds.has(small.id);
-                      return (
-                        <label
-                          key={small.id}
-                          className="flex cursor-pointer items-center gap-2 text-sm"
-                        >
-                          <input
-                            type="checkbox"
-                            className="h-4 w-4"
-                            checked={checked}
-                            onChange={(e) =>
-                              handleToggleSmall(small.id, e.target.checked)
-                            }
-                          />
-                          <span>{small.name}</span>
-                        </label>
-                      );
-                    }
-                  )}
-                  {activeLarge.smallCategories.length === 0 && (
-                    <p className="text-sm text-gray-500">
-                      この大分類には小分類が設定されていません。
-                    </p>
-                  )}
-                </div>
-              </>
-            ) : (
-              <p className="text-sm text-gray-500">
-                大分類が選択されていません。
-              </p>
-            )}
+          {/* 右：小分類（独立スクロール、アクティブ大分類のみ） */}
+          <div className="col-span-8">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-sm font-semibold text-neutral-800">
+                小分類（{rightGroup}）
+              </div>
+              <label className="text-sm inline-flex items-center">
+                <input
+                  type="checkbox"
+                  className="mr-2"
+                  checked={activeAllSmall}
+                  onChange={(e) => toggleActiveAllSmall(e.target.checked)}
+                />
+                表示中の小分類をすべて選択/解除
+              </label>
+            </div>
+
+            <div className="rounded-xl border border-neutral-200 p-3 max-h-[520px] overflow-auto">
+              <div className="grid grid-cols-2 gap-2">
+                {(JOB_CATEGORIES[rightGroup] || []).map((sm) => (
+                  <label key={sm} className="inline-flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={SKeys.has(enc(rightGroup, sm))}
+                      onChange={() => toggleSmall(sm)}
+                    />
+                    <span className="text-sm">{sm}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
           </div>
         </div>
 
         {/* フッター */}
-        <div className="flex justify-end gap-2 border-t px-4 py-3">
+        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-neutral-200">
           <button
-            type="button"
-            className="rounded border px-4 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
-            onClick={onClose}
+            onClick={handleClear}
+            className="rounded-lg px-3 py-1 border border-neutral-300 text-sm hover:bg-neutral-50"
           >
-            キャンセル
+            クリア
           </button>
           <button
-            type="button"
-            className="rounded bg-blue-600 px-4 py-1.5 text-sm font-semibold text-white hover:bg-blue-700"
             onClick={handleApply}
+            className="rounded-lg px-3 py-1 border border-neutral-300 text-sm hover:bg-neutral-50"
           >
-            この条件で絞り込む
+            適用して閉じる
           </button>
         </div>
       </div>
