@@ -39,6 +39,10 @@ type SiteStats = {
   ageLayers: ManualLayerCount[];
   empLayers: ManualLayerCount[];
   salaryLayers: ManualLayerCount[];
+  /** サイト固有のデバッグ情報（任意） */
+  debugInfo?: {
+    lines: string[];
+  };
 };
 
 /** job_board_mappings テーブル行の型（必要な部分だけ） */
@@ -236,15 +240,31 @@ function resolveExternalJobCodes(
  * - URL 生成＆HTML 解析は server/job-boards/mynavi.ts 側に委譲
  * - ここでは「この条件の求人数」の総件数だけ受け取り、
  *   年齢層 / 雇用形態 / 年収帯 は「すべて」のみ埋める
+ * - あわせて、取得元（モーダル or 全体件数）などのデバッグ情報も保持する
  */
 async function fetchMynaviStats(cond: ManualCondition): Promise<SiteStats> {
-  const total = await fetchMynaviJobsCount(cond);
+  const result = await fetchMynaviJobsCount(cond);
+  const total = result.total;
+
+  const debugLines: string[] = [];
+  debugLines.push(
+    [
+      `mynavi-detail`,
+      `url=${result.url}`,
+      `prefecture=${cond.prefecture ?? "（指定なし）"}`,
+      `prefCode=${result.prefCode ?? "（なし）"}`,
+      `source=${result.source}`,
+      `modalCount=${result.modalCount ?? "null"}`,
+      `headerCount=${result.headerCount ?? "null"}`,
+    ].join(" / ")
+  );
 
   return {
     jobsTotal: total,
     ageLayers: buildAllOnlyLayers(AGE_BANDS, total),
     empLayers: buildAllOnlyLayers(EMP_TYPES, total),
     salaryLayers: buildAllOnlyLayers(SALARY_BANDS, total),
+    debugInfo: { lines: debugLines },
   };
 }
 
@@ -334,8 +354,24 @@ export async function POST(req: Request) {
           internalSmall: mapped.small,
         };
 
-        // まずはマッピング後のコードで取得
+        // まずはマッピング後のコードで取得（primary）
         let stats = await fetchStatsForSite(cond);
+
+        const baseInfo = `[${base.siteKey}] internalLarge=${
+          base.internalLarge ?? "-"
+        } → externalLarge=${mapped.large ?? "-"} / internalSmall=${
+          base.internalSmall ?? "-"
+        } → externalSmall=${mapped.small ?? "-"} / prefecture=${
+          base.prefecture ?? "（指定なし）"
+        }`;
+
+        const pushDebugInfo = (tag: string, s: SiteStats) => {
+          if (s.debugInfo?.lines?.length) {
+            for (const line of s.debugInfo.lines) {
+              debugLogs.push(`[${base.siteKey}] ${tag} ${line}`);
+            }
+          }
+        };
 
         // 件数が null の場合、internal 値での fallback も試す（マイナビ / doda 対象）
         if (
@@ -346,16 +382,14 @@ export async function POST(req: Request) {
           const fallbackStats = await fetchStatsForSite(fallbackCond);
 
           debugLogs.push(
-            `[${base.siteKey}] fallback試行 / internalLarge=${
-              base.internalLarge ?? "-"
-            } → externalLarge=${mapped.large ?? "-"} / internalSmall=${
-              base.internalSmall ?? "-"
-            } → externalSmall=${mapped.small ?? "-"} / prefecture=${
-              base.prefecture ?? "（指定なし）"
-            } / primary=${String(stats.jobsTotal)} / fallback=${String(
-              fallbackStats.jobsTotal
-            )}`
+            `${baseInfo} / primary=${String(
+              stats.jobsTotal
+            )} / fallback=${String(fallbackStats.jobsTotal)}`
           );
+
+          // primary / fallback 両方の詳細ログ
+          pushDebugInfo("primary-detail", stats);
+          pushDebugInfo("fallback-detail", fallbackStats);
 
           // fallback で取れた数値があればそちらを採用
           if (typeof fallbackStats.jobsTotal === "number") {
@@ -363,15 +397,9 @@ export async function POST(req: Request) {
             cond = fallbackCond;
           }
         } else {
-          debugLogs.push(
-            `[${base.siteKey}] / internalLarge=${
-              base.internalLarge ?? "-"
-            } → externalLarge=${mapped.large ?? "-"} / internalSmall=${
-              base.internalSmall ?? "-"
-            } → externalSmall=${mapped.small ?? "-"} / prefecture=${
-              base.prefecture ?? "（指定なし）"
-            } / jobs_total=${String(stats.jobsTotal)}`
-          );
+          debugLogs.push(`${baseInfo} / jobs_total=${String(stats.jobsTotal)}`);
+          // primary の詳細ログ
+          pushDebugInfo("primary-detail", stats);
         }
 
         return {

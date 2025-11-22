@@ -291,16 +291,35 @@ function buildMynaviJobQueryParams(cond: ManualCondition): URLSearchParams {
   return params;
 }
 
+/** マイナビ件数取得のデバッグ用構造 */
+export type MynaviJobsCountResult = {
+  /** 最終的に返した件数（null の場合は取得失敗） */
+  total: number | null;
+  /** どこから取れたか: modal=勤務地モーダル / header=ページ上部 / none=取得失敗 */
+  source: "modal" | "header" | "none";
+  /** 実際に叩いた URL */
+  url: string;
+  /** 使用した P コード（例: P13） */
+  prefCode: string | null;
+  /** モーダルから読めた件数（null の場合はヒットなし） */
+  modalCount: number | null;
+  /** ページ上部（全体件数）から読めた件数（null の場合はヒットなし） */
+  headerCount: number | null;
+};
+
 /**
  * マイナビの検索件数を取得するメイン関数
  *
  * - 職種条件のみ付けて一覧を開く
  * - 都道府県指定がある場合: 「勤務地を選ぶ」モーダルの都道府県横の labelNumber を返す
  * - 都道府県指定なし: 一覧上部の「条件に合う求人 ○○件」などから全体件数を返す
+ *
+ * ※ 以前は number | null を返していたが、
+ *    デバッグのため取得元などのメタ情報も返すように拡張している。
  */
 export async function fetchMynaviJobsCount(
   cond: ManualCondition
-): Promise<number | null> {
+): Promise<MynaviJobsCountResult> {
   // ★ 実際の画面と同じ値に合わせる（ユーザー指定のURL）
   //   https://tenshoku.mynavi.jp/list/?jobsearchType=14&searchType=18
   const jobsearchType = "14";
@@ -315,6 +334,10 @@ export async function fetchMynaviJobsCount(
   const controller = new AbortController();
   const timeoutMs = 15000;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  const prefCode = getMynaviPrefectureCode(cond);
+  let modalCount: number | null = null;
+  let headerCount: number | null = null;
 
   try {
     const res = await fetch(url, {
@@ -331,39 +354,67 @@ export async function fetchMynaviJobsCount(
       console.error("mynavi list fetch failed", res.status, res.statusText, {
         url,
       });
-      return null;
+      return {
+        total: null,
+        source: "none",
+        url,
+        prefCode,
+        modalCount: null,
+        headerCount: null,
+      };
     }
 
     const html = await res.text();
 
-    const prefCode = getMynaviPrefectureCode(cond);
-
+    // 都道府県指定あり: モーダル → 取れなければヘッダー
     if (prefCode || cond.prefecture) {
-      // ✅ 都道府県指定がある場合は、まず「勤務地モーダルの都道府県横の数字」を強制的に取りにいく
-      const countFromModal = parseMynaviPrefectureCountFromModal(
+      modalCount = parseMynaviPrefectureCountFromModal(
         html,
         prefCode,
         cond.prefecture ?? null
       );
-      if (countFromModal != null) {
-        return countFromModal;
+      if (modalCount != null) {
+        return {
+          total: modalCount,
+          source: "modal",
+          url,
+          prefCode,
+          modalCount,
+          headerCount: null,
+        };
       }
 
-      // どうしてもモーダルの数字が拾えない場合の最後の保険として、
-      // ページ上部の全体件数を返す（≒ UI とは少し違うが数値ゼロよりはマシ）
-      const fallback = parseMynaviJobsCount(html);
-      if (fallback != null) {
-        return fallback;
-      }
-
-      return null;
+      headerCount = parseMynaviJobsCount(html);
+      return {
+        total: headerCount,
+        source: headerCount != null ? "header" : "none",
+        url,
+        prefCode,
+        modalCount,
+        headerCount,
+      };
     }
 
-    // ✅ 都道府県指定なしのときだけ、全体件数としてヘッダーの数字を使う
-    return parseMynaviJobsCount(html);
+    // 都道府県指定なし: 全体件数としてヘッダーの数字を使う
+    headerCount = parseMynaviJobsCount(html);
+    return {
+      total: headerCount,
+      source: headerCount != null ? "header" : "none",
+      url,
+      prefCode: null,
+      modalCount: null,
+      headerCount,
+    };
   } catch (err) {
     console.error("mynavi fetch error", err, { url });
-    return null;
+    return {
+      total: null,
+      source: "none",
+      url,
+      prefCode,
+      modalCount,
+      headerCount,
+    };
   } finally {
     clearTimeout(timer);
   }
