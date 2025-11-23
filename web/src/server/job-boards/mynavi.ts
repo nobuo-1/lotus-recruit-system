@@ -17,10 +17,14 @@ function safeParseCount(raw: string | undefined | null): number | null {
  * マイナビの検索結果ページ HTML から
  * 「条件に合う求人 ○○件を検索する」や「全○○件中」の ○○件 を抜き出す
  *
- * ※ 都道府県が未指定のときだけ total に採用するが、
- *    都道府県指定あり時もログ用に呼ばれる。
+ * ※ 都道府県の有無に関係なく、「その URL に表示されている検索結果件数」を返す
  */
 export function parseMynaviJobsCount(html: string): number | null {
+  // 0. <meta name="description" content="…検索結果一覧44,601件！…">
+  const m0 = html.match(/検索結果一覧[\s　]*([\d,]+)[\s　]*件/);
+  const n0 = safeParseCount(m0?.[1]);
+  if (n0 != null) return n0;
+
   // ① <span class="js__searchRecruit--count">○○</span>
   const m1 = html.match(
     /<span[^>]*class=["'][^"']*js__searchRecruit--count[^"']*["'][^>]*>\s*([\d,]+)\s*<\/span>/i
@@ -29,7 +33,6 @@ export function parseMynaviJobsCount(html: string): number | null {
   if (n1 != null) return n1;
 
   // ② 「条件に合う求人  44601 件 を検索する」
-  //    ※ 「件」を挟んで前後にスペースが入ってもOKにする
   const m2 = html.match(
     /条件に合う求人[\s　]*([\d,]+)[\s　]*件[\s　]*を検索する/
   );
@@ -42,20 +45,25 @@ export function parseMynaviJobsCount(html: string): number | null {
   if (n3 != null) return n3;
 
   // ④ 「該当の求人 44601 件」ブロック
-  //    「該当の求人」〜 数字 〜 「件」の間にタグや改行が入ってもよいように緩めにマッチ
   const m4 = html.match(/該当の求人[\s\S]{0,150}?([\d,]+)[\s\S]{0,20}?件/);
   const n4 = safeParseCount(m4?.[1]);
   if (n4 != null) return n4;
 
+  // ⑤ かなり緩い fallback：「求人」「該当」「検索結果」付近の「○○件」
+  const m5 = html.match(
+    /(検索結果|該当の求人|条件に合う求人)[\s\S]{0,80}?([\d,]+)\s*件/
+  );
+  const n5 = safeParseCount(m5?.[2]);
+  if (n5 != null) return n5;
+
   return null;
 }
 
-/**
- * Pコード（P13 など） → 地域コード（data-large-cd="04" など）の対応
- *
- * 「勤務地を選ぶ」モーダルで左側の地域タブ（北海道 / 東北 / … / 首都圏 など）を
- * クリックするために使用する。
- */
+/** =========================
+ * 都道府県関連ヘルパー
+ * ========================= */
+
+/** Pコード（P13 など） → 地域コード（data-large-cd="04" など）の対応 */
 const PREF_CODE_TO_AREA_LARGE: Record<string, string> = {
   P01: "01", // 北海道
   P02: "02",
@@ -116,91 +124,29 @@ const PREF_CODE_TO_AREA_LARGE: Record<string, string> = {
 };
 
 /**
- * 「勤務地を選ぶ」モーダル内の
- *   ・data-middle-cd="P13" 付近
- *   ・name/id="mcatareaP13" 付近
- *   ・「東京都 / 東京」などのテキスト付近
- * にある <span class="labelNumber">○○件</span> を拾う。
+ * PREF_CODE_TO_AREA_LARGE に対応する URL 上のエリアスラッグ
  *
- * ※ こちらは「モーダル HTML が最初から埋め込まれている場合」用の
- *   フォールバック関数で、基本的な取得方法は
- *   Playwright で画面を開いてから DOM から読む（後述）ように変更している。
+ * 例：
+ *   areaLarge=04 → /shutoken/list/p13/
+ *   areaLarge=08 → /tokai/list/p23/
  */
-function parseMynaviPrefectureCountFromModal(
-  html: string,
-  prefCode: string | null,
-  rawPrefName?: string | null
-): number | null {
-  // 1. data-middle-cd="P13" 〜 labelNumber
-  if (prefCode) {
-    const prefEscaped = prefCode.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
+const AREA_LARGE_TO_SLUG: Record<string, string> = {
+  "01": "hokkaido",
+  "02": "tohoku",
+  "03": "kanto",
+  "04": "shutoken",
+  "08": "tokai",
+  "09": "kansai",
+  "10": "chugoku",
+  "11": "shikoku",
+  "12": "kyushu",
+  "14": "hokuriku",
+  "15": "koshinetsu",
+};
 
-    const reMiddle = new RegExp(
-      `data-middle-cd=["']${prefEscaped}["'][\\s\\S]{0,400}?<span[^>]*class=["'][^"']*labelNumber[^"']*["'][^>]*>\\s*([\\d,]+)\\s*<\\/span>`,
-      "i"
-    );
-    const mMiddle = html.match(reMiddle);
-    const nMiddle = safeParseCount(mMiddle?.[1]);
-    if (nMiddle != null) return nMiddle;
-
-    // 2. name/id="mcatareaP13" 〜 labelNumber（保険）
-    const reInput = new RegExp(
-      `(?:name|id)=["']mcatarea${prefEscaped}["'][^>]*>[\\s\\S]{0,200}?<span[^>]*class=["'][^"']*labelNumber[^"']*["'][^>]*>\\s*([\\d,]+)\\s*<\\/span>`,
-      "i"
-    );
-    const mInput = html.match(reInput);
-    const nInput = safeParseCount(mInput?.[1]);
-    if (nInput != null) return nInput;
-
-    // 3. 地域ブロック（data-large-cd="xx"）が取れる場合は、その中だけを対象に再検索（ゆるめ）
-    const upperPref = prefCode.toUpperCase();
-    const areaLarge = PREF_CODE_TO_AREA_LARGE[upperPref];
-    if (areaLarge) {
-      const areaEscaped = areaLarge.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
-      const reAreaBlock = new RegExp(
-        `<div[^>]*class=["'][^"']*js__selectCondition--large[^"']*["'][^>]*data-large-cd=["']${areaEscaped}["'][^>]*>[\\s\\S]*?<\\/div>`,
-        "i"
-      );
-      const areaMatch = html.match(reAreaBlock);
-      if (areaMatch?.[0]) {
-        const areaHtml = areaMatch[0];
-        const mAreaMiddle = areaHtml.match(
-          new RegExp(
-            `data-middle-cd=["']${prefEscaped}["'][\\s\\S]{0,400}?<span[^>]*class=["'][^"']*labelNumber[^"']*["'][^>]*>\\s*([\\d,]+)\\s*<\\/span>`,
-            "i"
-          )
-        );
-        const nArea = safeParseCount(mAreaMiddle?.[1]);
-        if (nArea != null) return nArea;
-      }
-    }
-  }
-
-  // 4. 都道府県名ベースでのゆるい検索（東京都 / 東京 など）
-  const prefName = rawPrefName?.trim();
-  if (prefName) {
-    const baseName =
-      /[都道府県]$/.test(prefName) && prefName.length > 1
-        ? prefName.slice(0, -1)
-        : prefName;
-
-    const nameEscaped = prefName.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
-    const baseEscaped =
-      baseName === prefName
-        ? nameEscaped
-        : baseName.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
-
-    const reName = new RegExp(
-      `(${nameEscaped}|${baseEscaped})[\\s\\S]{0,200}?<span[^>]*class=["'][^"']*labelNumber[^"']*["'][^>]*>\\s*([\\d,]+)\\s*<\\/span>`,
-      "i"
-    );
-    const mName = html.match(reName);
-    const nName = safeParseCount(mName?.[2]);
-    if (nName != null) return nName;
-  }
-
-  return null;
-}
+/** 47都道府県（海外除く）の path 部分 */
+const ALL_PREF_PATH =
+  "p01+p02+p03+p04+p05+p06+p07+p08+p09+p10+p11+p12+p13+p14+p15+p19+p20+p16+p17+p18+p21+p22+p23+p24+p25+p26+p27+p28+p29+p30+p31+p32+p33+p34+p35+p36+p37+p38+p39+p40+p41+p42+p43+p44+p45+p46+p47";
 
 /** =========================
  * 都道府県名 → マイナビ P コード対応
@@ -280,6 +226,14 @@ function getMynaviPrefCodeFromName(name: string): string | null {
   return mapped ?? null;
 }
 
+/** Pコードからエリアスラッグ（shutoken, tokai など）を取得 */
+function getAreaSlugFromPrefCode(prefCode: string): string | null {
+  const upper = prefCode.toUpperCase();
+  const areaLarge = PREF_CODE_TO_AREA_LARGE[upper];
+  if (!areaLarge) return null;
+  return AREA_LARGE_TO_SLUG[areaLarge] ?? null;
+}
+
 /**
  * internalLarge / internalSmall から
  * マイナビの「職種」用クエリパラメータを組み立てる。
@@ -308,13 +262,13 @@ function buildMynaviJobQueryParams(cond: ManualCondition): URLSearchParams {
 export type MynaviJobsCountResult = {
   /** 最終的に返した件数（null の場合は取得失敗） */
   total: number | null;
-  /** どこから取れたか: modal=勤務地モーダル / header=ページ上部 / none=取得失敗 */
-  source: "modal" | "header" | "none";
+  /** どこから取れたか: header=ページ上部（meta 含む） / none=取得失敗 */
+  source: "header" | "none";
   /** 実際に叩いた URL */
   url: string;
   /** 使用した P コード（例: P13） */
   prefCode: string | null;
-  /** モーダルから読めた件数（null の場合はヒットなし） */
+  /** モーダル起点は使わないので常に null（互換用） */
   modalCount: number | null;
   /** ページ上部（全体件数）から読めた件数（null の場合はヒットなし） */
   headerCount: number | null;
@@ -322,337 +276,69 @@ export type MynaviJobsCountResult = {
 
 const JOBSEARCH_TYPE = "14";
 const SEARCH_TYPE = "18";
-const BASE_LIST_URL = "https://tenshoku.mynavi.jp/list/";
-
-/** =========================
- * Playwright を使ったモーダル経由の件数取得
- * ========================= */
+const BASE_LIST_URL = "https://tenshoku.mynavi.jp";
 
 const PLAYWRIGHT_TIMEOUT_MS = 20000;
 
-/**
- * 職種モーダルを開き、「内容を反映する」を押して条件を UI に反映
- * （sr_occ_l_cd / sr_occ_cd はクエリパラメータで渡している前提）
- */
-async function applyJobConditionsViaModal(page: Page): Promise<void> {
-  const jobButton = page.locator(
-    ".searchTable .js__jobCheckbox, .js__jobCheckbox"
-  );
-
-  if (!(await jobButton.count())) {
-    console.warn("[mynavi] job modal button not found");
-    return;
-  }
-
-  await jobButton.first().click();
-
-  const jobModalSelector = "section.modalChoice.js__modal--jobCheckbox";
-  await page.waitForSelector(jobModalSelector, { state: "visible" });
-
-  // 職種チェックボックス群の読み込みを軽く待つ
-  await page.waitForTimeout(300);
-
-  const applyButton = page.locator(
-    `${jobModalSelector} .modalChoice__submit .modalChoice__btn .js__modal--apply`
-  );
-  if (await applyButton.count()) {
-    await applyButton.first().click();
-    await page.waitForLoadState("networkidle");
-    await page.waitForSelector(".searchTable", { state: "visible" });
-  } else {
-    console.warn("[mynavi] job modal apply button not found");
-  }
-}
+/** =========================
+ * URL 組み立て（通常）
+ * ========================= */
 
 /**
- * 1つの都道府県に対して、Playwright 上の勤務地モーダルから labelNumber を拾う
- */
-async function getLabelNumberForPrefOnPage(
-  page: Page,
-  modalSelector: string,
-  prefCode: string,
-  rawPrefName?: string | null
-): Promise<number | null> {
-  let labelText: string | null = null;
-
-  const middleSelector = `${modalSelector} .js__selectCondition--middle[data-middle-cd="${prefCode}"]`;
-  const middle = page.locator(middleSelector);
-
-  if (await middle.count()) {
-    const label = middle
-      .first()
-      .locator(".choiceContent__sectionTitle .labelNumber");
-    if (await label.count()) {
-      labelText = (await label.first().innerText()).trim();
-      console.log("[mynavi] modal label by prefCode", {
-        prefCode,
-        labelText,
-      });
-    }
-  }
-
-  // Pコードで見つからない場合、都道府県名ベースで拾う（東京都 / 東京 など）
-  if (!labelText && rawPrefName) {
-    const prefName = rawPrefName.trim();
-    const baseName =
-      /[都道府県]$/.test(prefName) && prefName.length > 1
-        ? prefName.slice(0, -1)
-        : prefName;
-
-    const sectionByName = page.locator(
-      `${modalSelector} .js__selectCondition--middle h4.choiceContent__sectionTitle`,
-      { hasText: prefName }
-    );
-
-    if (await sectionByName.count()) {
-      const label = sectionByName.first().locator("span.labelNumber").first();
-      if (await label.count()) {
-        labelText = (await label.innerText()).trim();
-        console.log("[mynavi] modal label by prefName", {
-          prefName,
-          labelText,
-        });
-      }
-    } else if (baseName !== prefName) {
-      const sectionByBase = page.locator(
-        `${modalSelector} .js__selectCondition--middle h4.choiceContent__sectionTitle`,
-        { hasText: baseName }
-      );
-      if (await sectionByBase.count()) {
-        const label = sectionByBase.first().locator("span.labelNumber").first();
-        if (await label.count()) {
-          labelText = (await label.innerText()).trim();
-          console.log("[mynavi] modal label by baseName", {
-            baseName,
-            labelText,
-          });
-        }
-      }
-    }
-  }
-
-  if (!labelText) {
-    console.warn("[mynavi] modal label not found", { prefCode, rawPrefName });
-  }
-
-  return safeParseCount(labelText);
-}
-
-/**
- * 既存：単一都道府県用（Playwright）
- */
-async function fetchMynaviPrefCountViaPlaywright(
-  url: string,
-  prefCode: string,
-  rawPrefName?: string | null
-): Promise<number | null> {
-  let browser: Browser | null = null;
-
-  try {
-    console.log("[mynavi] playwright start", { url, prefCode, rawPrefName });
-
-    browser = await chromium.launch({
-      headless: true,
-    });
-
-    const page: Page = await browser.newPage({
-      viewport: { width: 1280, height: 720 },
-    });
-
-    page.setDefaultTimeout(PLAYWRIGHT_TIMEOUT_MS);
-    await page.setExtraHTTPHeaders({
-      "Accept-Language": "ja-JP,ja;q=0.9,en;q=0.8",
-    });
-
-    await page.goto(url, {
-      waitUntil: "domcontentloaded",
-    });
-
-    await page.waitForSelector(".searchTable", {
-      state: "visible",
-    });
-
-    // 1. 職種モーダルを開いて「内容を反映する」を押し、条件を確定させる
-    await applyJobConditionsViaModal(page);
-
-    // 2. 「勤務地」モーダルを開く
-    const areaButton = page.locator(
-      ".searchTable .js__areaCheckbox, .js__areaCheckbox"
-    );
-    if (!(await areaButton.count())) {
-      console.warn("[mynavi] area modal button not found");
-      return null;
-    }
-
-    await areaButton.first().click();
-
-    const modalSelector = "section.modalChoice.js__modal--areaCheckbox";
-    await page.waitForSelector(modalSelector, { state: "visible" });
-
-    const upperPref = prefCode.toUpperCase();
-    const areaLarge = PREF_CODE_TO_AREA_LARGE[upperPref] ?? null;
-
-    // 3. 地域タブを選択（首都圏 / 関西 など）
-    if (areaLarge) {
-      const areaTab = page.locator(
-        `${modalSelector} .modalChoice__list .modalChoice__item[data-large-cd="${areaLarge}"]`
-      );
-      if (await areaTab.count()) {
-        await areaTab.first().click();
-        await page.waitForTimeout(300);
-      } else {
-        console.warn("[mynavi] area tab not found", { areaLarge });
-      }
-    }
-
-    // 4. 指定都道府県の labelNumber を取得
-    const count = await getLabelNumberForPrefOnPage(
-      page,
-      modalSelector,
-      prefCode,
-      rawPrefName
-    );
-
-    console.log("[mynavi] playwright result", { url, prefCode, count });
-
-    return count;
-  } catch (err) {
-    console.error("mynavi playwright error", err, { url, prefCode });
-    return null;
-  } finally {
-    if (browser) {
-      await browser.close();
-    }
-  }
-}
-
-/**
- * 複数都道府県用：Playwright で一度に複数都道府県の labelNumber を取得
+ * 職種パラメータ + 都道府県の Pコード から
+ * 実際に叩くマイナビの検索 URL を組み立てる。
  *
- * - 地域タブ（data-large-cd）ごとにまとめて処理
- * - 同一地域内の都道府県は、タブ切り替え1回でまとめて読み込む
+ * 例：
+ *   (no pref) → https://tenshoku.mynavi.jp/list/?sr_occ_l_cd=11&sr_occ_cd=11105&...
+ *   (P13)     → https://tenshoku.mynavi.jp/shutoken/list/p13/?sr_occ_l_cd=11&sr_occ_cd=11105&...
  */
-type PrefBatchItem = { name: string; code: string };
-
-async function fetchMynaviPrefCountsViaPlaywrightBatch(
-  url: string,
-  items: PrefBatchItem[]
-): Promise<Record<string, number | null>> {
-  let browser: Browser | null = null;
-  const resultByCode: Record<string, number | null> = {};
-
-  try {
-    console.log("[mynavi] playwright batch start", {
-      url,
-      items,
-    });
-
-    browser = await chromium.launch({
-      headless: true,
-    });
-
-    const page: Page = await browser.newPage({
-      viewport: { width: 1280, height: 720 },
-    });
-
-    page.setDefaultTimeout(PLAYWRIGHT_TIMEOUT_MS);
-    await page.setExtraHTTPHeaders({
-      "Accept-Language": "ja-JP,ja;q=0.9,en;q=0.8",
-    });
-
-    await page.goto(url, {
-      waitUntil: "domcontentloaded",
-    });
-
-    await page.waitForSelector(".searchTable", { state: "visible" });
-
-    // 1. 職種モーダル → 内容を反映する
-    await applyJobConditionsViaModal(page);
-
-    // 2. 「勤務地」モーダルを開く
-    const areaButton = page.locator(
-      ".searchTable .js__areaCheckbox, .js__areaCheckbox"
-    );
-    if (!(await areaButton.count())) {
-      console.warn("[mynavi] batch area modal button not found");
-      for (const item of items) {
-        resultByCode[item.code] = null;
-      }
-      return resultByCode;
-    }
-
-    await areaButton.first().click();
-
-    const modalSelector = "section.modalChoice.js__modal--areaCheckbox";
-    await page.waitForSelector(modalSelector, { state: "visible" });
-
-    // 3. 地域コードごとにグルーピング
-    const groups = new Map<string, PrefBatchItem[]>();
-
-    for (const item of items) {
-      const upper = item.code.toUpperCase();
-      const areaLarge = PREF_CODE_TO_AREA_LARGE[upper] ?? "ALL";
-
-      const arr = groups.get(areaLarge) ?? [];
-      arr.push(item);
-      groups.set(areaLarge, arr);
-    }
-
-    // 4. 地域タブごとに切り替え → 同一地域内の都道府県を一度に読み込む
-    for (const [areaLarge, list] of groups.entries()) {
-      if (areaLarge !== "ALL") {
-        const areaTab = page.locator(
-          `${modalSelector} .modalChoice__list .modalChoice__item[data-large-cd="${areaLarge}"]`
-        );
-        if (await areaTab.count()) {
-          await areaTab.first().click();
-          await page.waitForTimeout(300);
-        } else {
-          console.warn("[mynavi] batch area tab not found", { areaLarge });
-        }
-      }
-
-      for (const item of list) {
-        const count = await getLabelNumberForPrefOnPage(
-          page,
-          modalSelector,
-          item.code,
-          item.name
-        );
-        resultByCode[item.code] = count;
-      }
-    }
-
-    console.log("[mynavi] playwright batch result", resultByCode);
-
-    return resultByCode;
-  } catch (err) {
-    console.error("mynavi playwright batch error", err, { url });
-    for (const item of items) {
-      if (!(item.code in resultByCode)) {
-        resultByCode[item.code] = null;
-      }
-    }
-    return resultByCode;
-  } finally {
-    if (browser) {
-      await browser.close();
-    }
+function buildMynaviListUrl(
+  params: URLSearchParams,
+  prefCode: string | null
+): string {
+  const query = params.toString();
+  if (!prefCode) {
+    return `${BASE_LIST_URL}/list/?${query}`;
   }
+
+  const upper = prefCode.toUpperCase();
+  const lower = upper.toLowerCase(); // p13 など
+  const areaSlug = getAreaSlugFromPrefCode(upper);
+
+  if (areaSlug) {
+    // 例: /shutoken/list/p13/
+    return `${BASE_LIST_URL}/${areaSlug}/list/${lower}/?${query}`;
+  }
+
+  // 最後の保険として /list/p13/ パターンも試す
+  return `${BASE_LIST_URL}/list/${lower}/?${query}`;
+}
+
+/**
+ * 「47都道府県すべて + 職種」の URL
+ *
+ * 例（イメージ）：
+ *   https://tenshoku.mynavi.jp/list/p01+...+p47/?sr_occ_l_cd=11&sr_occ_cd=11105&jobsearchType=14&searchType=18&refLoc=fnc_sra
+ */
+function buildAllPrefUrl(params: URLSearchParams): string {
+  const p = new URLSearchParams(params);
+  p.set("jobsearchType", JOBSEARCH_TYPE);
+  p.set("searchType", SEARCH_TYPE);
+  p.set("refLoc", "fnc_sra");
+  return `${BASE_LIST_URL}/list/${ALL_PREF_PATH}/?${p.toString()}`;
 }
 
 /** =========================
- * 既存 fetch ベースのフォールバック実装
+ * fetch ベースの実装
  * ========================= */
 
 /**
  * マイナビの検索件数を取得するメイン関数（fetch 版）
  *
- * ※ 都道府県指定ありの場合も header の件数は total には使わず、
- *   モーダル HTML からの値のみを total に採用する。
+ * - URL 側に職種＋勤務地の条件をすべて埋め込んでおき、
+ *   そのページに表示されている「検索結果件数」をそのまま読む。
  */
 async function fetchMynaviJobsCountViaFetch(
-  cond: ManualCondition,
   url: string,
   prefCode: string | null
 ): Promise<MynaviJobsCountResult> {
@@ -660,7 +346,6 @@ async function fetchMynaviJobsCountViaFetch(
   const timeoutMs = 15000;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  let modalCount: number | null = null;
   let headerCount: number | null = null;
 
   try {
@@ -692,42 +377,10 @@ async function fetchMynaviJobsCountViaFetch(
 
     const html = await res.text();
 
-    // 都道府県指定あり: モーダルの HTML からのみ取得を試みる
-    if (prefCode || cond.prefecture) {
-      modalCount = parseMynaviPrefectureCountFromModal(
-        html,
-        prefCode,
-        cond.prefecture ?? null
-      );
-
-      // ヘッダーの件数は「都道府県未フィルタの全体件数」の可能性が高いので
-      // ログ用に読みつつ、結果には使わないようにする。
-      headerCount = parseMynaviJobsCount(html);
-
-      if (modalCount == null && headerCount == null) {
-        console.error("mynavi fetch (pref) could not parse counts", {
-          url,
-          prefCode,
-          prefecture: cond.prefecture ?? null,
-          htmlSnippet: html.slice(0, 2000),
-        });
-      }
-
-      return {
-        total: modalCount,
-        source: modalCount != null ? "modal" : "none",
-        url,
-        prefCode,
-        modalCount,
-        headerCount,
-      };
-    }
-
-    // 都道府県指定なし: 全体件数としてヘッダーの数字を使う
     headerCount = parseMynaviJobsCount(html);
 
     if (headerCount == null) {
-      console.error("mynavi fetch (no-pref) could not parse header count", {
+      console.error("mynavi fetch could not parse header count", {
         url,
         htmlSnippet: html.slice(0, 2000),
       });
@@ -737,7 +390,7 @@ async function fetchMynaviJobsCountViaFetch(
       total: headerCount,
       source: headerCount != null ? "header" : "none",
       url,
-      prefCode: null,
+      prefCode,
       modalCount: null,
       headerCount,
     };
@@ -748,11 +401,197 @@ async function fetchMynaviJobsCountViaFetch(
       source: "none",
       url,
       prefCode,
-      modalCount,
+      modalCount: null,
       headerCount,
     };
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/** =========================
+ * Playwright + searchTable 差分ロジック（複数都道府県用）
+ * ========================= */
+
+/** ページ全体から現在の件数を読む */
+async function readMynaviJobsCountFromPage(page: Page): Promise<number | null> {
+  const html = await page.content();
+  return parseMynaviJobsCount(html);
+}
+
+/** 件数が変わるまで待つ（ローディング→反映待ち） */
+async function waitForCountChange(
+  page: Page,
+  prev: number | null
+): Promise<number | null> {
+  const timeoutMs = 15000;
+  const start = Date.now();
+  let last: number | null = prev;
+
+  while (Date.now() - start < timeoutMs) {
+    await page.waitForTimeout(500);
+    const cur = await readMynaviJobsCountFromPage(page);
+    if (cur != null && (prev == null || cur !== prev)) {
+      return cur;
+    }
+    last = cur;
+  }
+
+  return last;
+}
+
+/**
+ * 47都道府県 + 職種 の URL を開き、
+ * searchTable 内の都道府県チェックボックスの ON/OFF 差分から
+ * 各都道府県の件数を取得する。
+ */
+async function fetchMynaviJobsCountViaPlaywrightDiff(
+  condBase: ManualCondition,
+  prefectures: string[]
+): Promise<Record<string, MynaviJobsCountResult>> {
+  const params = buildMynaviJobQueryParams(condBase);
+  const url = buildAllPrefUrl(params);
+
+  const results: Record<string, MynaviJobsCountResult> = {};
+  let browser: Browser | null = null;
+
+  try {
+    console.log("[mynavi] playwright diff start", {
+      url,
+      prefectures,
+    });
+
+    browser = await chromium.launch({
+      headless: true,
+    });
+
+    const page: Page = await browser.newPage({
+      viewport: { width: 1280, height: 720 },
+    });
+
+    page.setDefaultTimeout(PLAYWRIGHT_TIMEOUT_MS);
+    await page.setExtraHTTPHeaders({
+      "Accept-Language": "ja-JP,ja;q=0.9,en;q=0.8",
+    });
+
+    await page.goto(url, {
+      waitUntil: "domcontentloaded",
+    });
+
+    await page.waitForSelector(".searchTable", { state: "visible" });
+
+    // 全47都道府県がチェックされている状態での総件数
+    const totalAll = await readMynaviJobsCountFromPage(page);
+    console.log("[mynavi] playwright diff initial total", {
+      url,
+      totalAll,
+    });
+
+    for (const prefName of prefectures) {
+      const prefCode = getMynaviPrefCodeFromName(prefName);
+      let totalForPref: number | null = null;
+
+      try {
+        // searchTable 内の都道府県チェックボックスを label テキストから取得
+        const label = page
+          .locator(".searchTable label", { hasText: prefName })
+          .first();
+
+        if (!(await label.count())) {
+          console.warn(
+            "[mynavi] playwright diff: pref label not found in searchTable",
+            { prefName }
+          );
+          results[prefName] = {
+            total: null,
+            source: "none",
+            url,
+            prefCode,
+            modalCount: null,
+            headerCount: totalAll,
+          };
+          continue;
+        }
+
+        const checkbox = label.locator('input[type="checkbox"]').first();
+        if (!(await checkbox.count())) {
+          console.warn(
+            "[mynavi] playwright diff: checkbox not found under label",
+            { prefName }
+          );
+          results[prefName] = {
+            total: null,
+            source: "none",
+            url,
+            prefCode,
+            modalCount: null,
+            headerCount: totalAll,
+          };
+          continue;
+        }
+
+        // 念のためチェック状態を整える（全件状態に戻す）
+        let before = await readMynaviJobsCountFromPage(page);
+
+        const isChecked = await checkbox.isChecked();
+        if (!isChecked) {
+          await checkbox.click();
+          before = await waitForCountChange(page, before);
+        }
+
+        // この時点の before が「この職種 × 全47都道府県」の件数になる想定
+        // （前ループからのズレがあっても、ここで再同期する）
+        before = await readMynaviJobsCountFromPage(page);
+
+        // 対象都道府県のチェックを外す
+        await checkbox.click();
+
+        const after = await waitForCountChange(page, before);
+
+        if (
+          typeof before === "number" &&
+          typeof after === "number" &&
+          before >= after
+        ) {
+          totalForPref = before - after;
+        } else {
+          totalForPref = null;
+        }
+
+        console.log("[mynavi] playwright diff pref result", {
+          prefName,
+          before,
+          after,
+          totalForPref,
+        });
+
+        // チェックを戻して、次の都道府県に備える
+        await checkbox.click();
+        await waitForCountChange(page, after);
+      } catch (err) {
+        console.error("mynavi playwright diff per-pref error", err, {
+          prefName,
+        });
+      }
+
+      results[prefName] = {
+        total: totalForPref,
+        source: totalForPref != null ? "header" : "none",
+        url,
+        prefCode,
+        modalCount: null,
+        headerCount: totalAll,
+      };
+    }
+
+    return results;
+  } catch (err) {
+    console.error("mynavi playwright diff error", err, { url, prefectures });
+    return results;
+  } finally {
+    if (browser) {
+      await browser.close();
+    }
   }
 }
 
@@ -767,41 +606,11 @@ export async function fetchMynaviJobsCount(
   params.set("jobsearchType", JOBSEARCH_TYPE);
   params.set("searchType", SEARCH_TYPE);
 
-  const url = `${BASE_LIST_URL}?${params.toString()}`;
-
   const prefCode = getMynaviPrefectureCode(cond);
+  const url = buildMynaviListUrl(params, prefCode);
 
-  // 都道府県指定あり → まず Playwright でモーダルの labelNumber を取りに行く
-  if (prefCode || cond.prefecture) {
-    const code = prefCode ?? null;
-
-    let modalCount: number | null = null;
-
-    if (code) {
-      modalCount = await fetchMynaviPrefCountViaPlaywright(
-        url,
-        code,
-        cond.prefecture ?? null
-      );
-    }
-
-    if (modalCount != null) {
-      return {
-        total: modalCount,
-        source: "modal",
-        url,
-        prefCode: code,
-        modalCount,
-        headerCount: null,
-      };
-    }
-
-    // Playwright で失敗した場合、fetch ベースでフォールバック
-    return fetchMynaviJobsCountViaFetch(cond, url, code);
-  }
-
-  // 都道府県指定なし → fetch + ヘッダーの数字だけで OK
-  return fetchMynaviJobsCountViaFetch(cond, url, null);
+  // 単一都道府県は、差分ロジックを使う必要が薄いので fetch のみ
+  return fetchMynaviJobsCountViaFetch(url, prefCode);
 }
 
 /** =========================
@@ -812,144 +621,73 @@ export async function fetchMynaviJobsCount(
  * 1つの「職種条件（sr_occ_l_cd / sr_occ_cd）」に対して、
  * 複数の都道府県の件数をまとめて取得する。
  *
- * - 職種モーダル：Playwright で「内容を反映する」まで実行
- * - 勤務地モーダル：地域タブを切り替えながら、同一地域の都道府県を一度に読み込む
- * - Playwright 失敗時 or 全件 null のときは 1回の fetch + HTML 解析でフォールバック
+ * 優先：
+ *   1. Playwright で 47都道府県＋職種のページを開き、
+ *      searchTable 内の都道府県チェックボックスの ON/OFF 差分から件数を取得
+ *   2. 失敗した場合は、従来通り「pref ごとに /list/pXX + クエリ」で fetch して HTML 解析
  */
 export async function fetchMynaviJobsCountForPrefectures(
   condBase: ManualCondition,
   prefectures: string[]
 ): Promise<Record<string, MynaviJobsCountResult>> {
+  const results: Record<string, MynaviJobsCountResult> = {};
+
+  const stringPrefs = prefectures.filter(
+    (p): p is string => typeof p === "string" && p.trim().length > 0
+  );
+  if (stringPrefs.length === 0) {
+    return results;
+  }
+
+  // ① Playwright 差分ロジックを優先的に試す
+  try {
+    const diffResults = await fetchMynaviJobsCountViaPlaywrightDiff(
+      condBase,
+      stringPrefs
+    );
+
+    const hasAnyValid = Object.values(diffResults).some(
+      (r) => r && typeof r.total === "number" && !Number.isNaN(r.total)
+    );
+
+    if (hasAnyValid) {
+      return diffResults;
+    }
+
+    console.warn(
+      "[mynavi] playwright diff returned no usable counts; falling back to fetch+HTML parse"
+    );
+  } catch (err) {
+    console.error("mynavi playwright diff outer error", err, {
+      condBase,
+      prefectures,
+    });
+  }
+
+  // ② Playwright が使えない / すべて null → pref ごとに fetch でフォールバック
   const params = buildMynaviJobQueryParams(condBase);
   params.set("jobsearchType", JOBSEARCH_TYPE);
   params.set("searchType", SEARCH_TYPE);
 
-  const url = `${BASE_LIST_URL}?${params.toString()}`;
+  for (const prefName of stringPrefs) {
+    const prefCode = getMynaviPrefCodeFromName(prefName);
 
-  const results: Record<string, MynaviJobsCountResult> = {};
-
-  // prefecture 名 → Pコード 変換
-  const items: PrefBatchItem[] = [];
-  for (const name of prefectures) {
-    const code = getMynaviPrefCodeFromName(name);
-    if (!code) {
-      results[name] = {
+    if (!prefCode) {
+      results[prefName] = {
         total: null,
         source: "none",
-        url,
+        url: `${BASE_LIST_URL}/list/?${params.toString()}`,
         prefCode: null,
         modalCount: null,
         headerCount: null,
       };
       continue;
     }
-    items.push({ name, code });
+
+    const url = buildMynaviListUrl(params, prefCode);
+    const r = await fetchMynaviJobsCountViaFetch(url, prefCode);
+    results[prefName] = r;
   }
 
-  if (items.length === 0) {
-    return results;
-  }
-
-  /** ========================
-   * 1. Playwright バッチで取得
-   * ======================== */
-
-  let countsByCode: Record<string, number | null> | null = null;
-  try {
-    countsByCode = await fetchMynaviPrefCountsViaPlaywrightBatch(url, items);
-  } catch (err) {
-    console.error("mynavi playwright batch error (outer)", err, {
-      url,
-      prefectures,
-    });
-  }
-
-  // Playwright の結果があり、その中に 1つでも有効な数値があればそのまま採用
-  if (countsByCode) {
-    const hasAnyValid = Object.values(countsByCode).some(
-      (v) => typeof v === "number" && !Number.isNaN(v)
-    );
-
-    if (hasAnyValid) {
-      for (const item of items) {
-        const count = countsByCode[item.code] ?? null;
-        results[item.name] = {
-          total: count,
-          source: count != null ? "modal" : "none",
-          url,
-          prefCode: item.code,
-          modalCount: count,
-          headerCount: null,
-        };
-      }
-      return results;
-    } else {
-      console.warn(
-        "[mynavi] playwright batch returned no usable counts; falling back to fetch+HTML parse",
-        { url, prefectures }
-      );
-    }
-  }
-
-  /** ==========================================
-   * 2. Playwright 失敗 or 全件 null → fetch フォールバック
-   * ========================================== */
-
-  const controller = new AbortController();
-  const timeoutMs = 15000;
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const res = await fetch(url, {
-      method: "GET",
-      headers: {
-        "user-agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
-        "accept-language": "ja-JP,ja;q=0.9,en;q=0.8",
-        accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-      },
-      signal: controller.signal,
-    });
-
-    if (!res.ok) {
-      console.error("mynavi list fetch failed (batch)", res.status, {
-        url,
-      });
-      return results;
-    }
-
-    const html = await res.text();
-
-    for (const item of items) {
-      const modalCount = parseMynaviPrefectureCountFromModal(
-        html,
-        item.code,
-        item.name
-      );
-      if (modalCount == null) {
-        console.error("mynavi batch fetch could not parse modal count", {
-          url,
-          prefCode: item.code,
-          name: item.name,
-          htmlSnippet: html.slice(0, 2000),
-        });
-      }
-      results[item.name] = {
-        total: modalCount,
-        source: modalCount != null ? "modal" : "none",
-        url,
-        prefCode: item.code,
-        modalCount,
-        headerCount: null,
-      };
-    }
-
-    return results;
-  } catch (err) {
-    console.error("mynavi fetch batch error", err, { url });
-    return results;
-  } finally {
-    clearTimeout(timer);
-  }
+  return results;
 }
