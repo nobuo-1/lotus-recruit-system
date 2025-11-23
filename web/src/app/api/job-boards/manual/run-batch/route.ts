@@ -12,6 +12,7 @@ import {
 import {
   fetchMynaviJobsCount,
   fetchMynaviJobsCountForPrefectures,
+  type MynaviJobsCountResult,
 } from "@/server/job-boards/mynavi";
 import { fetchDodaJobsCount } from "@/server/job-boards/doda";
 import { supabaseServer } from "@/lib/supabaseServer";
@@ -162,14 +163,6 @@ async function loadJobBoardMappings(
 /**
  * 1つの BaseCondition（internal_large / internal_small）から、
  * job_board_mappings を使ってサイト固有の外部コードに変換する。
- *
- * - internal_small が指定されていれば small 優先でマッピング
- * - internal_small がなく internal_large のみの場合は large 基準でマッピング
- * - マッピングが見つからない場合は元の値をそのまま返す（従来通り）
- *
- * マイナビの場合:
- * - external_small_code には「112+111+126…」のように職種小分類コード群を入れておき、
- *   mynavi.ts 側で "o112+o111+o126…" に変換して URL パスに埋め込む想定
  */
 function resolveExternalJobCodes(
   base: BaseCondition,
@@ -239,8 +232,10 @@ async function fetchMynaviStats(cond: ManualCondition): Promise<SiteStats> {
       `prefecture=${cond.prefecture ?? "（指定なし）"}`,
       `prefCode=${result.prefCode ?? "（なし）"}`,
       `source=${result.source}`,
-      `modalCount=${result.modalCount ?? "null"}`,
       `headerCount=${result.headerCount ?? "null"}`,
+      `httpStatus=${result.httpStatus ?? "n/a"}`,
+      `parseHint=${result.parseHint ?? "unknown"}`,
+      `error=${result.errorMessage ?? "none"}`,
     ].join(" / ")
   );
 
@@ -303,11 +298,35 @@ export async function POST(req: Request) {
       );
     }
 
-    // 職種フィルターに対応する job_board_mappings を事前に読み込む
-    const mappingsBySite = await loadJobBoardMappings(rawSites, body);
-
     // デバッグログを蓄積する配列
     const debugLogs: string[] = [];
+
+    // ========= ワークフロー概要ログ =========
+    debugLogs.push(
+      [
+        "#workflow: start",
+        `sites=${rawSites.join(",")}`,
+        `large=${(body.large ?? []).join(",") || "（未指定）"}`,
+        `small=${(body.small ?? []).join(",") || "（未指定）"}`,
+        `pref=${(body.pref ?? []).join(",") || "（未指定）"}`,
+        `baseConditions=${baseConditions.length}`,
+      ].join(" / ")
+    );
+
+    // 職種フィルターに対応する job_board_mappings を事前に読み込む
+    const mappingsBySite = await loadJobBoardMappings(rawSites, body);
+    const totalMappings = Array.from(mappingsBySite.values()).reduce(
+      (sum, arr) => sum + arr.length,
+      0
+    );
+    debugLogs.push(
+      [
+        "#workflow: mappings loaded",
+        `siteCount=${mappingsBySite.size}`,
+        `rows=${totalMappings}`,
+      ].join(" / ")
+    );
+
     const preview: ManualResultRow[] = [];
 
     /** ===== 1. マイナビ：複数都道府県バッチ処理 ===== */
@@ -337,6 +356,12 @@ export async function POST(req: Request) {
       }
     }
 
+    debugLogs.push(
+      ["#workflow: mynavi groups", `groupCount=${mynaviGroups.size}`].join(
+        " / "
+      )
+    );
+
     // それぞれのマイナビグループについて、複数都道府県をまとめて取得
     for (const group of mynaviGroups.values()) {
       const { base, prefectures } = group;
@@ -360,6 +385,15 @@ export async function POST(req: Request) {
       } → externalLarge=${mapped.large ?? "-"} / internalSmall=${
         base.internalSmall ?? "-"
       } → externalSmall=${mapped.small ?? "-"}`;
+
+      debugLogs.push(
+        [
+          "#workflow: mynavi group start",
+          `internalLarge=${base.internalLarge ?? "-"}`,
+          `internalSmall=${base.internalSmall ?? "-"}`,
+          `prefCount=${stringPrefs.length || 0}`,
+        ].join(" / ")
+      );
 
       // 都道府県指定がない（全国のみ）の場合は単発で取得
       if (stringPrefs.length === 0) {
@@ -387,14 +421,14 @@ export async function POST(req: Request) {
         continue;
       }
 
-      // 都道府県が複数ある場合：pref ごとに URL を組み立てて fetch（Playwright は使わない）
+      // 都道府県が複数ある場合：pref ごとに URL を組み立てて fetch
       const batchResults = await fetchMynaviJobsCountForPrefectures(
         condBase,
         stringPrefs
       );
 
       for (const prefName of stringPrefs) {
-        const r = batchResults[prefName];
+        const r: MynaviJobsCountResult | undefined = batchResults[prefName];
 
         const jobsTotal =
           r && typeof r.total === "number" && !Number.isNaN(r.total)
@@ -415,8 +449,10 @@ export async function POST(req: Request) {
               `prefecture=${prefName}`,
               `prefCode=${r.prefCode ?? "（なし）"}`,
               `source=${r.source}`,
-              `modalCount=${r.modalCount ?? "null"}`,
               `headerCount=${r.headerCount ?? "null"}`,
+              `httpStatus=${r.httpStatus ?? "n/a"}`,
+              `parseHint=${r.parseHint ?? "unknown"}`,
+              `error=${r.errorMessage ?? "none"}`,
             ].join(" / ")
           );
         }
@@ -435,6 +471,12 @@ export async function POST(req: Request) {
 
     const otherConditions = baseConditions.filter(
       (b) => b.siteKey !== "mynavi"
+    );
+
+    debugLogs.push(
+      ["#workflow: other sites", `patterns=${otherConditions.length}`].join(
+        " / "
+      )
     );
 
     for (const base of otherConditions) {
@@ -506,6 +548,8 @@ export async function POST(req: Request) {
       body.saveMode === "history"
         ? "履歴保存は未実装ですが、件数の取得は完了しました。"
         : "プレビューのみ実行しました。";
+
+    debugLogs.push("#workflow: done");
 
     return NextResponse.json({
       ok: true,

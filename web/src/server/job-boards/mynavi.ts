@@ -13,57 +13,80 @@ function safeParseCount(raw: string | undefined | null): number | null {
 }
 
 /**
- * マイナビの検索結果ページ HTML から
- * 「条件に合う求人 ○○件を検索する」や「全○○件中」の ○○件 を抜き出す
+ * HTML から件数を抜き出す内部処理
  *
- * ※ 都道府県の有無に関係なく、「その URL に表示されている検索結果件数」を返す
- *
- * ※ 優先順位:
- *   1. <span class="js__searchRecruit--count">○○</span>
- *   2. 「条件に合う求人 ○○ 件 を検索する」
- *   3. 「全 ○○ 件中」
- *   4. 「検索結果一覧 ○○ 件」
- *   5. 「求人情報 ○○ 件」
- *   6. それ以外（検索結果 / 該当の求人 / 条件に合う求人 付近の ○○件）
+ * - どのパターンで拾えたかを hint として返す
  */
-export function parseMynaviJobsCount(html: string): number | null {
+function parseMynaviJobsCountInternal(html: string): {
+  count: number | null;
+  hint: string | null;
+} {
   // ① <span class="js__searchRecruit--count">○○</span>
-  const m1 = html.match(
-    /<span[^>]*class=["'][^"']*js__searchRecruit--count[^"']*["'][^>]*>\s*([\d,]+)\s*<\/span>/i
-  );
-  const n1 = safeParseCount(m1?.[1]);
-  if (n1 != null) return n1;
+  {
+    const m = html.match(
+      /<span[^>]*class=["'][^"']*js__searchRecruit--count[^"']*["'][^>]*>\s*([\d,]+)\s*<\/span>/i
+    );
+    const n = safeParseCount(m?.[1]);
+    if (n != null) return { count: n, hint: "span.js__searchRecruit--count" };
+  }
 
   // ② 「条件に合う求人  44601 件 を検索する」
-  const m2 = html.match(
-    /条件に合う求人[\s　]*([\d,]+)[\s　]*件[\s　]*を検索する/
-  );
-  const n2 = safeParseCount(m2?.[1]);
-  if (n2 != null) return n2;
+  {
+    const m = html.match(
+      /条件に合う求人[\s　]*([\d,]+)[\s　]*件[\s　]*を検索する/
+    );
+    const n = safeParseCount(m?.[1]);
+    if (n != null) return { count: n, hint: "text:条件に合う求人…を検索する" };
+  }
 
   // ③ 「1件〜50件（全44601件中）」の「全44601件中」
-  const m3 = html.match(/全[\s　]*([\d,]+)[\s　]*件中/);
-  const n3 = safeParseCount(m3?.[1]);
-  if (n3 != null) return n3;
+  {
+    const m = html.match(/全[\s　]*([\d,]+)[\s　]*件中/);
+    const n = safeParseCount(m?.[1]);
+    if (n != null) return { count: n, hint: "text:全○件中" };
+  }
 
-  // ④ <meta name="description" content="…検索結果一覧44,601件！…">
-  const m4 = html.match(/検索結果一覧[\s　]*([\d,]+)[\s　]*件/);
-  const n4 = safeParseCount(m4?.[1]);
-  if (n4 != null) return n4;
+  // ④ <meta name="description" content="…11,269件！…"> から拾う（最優先のフォールバック）
+  {
+    const m = html.match(
+      /<meta[^>]+name=["']description["'][^>]+content=["'][^"'>]*?([\d,]+)\s*件[^"'>]*["'][^>]*>/i
+    );
+    const n = safeParseCount(m?.[1]);
+    if (n != null) return { count: n, hint: "meta[name=description]" };
+  }
 
-  // ⑤ <meta name="description" content="…求人情報136,982件！…">
-  const m5 = html.match(/求人情報[\s　]*([\d,]+)[\s　]*件/);
-  const n5 = safeParseCount(m5?.[1]);
-  if (n5 != null) return n5;
+  // ⑤ 「検索結果一覧44,601件！」のようなテキスト
+  {
+    const m = html.match(/検索結果一覧[\s　]*([\d,]+)[\s　]*件/);
+    const n = safeParseCount(m?.[1]);
+    if (n != null) return { count: n, hint: "text:検索結果一覧○件" };
+  }
 
-  // ⑥ かなり緩い fallback：「求人」「該当」「検索結果」付近の「○○件」
-  const m6 = html.match(
-    /(検索結果|該当の求人|条件に合う求人)[\s\S]{0,80}?([\d,]+)\s*件/
-  );
-  const n6 = safeParseCount(m6?.[2]);
-  if (n6 != null) return n6;
+  // ⑥ 「求人情報136,982件！」のようなテキスト
+  {
+    const m = html.match(/求人情報[\s　]*([\d,]+)[\s　]*件/);
+    const n = safeParseCount(m?.[1]);
+    if (n != null) return { count: n, hint: "text:求人情報○件" };
+  }
 
-  return null;
+  // ⑦ かなり緩い fallback：「求人」「該当」「検索結果」付近の「○○件」
+  {
+    const m = html.match(
+      /(検索結果|該当の求人|条件に合う求人)[\s\S]{0,80}?([\d,]+)\s*件/
+    );
+    const n = safeParseCount(m?.[2]);
+    if (n != null) return { count: n, hint: "text:ゆるい近傍マッチ" };
+  }
+
+  return { count: null, hint: null };
+}
+
+/**
+ * 旧来の公開 API: HTML 全体から件数だけを返す
+ * （他のファイル互換用）
+ */
+export function parseMynaviJobsCount(html: string): number | null {
+  return parseMynaviJobsCountInternal(html).count;
 }
 
 /** =========================
@@ -203,6 +226,12 @@ export type MynaviJobsCountResult = {
   modalCount: number | null;
   /** ページ上部（全体件数）から読めた件数（null の場合はヒットなし） */
   headerCount: number | null;
+  /** HTTP ステータスコード（fetch結果） */
+  httpStatus?: number | null;
+  /** 件数パース時に使用したパターンのヒント */
+  parseHint?: string | null;
+  /** 失敗時のメッセージ（成功時は null） */
+  errorMessage?: string | null;
 };
 
 const JOBSEARCH_TYPE = "14";
@@ -216,17 +245,6 @@ const BASE_LIST_URL = "https://tenshoku.mynavi.jp";
 /**
  * 職種（external_small_code）+ 都道府県 Pコード から
  * 実際に叩くマイナビの検索 URL を組み立てる。
- *
- * 仕様:
- * - 職種は external_small_code から生成した jobPath (例: "o112+o111+o126")
- * - 都道府県は path 部分の "pXX" または ALL_PREF_PATH で指定
- *
- * 例:
- *   (pref=P13, jobPath="o112+o111") →
- *     https://tenshoku.mynavi.jp/list/p13/o112+o111/?jobsearchType=14&searchType=18&refLoc=fnc_sra
- *
- *   (pref=null, jobPath="o112+o111") →
- *     https://tenshoku.mynavi.jp/list/p01+...+p47/o112+o111/?jobsearchType=14&searchType=18&refLoc=fnc_sra
  */
 function buildMynaviListUrl(
   cond: ManualCondition,
@@ -281,9 +299,34 @@ async function fetchMynaviJobsCountViaFetch(
       signal: controller.signal,
     });
 
+    const httpStatus = res.status;
+
     if (!res.ok) {
-      console.error("mynavi list fetch failed", res.status, res.statusText, {
+      const msg = `mynavi list fetch failed: ${res.status} ${res.statusText}`;
+      console.error(msg, { url });
+      return {
+        total: null,
+        source: "none",
         url,
+        prefCode,
+        modalCount: null,
+        headerCount: null,
+        httpStatus,
+        parseHint: null,
+        errorMessage: msg,
+      };
+    }
+
+    const html = await res.text();
+
+    const { count, hint } = parseMynaviJobsCountInternal(html);
+    headerCount = count;
+
+    if (headerCount == null) {
+      const msg = "mynavi fetch could not parse header count";
+      console.error(msg, {
+        url,
+        htmlSnippet: html.slice(0, 2000),
       });
       return {
         total: null,
@@ -292,29 +335,25 @@ async function fetchMynaviJobsCountViaFetch(
         prefCode,
         modalCount: null,
         headerCount: null,
+        httpStatus,
+        parseHint: hint,
+        errorMessage: msg,
       };
-    }
-
-    const html = await res.text();
-
-    headerCount = parseMynaviJobsCount(html);
-
-    if (headerCount == null) {
-      console.error("mynavi fetch could not parse header count", {
-        url,
-        htmlSnippet: html.slice(0, 2000),
-      });
     }
 
     return {
       total: headerCount,
-      source: headerCount != null ? "header" : "none",
+      source: "header",
       url,
       prefCode,
       modalCount: null,
       headerCount,
+      httpStatus,
+      parseHint: hint,
+      errorMessage: null,
     };
-  } catch (err) {
+  } catch (err: any) {
+    const msg = `mynavi fetch error: ${err?.message ?? String(err)}`;
     console.error("mynavi fetch error", err, { url });
     return {
       total: null,
@@ -323,6 +362,9 @@ async function fetchMynaviJobsCountViaFetch(
       prefCode,
       modalCount: null,
       headerCount,
+      httpStatus: null,
+      parseHint: null,
+      errorMessage: msg,
     };
   } finally {
     clearTimeout(timer);
@@ -383,6 +425,9 @@ export async function fetchMynaviJobsCountForPrefectures(
         prefCode: null,
         modalCount: null,
         headerCount: null,
+        httpStatus: null,
+        parseHint: null,
+        errorMessage: "unknown prefecture name",
       };
       continue;
     }
