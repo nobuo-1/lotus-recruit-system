@@ -3,42 +3,49 @@
 import type { ManualCondition } from "./types";
 import { chromium, Browser, Page } from "playwright";
 
+/** ======== 共通ユーティリティ ======== */
+
+/** 数字文字列（カンマ付き）→ number | null */
+function safeParseCount(raw: string | undefined | null): number | null {
+  if (!raw) return null;
+  const n = Number(raw.replace(/,/g, ""));
+  if (Number.isNaN(n)) return null;
+  return n;
+}
+
 /**
  * マイナビの検索結果ページ HTML から
- * 「条件に合う求人 ○○件を検索する」の ○○件 を抜き出す
+ * 「条件に合う求人 ○○件を検索する」や「全○○件中」の ○○件 を抜き出す
  *
- * ※ 都道府県が未指定のときだけ使う（全体件数用フォールバック）。
+ * ※ 都道府県が未指定のときだけ total に採用するが、
+ *    都道府県指定あり時もログ用に呼ばれる。
  */
 export function parseMynaviJobsCount(html: string): number | null {
-  // ① js__searchRecruit--count を最優先
+  // ① <span class="js__searchRecruit--count">○○</span>
   const m1 = html.match(
     /<span[^>]*class=["'][^"']*js__searchRecruit--count[^"']*["'][^>]*>\s*([\d,]+)\s*<\/span>/i
   );
-  if (m1?.[1]) {
-    const n = Number(m1[1].replace(/,/g, ""));
-    if (!Number.isNaN(n)) return n;
-  }
+  const n1 = safeParseCount(m1?.[1]);
+  if (n1 != null) return n1;
 
-  // ② 「条件に合う求人 ○○件を検索する」
-  const m2 = html.match(/条件に合う求人\s*([\d,]+)\s*件を検索する/);
-  if (m2?.[1]) {
-    const n = Number(m2[1].replace(/,/g, ""));
-    if (!Number.isNaN(n)) return n;
-  }
+  // ② 「条件に合う求人  44601 件 を検索する」
+  //    ※ 「件」を挟んで前後にスペースが入ってもOKにする
+  const m2 = html.match(
+    /条件に合う求人[\s　]*([\d,]+)[\s　]*件[\s　]*を検索する/
+  );
+  const n2 = safeParseCount(m2?.[1]);
+  if (n2 != null) return n2;
 
-  // ③ 「該当求人数 ○○件中」
-  const m3 = html.match(/該当求人数\s*([\d,]+)\s*件中/);
-  if (m3?.[1]) {
-    const n = Number(m3[1].replace(/,/g, ""));
-    if (!Number.isNaN(n)) return n;
-  }
+  // ③ 「1件〜50件（全44601件中）」の「全44601件中」
+  const m3 = html.match(/全[\s　]*([\d,]+)[\s　]*件中/);
+  const n3 = safeParseCount(m3?.[1]);
+  if (n3 != null) return n3;
 
-  // ④ 「該当の求人 ○○件」
-  const m4 = html.match(/該当の求人\s*([\d,]+)\s*件/);
-  if (m4?.[1]) {
-    const n = Number(m4[1].replace(/,/g, ""));
-    if (!Number.isNaN(n)) return n;
-  }
+  // ④ 「該当の求人 44601 件」ブロック
+  //    「該当の求人」〜 数字 〜 「件」の間にタグや改行が入ってもよいように緩めにマッチ
+  const m4 = html.match(/該当の求人[\s\S]{0,150}?([\d,]+)[\s\S]{0,20}?件/);
+  const n4 = safeParseCount(m4?.[1]);
+  if (n4 != null) return n4;
 
   return null;
 }
@@ -107,13 +114,6 @@ const PREF_CODE_TO_AREA_LARGE: Record<string, string> = {
   P46: "12",
   P47: "12", // 九州・沖縄
 };
-
-function safeParseCount(raw: string | undefined | null): number | null {
-  if (!raw) return null;
-  const n = Number(raw.replace(/,/g, ""));
-  if (Number.isNaN(n)) return null;
-  return n;
-}
 
 /**
  * 「勤務地を選ぶ」モーダル内の
@@ -335,13 +335,12 @@ const PLAYWRIGHT_TIMEOUT_MS = 20000;
  * （sr_occ_l_cd / sr_occ_cd はクエリパラメータで渡している前提）
  */
 async function applyJobConditionsViaModal(page: Page): Promise<void> {
-  // 職種モーダルを開くボタン（タグは a / button 等の可能性があるのでクラス指定）
   const jobButton = page.locator(
     ".searchTable .js__jobCheckbox, .js__jobCheckbox"
   );
 
   if (!(await jobButton.count())) {
-    // 職種モーダルが無いページ構成の場合はスキップ
+    console.warn("[mynavi] job modal button not found");
     return;
   }
 
@@ -353,16 +352,15 @@ async function applyJobConditionsViaModal(page: Page): Promise<void> {
   // 職種チェックボックス群の読み込みを軽く待つ
   await page.waitForTimeout(300);
 
-  // ここでは「URL で渡した職種」が既に選択済みであることを前提に、
-  // 単に「内容を反映する」を押して状態を確定させる。
   const applyButton = page.locator(
     `${jobModalSelector} .modalChoice__submit .modalChoice__btn .js__modal--apply`
   );
   if (await applyButton.count()) {
     await applyButton.first().click();
-    // 反映後の再レンダリング待ち
     await page.waitForLoadState("networkidle");
     await page.waitForSelector(".searchTable", { state: "visible" });
+  } else {
+    console.warn("[mynavi] job modal apply button not found");
   }
 }
 
@@ -386,6 +384,10 @@ async function getLabelNumberForPrefOnPage(
       .locator(".choiceContent__sectionTitle .labelNumber");
     if (await label.count()) {
       labelText = (await label.first().innerText()).trim();
+      console.log("[mynavi] modal label by prefCode", {
+        prefCode,
+        labelText,
+      });
     }
   }
 
@@ -406,6 +408,10 @@ async function getLabelNumberForPrefOnPage(
       const label = sectionByName.first().locator("span.labelNumber").first();
       if (await label.count()) {
         labelText = (await label.innerText()).trim();
+        console.log("[mynavi] modal label by prefName", {
+          prefName,
+          labelText,
+        });
       }
     } else if (baseName !== prefName) {
       const sectionByBase = page.locator(
@@ -416,9 +422,17 @@ async function getLabelNumberForPrefOnPage(
         const label = sectionByBase.first().locator("span.labelNumber").first();
         if (await label.count()) {
           labelText = (await label.innerText()).trim();
+          console.log("[mynavi] modal label by baseName", {
+            baseName,
+            labelText,
+          });
         }
       }
     }
+  }
+
+  if (!labelText) {
+    console.warn("[mynavi] modal label not found", { prefCode, rawPrefName });
   }
 
   return safeParseCount(labelText);
@@ -435,6 +449,8 @@ async function fetchMynaviPrefCountViaPlaywright(
   let browser: Browser | null = null;
 
   try {
+    console.log("[mynavi] playwright start", { url, prefCode, rawPrefName });
+
     browser = await chromium.launch({
       headless: true,
     });
@@ -444,12 +460,14 @@ async function fetchMynaviPrefCountViaPlaywright(
     });
 
     page.setDefaultTimeout(PLAYWRIGHT_TIMEOUT_MS);
+    await page.setExtraHTTPHeaders({
+      "Accept-Language": "ja-JP,ja;q=0.9,en;q=0.8",
+    });
 
     await page.goto(url, {
       waitUntil: "domcontentloaded",
     });
 
-    // 検索テーブルが表示されるまで待機
     await page.waitForSelector(".searchTable", {
       state: "visible",
     });
@@ -462,7 +480,7 @@ async function fetchMynaviPrefCountViaPlaywright(
       ".searchTable .js__areaCheckbox, .js__areaCheckbox"
     );
     if (!(await areaButton.count())) {
-      // ボタンが見つからない場合は取得不可
+      console.warn("[mynavi] area modal button not found");
       return null;
     }
 
@@ -481,8 +499,9 @@ async function fetchMynaviPrefCountViaPlaywright(
       );
       if (await areaTab.count()) {
         await areaTab.first().click();
-        // タブ切り替え後の DOM 展開待ち
         await page.waitForTimeout(300);
+      } else {
+        console.warn("[mynavi] area tab not found", { areaLarge });
       }
     }
 
@@ -493,6 +512,8 @@ async function fetchMynaviPrefCountViaPlaywright(
       prefCode,
       rawPrefName
     );
+
+    console.log("[mynavi] playwright result", { url, prefCode, count });
 
     return count;
   } catch (err) {
@@ -521,6 +542,11 @@ async function fetchMynaviPrefCountsViaPlaywrightBatch(
   const resultByCode: Record<string, number | null> = {};
 
   try {
+    console.log("[mynavi] playwright batch start", {
+      url,
+      items,
+    });
+
     browser = await chromium.launch({
       headless: true,
     });
@@ -530,6 +556,9 @@ async function fetchMynaviPrefCountsViaPlaywrightBatch(
     });
 
     page.setDefaultTimeout(PLAYWRIGHT_TIMEOUT_MS);
+    await page.setExtraHTTPHeaders({
+      "Accept-Language": "ja-JP,ja;q=0.9,en;q=0.8",
+    });
 
     await page.goto(url, {
       waitUntil: "domcontentloaded",
@@ -545,6 +574,7 @@ async function fetchMynaviPrefCountsViaPlaywrightBatch(
       ".searchTable .js__areaCheckbox, .js__areaCheckbox"
     );
     if (!(await areaButton.count())) {
+      console.warn("[mynavi] batch area modal button not found");
       for (const item of items) {
         resultByCode[item.code] = null;
       }
@@ -561,7 +591,7 @@ async function fetchMynaviPrefCountsViaPlaywrightBatch(
 
     for (const item of items) {
       const upper = item.code.toUpperCase();
-      const areaLarge = PREF_CODE_TO_AREA_LARGE[upper] ?? "ALL"; // 万一マップがなければ ALL グループ
+      const areaLarge = PREF_CODE_TO_AREA_LARGE[upper] ?? "ALL";
 
       const arr = groups.get(areaLarge) ?? [];
       arr.push(item);
@@ -577,6 +607,8 @@ async function fetchMynaviPrefCountsViaPlaywrightBatch(
         if (await areaTab.count()) {
           await areaTab.first().click();
           await page.waitForTimeout(300);
+        } else {
+          console.warn("[mynavi] batch area tab not found", { areaLarge });
         }
       }
 
@@ -591,6 +623,16 @@ async function fetchMynaviPrefCountsViaPlaywrightBatch(
       }
     }
 
+    console.log("[mynavi] playwright batch result", resultByCode);
+
+    return resultByCode;
+  } catch (err) {
+    console.error("mynavi playwright batch error", err, { url });
+    for (const item of items) {
+      if (!(item.code in resultByCode)) {
+        resultByCode[item.code] = null;
+      }
+    }
     return resultByCode;
   } finally {
     if (browser) {
@@ -628,6 +670,8 @@ async function fetchMynaviJobsCountViaFetch(
         "user-agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
         "accept-language": "ja-JP,ja;q=0.9,en;q=0.8",
+        accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
       },
       signal: controller.signal,
     });
@@ -660,8 +704,17 @@ async function fetchMynaviJobsCountViaFetch(
       // ログ用に読みつつ、結果には使わないようにする。
       headerCount = parseMynaviJobsCount(html);
 
+      if (modalCount == null && headerCount == null) {
+        console.error("mynavi fetch (pref) could not parse counts", {
+          url,
+          prefCode,
+          prefecture: cond.prefecture ?? null,
+          htmlSnippet: html.slice(0, 2000),
+        });
+      }
+
       return {
-        total: modalCount, // 取れなければ null のまま
+        total: modalCount,
         source: modalCount != null ? "modal" : "none",
         url,
         prefCode,
@@ -672,6 +725,14 @@ async function fetchMynaviJobsCountViaFetch(
 
     // 都道府県指定なし: 全体件数としてヘッダーの数字を使う
     headerCount = parseMynaviJobsCount(html);
+
+    if (headerCount == null) {
+      console.error("mynavi fetch (no-pref) could not parse header count", {
+        url,
+        htmlSnippet: html.slice(0, 2000),
+      });
+    }
+
     return {
       total: headerCount,
       source: headerCount != null ? "header" : "none",
@@ -735,11 +796,11 @@ export async function fetchMynaviJobsCount(
       };
     }
 
-    // Playwright で失敗した場合、従来の fetch ベースでフォールバック
+    // Playwright で失敗した場合、fetch ベースでフォールバック
     return fetchMynaviJobsCountViaFetch(cond, url, code);
   }
 
-  // 都道府県指定なし → これまで通り fetch + ヘッダーの数字だけで OK
+  // 都道府県指定なし → fetch + ヘッダーの数字だけで OK
   return fetchMynaviJobsCountViaFetch(cond, url, null);
 }
 
@@ -810,7 +871,7 @@ export async function fetchMynaviJobsCountForPrefectures(
 
     return results;
   } catch (err) {
-    console.error("mynavi playwright batch error", err, {
+    console.error("mynavi playwright batch error (outer)", err, {
       url,
       prefectures,
     });
@@ -828,6 +889,8 @@ export async function fetchMynaviJobsCountForPrefectures(
         "user-agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
         "accept-language": "ja-JP,ja;q=0.9,en;q=0.8",
+        accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
       },
       signal: controller.signal,
     });
@@ -847,6 +910,14 @@ export async function fetchMynaviJobsCountForPrefectures(
         item.code,
         item.name
       );
+      if (modalCount == null) {
+        console.error("mynavi batch fetch could not parse modal count", {
+          url,
+          prefCode: item.code,
+          name: item.name,
+          htmlSnippet: html.slice(0, 2000),
+        });
+      }
       results[item.name] = {
         total: modalCount,
         source: modalCount != null ? "modal" : "none",
