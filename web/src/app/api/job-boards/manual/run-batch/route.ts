@@ -5,15 +5,14 @@ import { NextResponse } from "next/server";
 import {
   ManualCondition,
   ManualResultRow,
-  ManualLayerCount,
   SiteKey,
-  AGE_BANDS,
-  EMP_TYPES,
-  SALARY_BANDS,
 } from "@/server/job-boards/types";
 
 // 条件付き URL 生成 & 件数取得を行う共通モジュール
-import { fetchMynaviJobsCount } from "@/server/job-boards/mynavi";
+import {
+  fetchMynaviJobsCount,
+  fetchMynaviJobsCountForPrefectures,
+} from "@/server/job-boards/mynavi";
 import { fetchDodaJobsCount } from "@/server/job-boards/doda";
 import { supabaseServer } from "@/lib/supabaseServer";
 
@@ -33,12 +32,9 @@ type BaseCondition = {
   prefecture: string | null;
 };
 
-/** サイトごとの統計値 */
+/** サイトごとの統計値（年齢・雇用形態・年収帯は使わない） */
 type SiteStats = {
   jobsTotal: number | null;
-  ageLayers: ManualLayerCount[];
-  empLayers: ManualLayerCount[];
-  salaryLayers: ManualLayerCount[];
   /** サイト固有のデバッグ情報（任意） */
   debugInfo?: {
     lines: string[];
@@ -51,6 +47,7 @@ type MappingRow = {
   internal_large: string | null;
   internal_small: string | null;
   external_large_code: string | null;
+  external_middle_code: string | null;
   external_small_code: string | null;
   enabled: boolean | null;
 };
@@ -90,29 +87,14 @@ function buildBaseConditions(
   return out;
 }
 
-/** BaseCondition → ManualCondition（年齢・雇用形態・年収帯はここでは未指定） */
+/** BaseCondition → ManualCondition（年齢・雇用形態・年収帯は使わない） */
 function toManualCondition(base: BaseCondition): ManualCondition {
   return {
     siteKey: base.siteKey,
     internalLarge: base.internalLarge,
     internalSmall: base.internalSmall,
     prefecture: base.prefecture,
-    ageBand: null,
-    employmentType: null,
-    salaryBand: null,
   };
-}
-
-/** 「すべて」だけ値を入れた層配列を作る */
-function buildAllOnlyLayers(
-  defs: readonly { key: string; label: string }[],
-  total: number | null
-): ManualLayerCount[] {
-  return defs.map((d, idx) => ({
-    key: d.key,
-    label: d.label,
-    jobs_count: idx === 0 ? total : null,
-  }));
 }
 
 /** ========== job_board_mappings を利用した職種マッピング ========== */
@@ -139,7 +121,7 @@ async function loadJobBoardMappings(
     let query = sb
       .from("job_board_mappings")
       .select(
-        "site_key, internal_large, internal_small, external_large_code, external_small_code, enabled"
+        "site_key, internal_large, internal_small, external_large_code, external_middle_code, external_small_code, enabled"
       )
       .in("site_key", sites);
 
@@ -236,11 +218,9 @@ function resolveExternalJobCodes(
 
 /** ========== マイナビ転職 ========== */
 /**
- * マイナビ転職:
+ * マイナビ転職（単一都道府県）:
  * - URL 生成＆HTML 解析は server/job-boards/mynavi.ts 側に委譲
- * - ここでは「この条件の求人数」の総件数だけ受け取り、
- *   年齢層 / 雇用形態 / 年収帯 は「すべて」のみ埋める
- * - あわせて、取得元（モーダル or 全体件数）などのデバッグ情報も保持する
+ * - ここでは総件数とデバッグログだけを扱う
  */
 async function fetchMynaviStats(cond: ManualCondition): Promise<SiteStats> {
   const result = await fetchMynaviJobsCount(cond);
@@ -261,28 +241,15 @@ async function fetchMynaviStats(cond: ManualCondition): Promise<SiteStats> {
 
   return {
     jobsTotal: total,
-    ageLayers: buildAllOnlyLayers(AGE_BANDS, total),
-    empLayers: buildAllOnlyLayers(EMP_TYPES, total),
-    salaryLayers: buildAllOnlyLayers(SALARY_BANDS, total),
     debugInfo: { lines: debugLines },
   };
 }
 
 /** ========== doda ========== */
-/**
- * doda:
- * - URL 生成＆HTML 解析は server/job-boards/doda.ts 側に委譲
- * - ここでは総件数だけ受け取り、
- *   雇用形態などの分布は現時点では「すべて」のみ埋める簡易版
- */
 async function fetchDodaStats(cond: ManualCondition): Promise<SiteStats> {
   const total = await fetchDodaJobsCount(cond);
-
   return {
     jobsTotal: total,
-    ageLayers: buildAllOnlyLayers(AGE_BANDS, total),
-    empLayers: buildAllOnlyLayers(EMP_TYPES, total),
-    salaryLayers: buildAllOnlyLayers(SALARY_BANDS, total),
   };
 }
 
@@ -290,12 +257,8 @@ async function fetchDodaStats(cond: ManualCondition): Promise<SiteStats> {
 async function fetchUnknownSiteStats(
   _cond: ManualCondition
 ): Promise<SiteStats> {
-  const layersEmpty = buildAllOnlyLayers(AGE_BANDS, null);
   return {
     jobsTotal: null,
-    ageLayers: layersEmpty,
-    empLayers: buildAllOnlyLayers(EMP_TYPES, null),
-    salaryLayers: buildAllOnlyLayers(SALARY_BANDS, null),
   };
 }
 
@@ -340,80 +303,199 @@ export async function POST(req: Request) {
 
     // デバッグログを蓄積する配列
     const debugLogs: string[] = [];
+    const preview: ManualResultRow[] = [];
 
-    // 条件ごとにサイトへアクセス → 結果を rows に格納
-    const preview: ManualResultRow[] = await Promise.all(
-      baseConditions.map(async (base): Promise<ManualResultRow> => {
-        // 1. internal_large / internal_small → サイト固有の external コードへ変換
-        const mapped = resolveExternalJobCodes(base, mappingsBySite);
+    /** ===== 1. マイナビ：複数都道府県バッチ処理 ===== */
 
-        // 2. external コードを使った条件
-        let cond: ManualCondition = {
-          ...toManualCondition(base),
-          internalLarge: mapped.large,
-          internalSmall: mapped.small,
-        };
+    // (サイト × 大分類 × 小分類) ごとにグループ化して、prefecture は配列にまとめる
+    type MynaviGroup = {
+      base: BaseCondition; // prefecture は null 固定で使う
+      prefectures: (string | null)[];
+    };
 
-        // まずはマッピング後のコードで取得（primary）
-        let stats = await fetchStatsForSite(cond);
+    const mynaviGroups = new Map<string, MynaviGroup>();
 
-        const baseInfo = `[${base.siteKey}] internalLarge=${
-          base.internalLarge ?? "-"
-        } → externalLarge=${mapped.large ?? "-"} / internalSmall=${
-          base.internalSmall ?? "-"
-        } → externalSmall=${mapped.small ?? "-"} / prefecture=${
-          base.prefecture ?? "（指定なし）"
-        }`;
+    for (const base of baseConditions) {
+      if (base.siteKey !== "mynavi") continue;
 
-        const pushDebugInfo = (tag: string, s: SiteStats) => {
-          if (s.debugInfo?.lines?.length) {
-            for (const line of s.debugInfo.lines) {
-              debugLogs.push(`[${base.siteKey}] ${tag} ${line}`);
-            }
+      const key = `mynavi||${base.internalLarge ?? ""}||${
+        base.internalSmall ?? ""
+      }`;
+      const existing = mynaviGroups.get(key);
+      if (existing) {
+        existing.prefectures.push(base.prefecture);
+      } else {
+        mynaviGroups.set(key, {
+          base: { ...base, prefecture: null },
+          prefectures: [base.prefecture],
+        });
+      }
+    }
+
+    // それぞれのマイナビグループについて、複数都道府県をまとめて取得
+    for (const group of mynaviGroups.values()) {
+      const { base, prefectures } = group;
+
+      // internal → external コード変換
+      const mapped = resolveExternalJobCodes(base, mappingsBySite);
+
+      const condBase: ManualCondition = {
+        siteKey: base.siteKey,
+        internalLarge: mapped.large,
+        internalSmall: mapped.small,
+        prefecture: null, // URL生成には不要なので null 固定
+      };
+
+      const stringPrefs = prefectures.filter(
+        (p): p is string => typeof p === "string" && !!p
+      );
+
+      const baseInfoPrefix = `[mynavi] internalLarge=${
+        base.internalLarge ?? "-"
+      } → externalLarge=${mapped.large ?? "-"} / internalSmall=${
+        base.internalSmall ?? "-"
+      } → externalSmall=${mapped.small ?? "-"}`;
+
+      // 都道府県指定がない（全国のみ）の場合は従来どおり単発で取得
+      if (stringPrefs.length === 0) {
+        const stats = await fetchMynaviStats(condBase);
+
+        debugLogs.push(
+          `${baseInfoPrefix} / prefecture=（指定なし） / jobs_total=${String(
+            stats.jobsTotal
+          )}`
+        );
+        if (stats.debugInfo?.lines?.length) {
+          for (const line of stats.debugInfo.lines) {
+            debugLogs.push(`[mynavi] primary-detail ${line}`);
           }
-        };
-
-        // 件数が null の場合、internal 値での fallback も試す（マイナビ / doda 対象）
-        if (
-          (stats.jobsTotal == null || Number.isNaN(stats.jobsTotal)) &&
-          (base.siteKey === "mynavi" || base.siteKey === "doda")
-        ) {
-          const fallbackCond: ManualCondition = toManualCondition(base);
-          const fallbackStats = await fetchStatsForSite(fallbackCond);
-
-          debugLogs.push(
-            `${baseInfo} / primary=${String(
-              stats.jobsTotal
-            )} / fallback=${String(fallbackStats.jobsTotal)}`
-          );
-
-          // primary / fallback 両方の詳細ログ
-          pushDebugInfo("primary-detail", stats);
-          pushDebugInfo("fallback-detail", fallbackStats);
-
-          // fallback で取れた数値があればそちらを採用
-          if (typeof fallbackStats.jobsTotal === "number") {
-            stats = fallbackStats;
-            cond = fallbackCond;
-          }
-        } else {
-          debugLogs.push(`${baseInfo} / jobs_total=${String(stats.jobsTotal)}`);
-          // primary の詳細ログ
-          pushDebugInfo("primary-detail", stats);
         }
 
-        return {
+        preview.push({
           site_key: base.siteKey,
           internal_large: base.internalLarge,
           internal_small: base.internalSmall,
-          prefecture: base.prefecture,
+          prefecture: null,
           jobs_total: stats.jobsTotal,
-          age_layers: stats.ageLayers,
-          employment_layers: stats.empLayers,
-          salary_layers: stats.salaryLayers,
-        };
-      })
+        });
+
+        continue;
+      }
+
+      // 都道府県が複数ある場合：Playwright でまとめて取得
+      const batchResults = await fetchMynaviJobsCountForPrefectures(
+        condBase,
+        stringPrefs
+      );
+
+      for (const prefName of stringPrefs) {
+        const r = batchResults[prefName];
+
+        const jobsTotal =
+          r && typeof r.total === "number" && !Number.isNaN(r.total)
+            ? r.total
+            : null;
+
+        debugLogs.push(
+          `${baseInfoPrefix} / prefecture=${prefName} / jobs_total=${String(
+            jobsTotal
+          )}`
+        );
+        if (r) {
+          debugLogs.push(
+            [
+              "[mynavi] primary-detail",
+              `mynavi-detail`,
+              `url=${r.url}`,
+              `prefecture=${prefName}`,
+              `prefCode=${r.prefCode ?? "（なし）"}`,
+              `source=${r.source}`,
+              `modalCount=${r.modalCount ?? "null"}`,
+              `headerCount=${r.headerCount ?? "null"}`,
+            ].join(" / ")
+          );
+        }
+
+        preview.push({
+          site_key: base.siteKey,
+          internal_large: base.internalLarge,
+          internal_small: base.internalSmall,
+          prefecture: prefName,
+          jobs_total: jobsTotal,
+        });
+      }
+    }
+
+    /** ===== 2. マイナビ以外（doda / type / womantype）は従来どおり ===== */
+
+    const otherConditions = baseConditions.filter(
+      (b) => b.siteKey !== "mynavi"
     );
+
+    for (const base of otherConditions) {
+      const mapped = resolveExternalJobCodes(base, mappingsBySite);
+
+      let cond: ManualCondition = {
+        ...toManualCondition(base),
+        internalLarge: mapped.large,
+        internalSmall: mapped.small,
+      };
+
+      let stats = await fetchStatsForSite(cond);
+
+      const baseInfo = `[${base.siteKey}] internalLarge=${
+        base.internalLarge ?? "-"
+      } → externalLarge=${mapped.large ?? "-"} / internalSmall=${
+        base.internalSmall ?? "-"
+      } → externalSmall=${mapped.small ?? "-"} / prefecture=${
+        base.prefecture ?? "（指定なし）"
+      }`;
+
+      const pushDebugInfo = (tag: string, s: SiteStats) => {
+        if (s.debugInfo?.lines?.length) {
+          for (const line of s.debugInfo.lines) {
+            debugLogs.push(`[${base.siteKey}] ${tag} ${line}`);
+          }
+        }
+      };
+
+      // doda だけ fallback ロジックを維持（マッピング不整合などの保険）
+      if (
+        (stats.jobsTotal == null || Number.isNaN(stats.jobsTotal)) &&
+        base.siteKey === "doda"
+      ) {
+        const fallbackCond: ManualCondition = toManualCondition(base);
+        const fallbackStats = await fetchStatsForSite(fallbackCond);
+
+        debugLogs.push(
+          `${baseInfo} / primary=${String(stats.jobsTotal)} / fallback=${String(
+            fallbackStats.jobsTotal
+          )}`
+        );
+
+        pushDebugInfo("primary-detail", stats);
+        pushDebugInfo("fallback-detail", fallbackStats);
+
+        if (
+          typeof fallbackStats.jobsTotal === "number" &&
+          !Number.isNaN(fallbackStats.jobsTotal)
+        ) {
+          stats = fallbackStats;
+          cond = fallbackCond;
+        }
+      } else {
+        debugLogs.push(`${baseInfo} / jobs_total=${String(stats.jobsTotal)}`);
+        pushDebugInfo("primary-detail", stats);
+      }
+
+      preview.push({
+        site_key: base.siteKey,
+        internal_large: base.internalLarge,
+        internal_small: base.internalSmall,
+        prefecture: base.prefecture,
+        jobs_total: stats.jobsTotal,
+      });
+    }
 
     const note =
       body.saveMode === "history"
