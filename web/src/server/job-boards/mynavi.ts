@@ -158,7 +158,7 @@ function parseMynaviPrefectureCountFromModal(
     if (areaLarge) {
       const areaEscaped = areaLarge.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
       const reAreaBlock = new RegExp(
-        `<div[^>]*data-large-cd=["']${areaEscaped}["'][^>]*>[\\s\\S]*?<\\/div>`,
+        `<div[^>]*class=["'][^"']*js__selectCondition--large[^"']*["'][^>]*data-large-cd=["']${areaEscaped}["'][^>]*>[\\s\\S]*?<\\/div>`,
         "i"
       );
       const areaMatch = html.match(reAreaBlock);
@@ -191,7 +191,7 @@ function parseMynaviPrefectureCountFromModal(
         : baseName.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
 
     const reName = new RegExp(
-      `(${nameEscaped}|${baseEscaped})[\\s\\S]{0,160}?<span[^>]*class=["'][^"']*labelNumber[^"']*["'][^>]*>\\s*([\\d,]+)\\s*<\\/span>`,
+      `(${nameEscaped}|${baseEscaped})[\\s\\S]{0,200}?<span[^>]*class=["'][^"']*labelNumber[^"']*["'][^>]*>\\s*([\\d,]+)\\s*<\\/span>`,
       "i"
     );
     const mName = html.match(reName);
@@ -323,15 +323,47 @@ const BASE_LIST_URL = "https://tenshoku.mynavi.jp/list/";
 const PLAYWRIGHT_TIMEOUT_MS = 20000;
 
 /**
- * Playwright でマイナビの検索画面を開き、
- * - クエリパラメータで職種条件（sr_occ_l_cd, sr_occ_cd）を付与
- * - 画面上の「勤務地」モーダルを開く
+ * 職種モーダルを開き、「内容を反映する」を押して条件を UI に反映
+ * （sr_occ_l_cd / sr_occ_cd はクエリパラメータで渡している前提）
+ */
+async function applyJobConditionsViaModal(page: Page): Promise<void> {
+  // 職種モーダルを開くボタン（タグは a / button 等の可能性があるのでクラス指定）
+  const jobButton = page.locator(
+    ".searchTable .js__jobCheckbox, .js__jobCheckbox"
+  );
+
+  if (!(await jobButton.count())) {
+    // 職種モーダルが無いページ構成の場合はスキップ
+    return;
+  }
+
+  await jobButton.first().click();
+
+  const jobModalSelector = "section.modalChoice.js__modal--jobCheckbox";
+  await page.waitForSelector(jobModalSelector, { state: "visible" });
+
+  // 職種チェックボックス群の読み込みを軽く待つ
+  await page.waitForTimeout(300);
+
+  // ここでは「URL で渡した職種」が既に選択済みであることを前提に、
+  // 単に「内容を反映する」を押して状態を確定させる。
+  const applyButton = page.locator(
+    `${jobModalSelector} .modalChoice__submit .modalChoice__btn .js__modal--apply`
+  );
+  if (await applyButton.count()) {
+    await applyButton.first().click();
+    // 反映後の再レンダリング待ち
+    await page.waitForLoadState("networkidle");
+    await page.waitForSelector(".searchTable", { state: "visible" });
+  }
+}
+
+/**
+ * 「勤務地を選ぶ」モーダルを開き、指定都道府県の labelNumber を取得する。
+ *
+ * - searchTable の「勤務地」ボタン（.js__areaCheckbox）をクリック
  * - 地域タブ（data-large-cd）を選択
- * - 対象都道府県（Pコード）の行にある <span class="labelNumber">○○件</span> を取得
- *
- * というフローで件数を取得する。
- *
- * 取得に成功した場合のみ number を返し、失敗時は null を返す。
+ * - data-middle-cd="Pxx" の行の span.labelNumber を読む
  */
 async function fetchMynaviPrefCountViaPlaywright(
   url: string,
@@ -360,66 +392,53 @@ async function fetchMynaviPrefCountViaPlaywright(
       state: "visible",
     });
 
-    // （必要であれば）職種モーダルを開いて状態を同期させることもできるが、
-    // 現状はクエリパラメータ sr_occ_l_cd / sr_occ_cd による指定で
-    // 条件が反映されている前提とする。
-    //
-    // const jobButton = page.locator("button.js__jobCheckbox");
-    // if (await jobButton.isVisible()) {
-    //   await jobButton.click();
-    //   // 職種モーダルが開いたことを確認
-    //   await page.waitForSelector("section.modalChoice.js__modal--jobCheckbox", {
-    //     state: "visible",
-    //   });
-    //   // ここで必要なら小分類チェックボックスの ON/OFF を制御する
-    //   // （システム側からコードや名称の配列を渡す設計にしておく）
-    //   // 最後に「内容を反映する」ボタンを押す:
-    //   // await page.click("section.modalChoice.js__modal--jobCheckbox button.js__modal--apply");
-    // }
+    // 1. 職種モーダルを開いて「内容を反映する」を押し、条件を確定させる
+    await applyJobConditionsViaModal(page);
 
-    // 「勤務地」モーダルを開く
-    const areaButton = page.locator("button.js__areaCheckbox");
-    await areaButton.click();
+    // 2. 「勤務地」モーダルを開く
+    const areaButton = page.locator(
+      ".searchTable .js__areaCheckbox, .js__areaCheckbox"
+    );
+    if (!(await areaButton.count())) {
+      // ボタンが見つからない場合は取得不可
+      return null;
+    }
+
+    await areaButton.first().click();
 
     const modalSelector = "section.modalChoice.js__modal--areaCheckbox";
     await page.waitForSelector(modalSelector, { state: "visible" });
 
-    // Pコード → 地域タブ (data-large-cd="xx")
     const upperPref = prefCode.toUpperCase();
-    const areaLarge = PREF_CODE_TO_AREA_LARGE[upperPref];
+    const areaLarge = PREF_CODE_TO_AREA_LARGE[upperPref] ?? null;
 
+    // 3. 地域タブを選択（首都圏 / 関西 など）
     if (areaLarge) {
       const areaTab = page.locator(
         `${modalSelector} .modalChoice__list .modalChoice__item[data-large-cd="${areaLarge}"]`
       );
-      if (await areaTab.isVisible()) {
-        await areaTab.click();
+      if (await areaTab.count()) {
+        await areaTab.first().click();
+        // タブ切り替え後の DOM 展開待ち
+        await page.waitForTimeout(300);
       }
     }
 
-    // 対象地域ブロックが DOM に展開されるまで待機
-    const largeBlockSelector = `${modalSelector} .js__selectCondition--large[data-large-cd="${
-      areaLarge ?? ""
-    }"]`;
-    if (areaLarge) {
-      await page.waitForSelector(largeBlockSelector, {
-        state: "attached",
-      });
-    }
-
-    // 1. data-middle-cd="P13" ベースで labelNumber を探す
+    // 4. data-middle-cd="Pxx" を持つセクションを探して labelNumber を取得
     const middleSelector = `${modalSelector} .js__selectCondition--middle[data-middle-cd="${prefCode}"]`;
-    const middle = page.locator(middleSelector);
     let labelText: string | null = null;
 
+    const middle = page.locator(middleSelector);
     if (await middle.count()) {
-      const label = middle.locator(".choiceContent__sectionTitle .labelNumber");
+      const label = middle
+        .first()
+        .locator(".choiceContent__sectionTitle .labelNumber");
       if (await label.count()) {
         labelText = (await label.first().innerText()).trim();
       }
     }
 
-    // 2. data-middle-cd がうまく見つからない場合、都道府県名ベースで拾う（東京都 / 東京 など）
+    // 5. Pコードで見つからない場合、都道府県名ベースで拾う（東京都 / 東京 など）
     if (!labelText && rawPrefName) {
       const prefName = rawPrefName.trim();
       const baseName =
@@ -427,12 +446,9 @@ async function fetchMynaviPrefCountViaPlaywright(
           ? prefName.slice(0, -1)
           : prefName;
 
-      // h4 内に「東京都」「東京」などが含まれる行を対象にする
       const sectionByName = page.locator(
         `${modalSelector} .js__selectCondition--middle h4.choiceContent__sectionTitle`,
-        {
-          hasText: prefName,
-        }
+        { hasText: prefName }
       );
 
       if (await sectionByName.count()) {
@@ -443,9 +459,7 @@ async function fetchMynaviPrefCountViaPlaywright(
       } else if (baseName !== prefName) {
         const sectionByBase = page.locator(
           `${modalSelector} .js__selectCondition--middle h4.choiceContent__sectionTitle`,
-          {
-            hasText: baseName,
-          }
+          { hasText: baseName }
         );
         if (await sectionByBase.count()) {
           const label = sectionByBase
@@ -523,28 +537,21 @@ async function fetchMynaviJobsCountViaFetch(
 
     const html = await res.text();
 
-    // 都道府県指定あり: モーダル → 取れなければヘッダー
+    // 都道府県指定あり: モーダルの HTML からのみ取得を試みる
     if (prefCode || cond.prefecture) {
       modalCount = parseMynaviPrefectureCountFromModal(
         html,
         prefCode,
         cond.prefecture ?? null
       );
-      if (modalCount != null) {
-        return {
-          total: modalCount,
-          source: "modal",
-          url,
-          prefCode,
-          modalCount,
-          headerCount: null,
-        };
-      }
 
+      // ヘッダーの件数は「都道府県未フィルタの全体件数」の可能性が高いので
+      // ログ用に読みつつ、結果には使わないようにする。
       headerCount = parseMynaviJobsCount(html);
+
       return {
-        total: headerCount,
-        source: headerCount != null ? "header" : "none",
+        total: modalCount, // 取れなければ null のまま
+        source: modalCount != null ? "modal" : "none",
         url,
         prefCode,
         modalCount,
@@ -584,12 +591,15 @@ async function fetchMynaviJobsCountViaFetch(
 /**
  * マイナビの検索件数を取得するメイン関数
  *
- * - 職種条件はこれまで通り sr_occ_l_cd / sr_occ_cd をクエリパラメータで指定
+ * - 職種条件は sr_occ_l_cd / sr_occ_cd をクエリパラメータで指定
  * - 都道府県指定あり:
- *    1. Playwright で実際に検索画面を開き、「勤務地」モーダルの該当都道府県の labelNumber を読む
+ *    1. Playwright で実際に検索画面を開き、
+ *       - 職種モーダルを開いて「内容を反映する」ボタンを押す
+ *       - 「勤務地を選ぶ」モーダルで該当都道府県の labelNumber を読む
  *    2. 失敗した場合のみ従来の fetch + HTML パースでフォールバック
+ *       （都道府県指定時は header の件数は total に使わない）
  * - 都道府県指定なし:
- *    - 一覧上部の「条件に合う求人 ○○件」などから全体件数を返す（従来通り）
+ *    - 一覧上部の「条件に合う求人 ○○件」などから全体件数を返す
  */
 export async function fetchMynaviJobsCount(
   cond: ManualCondition
@@ -617,6 +627,7 @@ export async function fetchMynaviJobsCount(
     }
 
     if (modalCount != null) {
+      // Playwright で「勤務地モーダルの labelNumber」が取れたケース
       return {
         total: modalCount,
         source: "modal",
@@ -628,6 +639,7 @@ export async function fetchMynaviJobsCount(
     }
 
     // Playwright で失敗した場合、従来の fetch ベースでフォールバック
+    // （この中でも都道府県指定時は header の件数を結果には採用しないよう変更済み）
     return fetchMynaviJobsCountViaFetch(cond, url, code);
   }
 
