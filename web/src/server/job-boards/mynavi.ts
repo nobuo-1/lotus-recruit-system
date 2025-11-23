@@ -234,9 +234,35 @@ export type MynaviJobsCountResult = {
   errorMessage?: string | null;
 };
 
-const JOBSEARCH_TYPE = "14";
-const SEARCH_TYPE = "18";
 const BASE_LIST_URL = "https://tenshoku.mynavi.jp";
+
+/** =========================
+ * エリアプレフィックス判定（首都圏など）
+ * ========================= */
+
+/**
+ * Pコードからエリアプレフィックス（例: "shutoken"）を返す
+ *
+ * 現状:
+ *   - 首都圏（1都3県: 埼玉・千葉・東京・神奈川）は "/shutoken/list/..." を使用
+ *   - それ以外はプレフィックスなしで "/list/..." を使用
+ */
+function getMynaviAreaPrefix(prefCode: string | null): string {
+  if (!prefCode) return "";
+  const upper = prefCode.toUpperCase();
+
+  // 首都圏: 埼玉(P11) / 千葉(P12) / 東京(P13) / 神奈川(P14)
+  if (
+    upper === "P11" ||
+    upper === "P12" ||
+    upper === "P13" ||
+    upper === "P14"
+  ) {
+    return "shutoken";
+  }
+
+  return "";
+}
 
 /** =========================
  * URL 組み立て
@@ -246,19 +272,18 @@ const BASE_LIST_URL = "https://tenshoku.mynavi.jp";
  * 職種（external_small_code）+ 都道府県 Pコード から
  * 実際に叩くマイナビの検索 URL を組み立てる。
  *
- * 例:
- *   https://tenshoku.mynavi.jp/list/p13/o11105/
- *     ?jobsearchType=14&searchType=18&refLoc=fnc_sra&ags=0
+ * 例（東京都 / 首都圏版）:
+ *   https://tenshoku.mynavi.jp/shutoken/list/p13/o11105/?ags=0
+ *
+ * 例（全国）:
+ *   https://tenshoku.mynavi.jp/list/p01+...+p47/o11105/?ags=0
  */
 function buildMynaviListUrl(
   cond: ManualCondition,
   prefCode: string | null
 ): string {
+  // クエリは ags=0 のみ
   const params = new URLSearchParams();
-  params.set("jobsearchType", JOBSEARCH_TYPE);
-  params.set("searchType", SEARCH_TYPE);
-  params.set("refLoc", "fnc_sra");
-  // ★ より正確な件数取得のため ags=0 を付与（末尾になるよう最後にセット）
   params.set("ags", "0");
 
   const jobPath = buildJobPathSegment(cond.internalSmall ?? null);
@@ -269,7 +294,12 @@ function buildMynaviListUrl(
 
   const pathWithJob = jobPath ? `${prefPath}/${jobPath}` : prefPath;
 
-  return `${BASE_LIST_URL}/list/${pathWithJob}/?${params.toString()}`;
+  const areaPrefix = getMynaviAreaPrefix(prefCode);
+  const basePath = areaPrefix
+    ? `${BASE_LIST_URL}/${areaPrefix}/list`
+    : `${BASE_LIST_URL}/list`;
+
+  return `${basePath}/${pathWithJob}/?${params.toString()}`;
 }
 
 /** =========================
@@ -400,7 +430,9 @@ export async function fetchMynaviJobsCount(
  * 実装:
  *   - Playwright は Vercel 環境で動かないため完全に廃止
  *   - 各都道府県ごとに
- *       https://tenshoku.mynavi.jp/list/pXX/(oコード…)/?jobsearchType=14&searchType=18&refLoc=fnc_sra&ags=0
+ *       https://tenshoku.mynavi.jp/shutoken/list/p13/(oコード…)/?ags=0
+ *       または
+ *       https://tenshoku.mynavi.jp/list/p27/(oコード…)/?ags=0
  *     を直接叩いて件数を取得する
  */
 export async function fetchMynaviJobsCountForPrefectures(
