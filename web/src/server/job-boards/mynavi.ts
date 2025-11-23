@@ -245,6 +245,10 @@ const BASE_LIST_URL = "https://tenshoku.mynavi.jp";
 /**
  * 職種（external_small_code）+ 都道府県 Pコード から
  * 実際に叩くマイナビの検索 URL を組み立てる。
+ *
+ * 例:
+ *   https://tenshoku.mynavi.jp/list/p13/o11105/
+ *     ?jobsearchType=14&searchType=18&refLoc=fnc_sra&ags=0
  */
 function buildMynaviListUrl(
   cond: ManualCondition,
@@ -254,6 +258,8 @@ function buildMynaviListUrl(
   params.set("jobsearchType", JOBSEARCH_TYPE);
   params.set("searchType", SEARCH_TYPE);
   params.set("refLoc", "fnc_sra");
+  // ★ より正確な件数取得のため ags=0 を付与（末尾になるよう最後にセット）
+  params.set("ags", "0");
 
   const jobPath = buildJobPathSegment(cond.internalSmall ?? null);
 
@@ -361,7 +367,7 @@ async function fetchMynaviJobsCountViaFetch(
       url,
       prefCode,
       modalCount: null,
-      headerCount,
+      headerCount: null,
       httpStatus: null,
       parseHint: null,
       errorMessage: msg,
@@ -394,7 +400,7 @@ export async function fetchMynaviJobsCount(
  * 実装:
  *   - Playwright は Vercel 環境で動かないため完全に廃止
  *   - 各都道府県ごとに
- *       https://tenshoku.mynavi.jp/list/pXX/(oコード…)/?jobsearchType=14&searchType=18&refLoc=fnc_sra
+ *       https://tenshoku.mynavi.jp/list/pXX/(oコード…)/?jobsearchType=14&searchType=18&refLoc=fnc_sra&ags=0
  *     を直接叩いて件数を取得する
  */
 export async function fetchMynaviJobsCountForPrefectures(
@@ -418,10 +424,11 @@ export async function fetchMynaviJobsCountForPrefectures(
     const prefCode = getMynaviPrefCodeFromName(prefName);
 
     if (!prefCode) {
+      // フォールバックでも ags=0 を付けておく
       results[prefName] = {
         total: null,
         source: "none",
-        url: `${BASE_LIST_URL}/list/${ALL_PREF_PATH}/`,
+        url: `${BASE_LIST_URL}/list/${ALL_PREF_PATH}/?ags=0`,
         prefCode: null,
         modalCount: null,
         headerCount: null,
