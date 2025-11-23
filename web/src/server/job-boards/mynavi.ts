@@ -237,30 +237,66 @@ export type MynaviJobsCountResult = {
 const BASE_LIST_URL = "https://tenshoku.mynavi.jp";
 
 /** =========================
- * エリアプレフィックス判定（首都圏など）
+ * エリアプレフィックス判定
  * ========================= */
 
 /**
- * Pコードからエリアプレフィックス（例: "shutoken"）を返す
+ * Pコードからエリアプレフィックス（地域のローマ字）を返す
  *
- * 現状:
- *   - 首都圏（1都3県: 埼玉・千葉・東京・神奈川）は "/shutoken/list/..." を使用
- *   - それ以外はプレフィックスなしで "/list/..." を使用
+ * hokkaido
+ * tohoku
+ * kitakanto
+ * shutoken
+ * koshinetsu
+ * hokuriku
+ * tokai
+ * kansai
+ * chugoku
+ * shikoku
+ * kyushu
  */
 function getMynaviAreaPrefix(prefCode: string | null): string {
   if (!prefCode) return "";
   const upper = prefCode.toUpperCase();
 
-  // 首都圏: 埼玉(P11) / 千葉(P12) / 東京(P13) / 神奈川(P14)
-  if (
-    upper === "P11" ||
-    upper === "P12" ||
-    upper === "P13" ||
-    upper === "P14"
-  ) {
-    return "shutoken";
-  }
+  // "P01" → 1 のように数値化
+  const num = Number(upper.slice(1));
+  if (Number.isNaN(num)) return "";
 
+  // hokkaido: 北海道 (P01)
+  if (num === 1) return "hokkaido";
+
+  // tohoku: 青森〜福島 (P02〜P07)
+  if (2 <= num && num <= 7) return "tohoku";
+
+  // kitakanto: 茨城・栃木・群馬 (P08〜P10)
+  if (8 <= num && num <= 10) return "kitakanto";
+
+  // shutoken: 埼玉・千葉・東京・神奈川 (P11〜P14)
+  if (11 <= num && num <= 14) return "shutoken";
+
+  // koshinetsu: 新潟 (P15)・山梨 (P19)・長野 (P20)
+  if (num === 15 || num === 19 || num === 20) return "koshinetsu";
+
+  // hokuriku: 富山・石川・福井 (P16〜P18)
+  if (16 <= num && num <= 18) return "hokuriku";
+
+  // tokai: 岐阜・静岡・愛知・三重 (P21〜P24)
+  if (21 <= num && num <= 24) return "tokai";
+
+  // kansai: 滋賀〜和歌山 (P25〜P30)
+  if (25 <= num && num <= 30) return "kansai";
+
+  // chugoku: 鳥取〜山口 (P31〜P35)
+  if (31 <= num && num <= 35) return "chugoku";
+
+  // shikoku: 徳島〜高知 (P36〜P39)
+  if (36 <= num && num <= 39) return "shikoku";
+
+  // kyushu: 福岡〜沖縄 (P40〜P47)
+  if (40 <= num && num <= 47) return "kyushu";
+
+  // 万が一マッチしなければプレフィックスなし
   return "";
 }
 
@@ -274,6 +310,9 @@ function getMynaviAreaPrefix(prefCode: string | null): string {
  *
  * 例（東京都 / 首都圏版）:
  *   https://tenshoku.mynavi.jp/shutoken/list/p13/o11105/?ags=0
+ *
+ * 例（北海道）:
+ *   https://tenshoku.mynavi.jp/hokkaido/list/p01/o11105/?ags=0
  *
  * 例（全国）:
  *   https://tenshoku.mynavi.jp/list/p01+...+p47/o11105/?ags=0
@@ -431,9 +470,9 @@ export async function fetchMynaviJobsCount(
  *   - Playwright は Vercel 環境で動かないため完全に廃止
  *   - 各都道府県ごとに
  *       https://tenshoku.mynavi.jp/shutoken/list/p13/(oコード…)/?ags=0
- *       または
- *       https://tenshoku.mynavi.jp/list/p27/(oコード…)/?ags=0
- *     を直接叩いて件数を取得する
+ *       や
+ *       https://tenshoku.mynavi.jp/kansai/list/p27/(oコード…)/?ags=0
+ *       など地域付きURLを直接叩いて件数を取得する
  */
 export async function fetchMynaviJobsCountForPrefectures(
   condBase: ManualCondition,
@@ -456,7 +495,7 @@ export async function fetchMynaviJobsCountForPrefectures(
     const prefCode = getMynaviPrefCodeFromName(prefName);
 
     if (!prefCode) {
-      // フォールバックでも ags=0 を付けておく
+      // フォールバックでも ags=0 を付けておく（地域プレフィックスなしの全国扱い）
       results[prefName] = {
         total: null,
         source: "none",
