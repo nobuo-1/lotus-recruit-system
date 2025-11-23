@@ -163,6 +163,16 @@ async function loadJobBoardMappings(
 /**
  * 1つの BaseCondition（internal_large / internal_small）から、
  * job_board_mappings を使ってサイト固有の外部コードに変換する。
+ *
+ * - internal_small が指定されていれば small 優先でマッピング
+ * - internal_small がなく internal_large のみの場合は large 基準でマッピング
+ * - マッピングが見つからない場合は元の値をそのまま返す（従来通り）
+ *
+ * マイナビの場合（重要な変更点）:
+ * - 同じ internal_small に対して複数行存在する場合、
+ *   すべての external_small_code を「11105+12105+…」の形で結合
+ *   → mynavi.ts 側で "o11105+o12105+…" に変換され、
+ *     マイナビの複数小分類選択と同じ動きになる
  */
 function resolveExternalJobCodes(
   base: BaseCondition,
@@ -175,36 +185,80 @@ function resolveExternalJobCodes(
 
   // --- small が指定されている場合: internal_small 優先 ---
   if (S) {
-    // internal_large も一致する行があれば最優先
-    let row =
-      siteMappings.find(
-        (m) => m.internal_small === S && (!L || m.internal_large === L)
-      ) ??
-      // large が一致しない場合でも、とにかく small が一致する行を探す
-      siteMappings.find((m) => m.internal_small === S);
+    // internal_small が一致する行を全部拾う（large は問わず）
+    const rowsForSmall = siteMappings.filter((m) => m.internal_small === S);
 
-    if (row) {
+    if (rowsForSmall.length > 0) {
+      // ===== マイナビ専用: 複数小分類コードをまとめて結合 =====
+      if (base.siteKey === "mynavi") {
+        const smallCodeSet = new Set<string>();
+
+        for (const row of rowsForSmall) {
+          const raw = (row.external_small_code || "").trim();
+          if (!raw) continue;
+
+          // 「11105+12105」のような既に結合済みの値も想定して分割
+          for (const piece of raw.split("+")) {
+            const code = piece.trim();
+            if (code) smallCodeSet.add(code);
+          }
+        }
+
+        const mergedSmall =
+          smallCodeSet.size > 0 ? Array.from(smallCodeSet).join("+") : null;
+
+        // large 側は、external_large_code → internal_large(L一致) → それ以外 の優先度で決定
+        const largeFromRows =
+          // external_large_code が明示されている行を優先
+          rowsForSmall.find((r) => !!r.external_large_code)
+            ?.external_large_code ??
+          // internal_large が L と一致する行を優先
+          (L
+            ? rowsForSmall.find((r) => r.internal_large === L)
+                ?.external_large_code
+            : null) ??
+          // それでもなければ、どこかに入っている internal_large を採用
+          rowsForSmall.find((r) => !!r.internal_large)?.internal_large ??
+          L;
+
+        if (mergedSmall || largeFromRows) {
+          return {
+            large: largeFromRows || L,
+            // small 側は、結合結果が取れなかった場合でも最低限 S は維持
+            small: mergedSmall || S,
+          };
+        }
+      }
+
+      // ===== マイナビ以外、または結合に失敗した場合のフォールバック =====
+      const preferredRow =
+        // internal_large が一致する行を優先
+        rowsForSmall.find((m) => !!L && m.internal_large === L) ??
+        // なければ先頭を採用
+        rowsForSmall[0];
+
       return {
-        large: row.external_large_code || row.internal_large || L,
-        small: row.external_small_code || S,
+        large:
+          preferredRow.external_large_code || preferredRow.internal_large || L,
+        small: preferredRow.external_small_code || S,
       };
     }
   }
 
   // --- small がなく large のみ指定されている場合 ---
   if (L) {
-    // internal_small が null/空 の行を優先しつつ、internal_large が一致する行を探す
-    let row =
-      siteMappings.find(
-        (m) =>
-          m.internal_large === L &&
-          (m.internal_small === null || m.internal_small === "")
-      ) ?? siteMappings.find((m) => m.internal_large === L);
+    const rowsForLarge = siteMappings.filter((m) => m.internal_large === L);
 
-    if (row) {
+    if (rowsForLarge.length > 0) {
+      // internal_small が null/空 の行を優先しつつ、なければ先頭
+      const rowWithEmptySmall =
+        rowsForLarge.find(
+          (m) => m.internal_small === null || m.internal_small === ""
+        ) ?? rowsForLarge[0];
+
       return {
-        large: row.external_large_code || L,
-        small: row.external_small_code || null,
+        large: rowWithEmptySmall.external_large_code || L,
+        small: rowWithEmptySmall.external_small_code || null,
       };
     }
   }
