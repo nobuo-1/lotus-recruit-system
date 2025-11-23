@@ -1,6 +1,7 @@
 // web/src/server/job-boards/mynavi.ts
 
 import type { ManualCondition } from "./types";
+import { chromium } from "playwright";
 
 /**
  * マイナビの検索結果ページ HTML から
@@ -120,9 +121,8 @@ function safeParseCount(raw: string | undefined | null): number | null {
  *   ・「東京都 / 東京」などのテキスト付近
  * にある <span class="labelNumber">○○件</span> を拾う。
  *
- * ※ 完全に UI と同じ「ボタンを押してモーダルを開く」ことは
- *   サーバー側ではできないので、
- *   「モーダルに埋め込まれているHTMLを直接パース」する方針です。
+ * ※ Playwright で実際に「勤務地モーダル」を開いたあとの HTML を
+ *   page.content() で取得して、この関数に渡す。
  */
 function parseMynaviPrefectureCountFromModal(
   html: string,
@@ -273,6 +273,10 @@ function getMynaviPrefectureCode(cond: ManualCondition): string | null {
 /**
  * internalLarge / internalSmall から
  * マイナビの「職種」用クエリパラメータを組み立てる。
+ *
+ * ※ internalLarge/internalSmall には、すでに
+ *   「マイナビの大分類・小分類コード（例: 11 / 11105）」が
+ *   セットされている前提。
  */
 function buildMynaviJobQueryParams(cond: ManualCondition): URLSearchParams {
   const params = new URLSearchParams();
@@ -308,19 +312,42 @@ export type MynaviJobsCountResult = {
 };
 
 /**
- * マイナビの検索件数を取得するメイン関数
+ * internalSmall から、マイナビ職種モーダル内で選択すべき
+ * 「小分類コード」の配列を返すユーティリティ。
  *
- * - 職種条件のみ付けて一覧を開く
- * - 都道府県指定がある場合: 「勤務地を選ぶ」モーダルの都道府県横の labelNumber を返す
- * - 都道府県指定なし: 一覧上部の「条件に合う求人 ○○件」などから全体件数を返す
+ * ここでは最小限として「internalSmall をそのまま 1 件だけ使う」
+ * 実装にしているが、必要に応じて
+ *   - DB や別テーブルからのマッピング
+ *   - 1 つの自社小分類 → 複数のマイナビ小分類コード
+ * などに拡張する想定。
+ */
+function getMynaviSmallCodesFromCondition(cond: ManualCondition): string[] {
+  const small = cond.internalSmall?.trim();
+  if (!small) return [];
+  if (!/^[0-9A-Z]+$/i.test(small)) return [];
+  return [small];
+}
+
+/**
+ * マイナビの検索件数を取得するメイン関数（Playwright版）
  *
- * ※ 以前は number | null を返していたが、
- *    デバッグのため取得元などのメタ情報も返すように拡張している。
+ * - 一覧ページを Playwright で開く
+ * - 「職種を指定する」ボタンから職種モーダルを開き、
+ *   このシステムで定義した職種の小分類コードに対応する
+ *   チェックボックスをすべてクリック（選択）する
+ * - 「内容を反映する」でモーダルを閉じて職種条件を反映する
+ * - 「勤務地を指定する」ボタンから勤務地モーダルを開き、
+ *   都道府県（Pコード or 名称）に対応するラベル（labelNumber）の件数を取得する
+ * - 都道府県指定がない場合は、ヘッダーの「条件に合う求人 ○○件」を返す
+ *
+ * ※ 以前は fetch + 正規表現で静的 HTML を解析していたが、
+ *   モーダル内の HTML や件数が JavaScript で後読みされるため、
+ *   Playwright で実際の画面操作を行うように変更している。
  */
 export async function fetchMynaviJobsCount(
   cond: ManualCondition
 ): Promise<MynaviJobsCountResult> {
-  // ★ 実際の画面と同じ値に合わせる（ユーザー指定のURL）
+  // 実際の画面と同じ値に合わせる（ユーザー指定のURL）
   //   https://tenshoku.mynavi.jp/list/?jobsearchType=14&searchType=18
   const jobsearchType = "14";
   const searchType = "18";
@@ -331,48 +358,106 @@ export async function fetchMynaviJobsCount(
 
   const url = `https://tenshoku.mynavi.jp/list/?${params.toString()}`;
 
-  const controller = new AbortController();
-  const timeoutMs = 15000;
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
   const prefCode = getMynaviPrefectureCode(cond);
   let modalCount: number | null = null;
   let headerCount: number | null = null;
 
+  const browser = await chromium.launch({
+    headless: true,
+  });
+
+  const context = await browser.newContext({
+    userAgent:
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
+    locale: "ja-JP",
+  });
+
+  const page = await context.newPage();
+
   try {
-    const res = await fetch(url, {
-      method: "GET",
-      headers: {
-        "user-agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
-        "accept-language": "ja-JP,ja;q=0.9,en;q=0.8",
-      },
-      signal: controller.signal,
+    // 一覧ページを表示
+    await page.goto(url, {
+      waitUntil: "domcontentloaded",
+      timeout: 15000,
     });
 
-    if (!res.ok) {
-      console.error("mynavi list fetch failed", res.status, res.statusText, {
-        url,
+    // 検索テーブルが描画されるまで待つ
+    await page.waitForSelector("div.searchTable", { timeout: 15000 });
+
+    // ===== 1. 職種モーダルを開いて、小分類チェックボックスを選択 =====
+    const smallCodes = getMynaviSmallCodesFromCondition(cond);
+
+    if (smallCodes.length > 0) {
+      // 「職種」→「指定する」ボタン
+      await page.click("button.js__jobCheckbox");
+      await page.waitForSelector("section.modalChoice.js__modal--jobCheckbox", {
+        state: "visible",
+        timeout: 10000,
       });
-      return {
-        total: null,
-        source: "none",
-        url,
-        prefCode,
-        modalCount: null,
-        headerCount: null,
-      };
+
+      // モーダル内で該当する小分類コードのチェックボックスをすべて ON
+      await page.evaluate((codes: string[]) => {
+        const modal = document.querySelector<HTMLElement>(
+          "section.modalChoice.js__modal--jobCheckbox"
+        );
+        if (!modal) return;
+
+        codes.forEach((code) => {
+          const inputs = modal.querySelectorAll<HTMLInputElement>(
+            `input[type="checkbox"][value="${code}"]`
+          );
+          inputs.forEach((input) => {
+            if (!input.checked) {
+              input.click();
+            }
+          });
+        });
+      }, smallCodes);
+
+      // 「内容を反映する」ボタンで職種条件を反映
+      await page.click(
+        "section.modalChoice.js__modal--jobCheckbox button.js__modal--apply"
+      );
+
+      // 反映が UI に効くまで少し待機
+      await page.waitForTimeout(1000);
     }
 
-    const html = await res.text();
-
-    // 都道府県指定あり: モーダル → 取れなければヘッダー
+    // ===== 2. 都道府県指定がある場合は、勤務地モーダルから件数を取得 =====
     if (prefCode || cond.prefecture) {
+      // 「勤務地」→「指定する」ボタン
+      await page.click("button.js__areaCheckbox");
+      await page.waitForSelector(
+        "section.modalChoice.js__modal--areaCheckbox",
+        {
+          state: "visible",
+          timeout: 10000,
+        }
+      );
+
+      // モーダルの中身（labelNumber）が更新されるのを待つ
+      // ※ 具体的なセレクタが取れないケースでもタイムアウトしないよう、
+      //   ゆるめの待機にしている
+      await page.waitForTimeout(1500);
+
+      // 現在の HTML 全体を取得し、その中から都道府県の labelNumber を拾う
+      const htmlWithModal = await page.content();
       modalCount = parseMynaviPrefectureCountFromModal(
-        html,
+        htmlWithModal,
         prefCode,
         cond.prefecture ?? null
       );
+
+      // モーダルを閉じる（件数取得だけなので実質不要だが、後続の安全のため）
+      try {
+        await page.click(
+          "section.modalChoice.js__modal--areaCheckbox button.js__modal--apply",
+          { timeout: 3000 }
+        );
+      } catch {
+        // 閉じに失敗しても致命的ではないので握りつぶす
+      }
+
       if (modalCount != null) {
         return {
           total: modalCount,
@@ -384,7 +469,9 @@ export async function fetchMynaviJobsCount(
         };
       }
 
-      headerCount = parseMynaviJobsCount(html);
+      // モーダルから取れなかった場合は、同じ HTML からヘッダーの件数をフォールバック
+      headerCount = parseMynaviJobsCount(htmlWithModal);
+
       return {
         total: headerCount,
         source: headerCount != null ? "header" : "none",
@@ -395,8 +482,10 @@ export async function fetchMynaviJobsCount(
       };
     }
 
-    // 都道府県指定なし: 全体件数としてヘッダーの数字を使う
+    // ===== 3. 都道府県指定なし → 全体件数としてヘッダーの数字を使う =====
+    const html = await page.content();
     headerCount = parseMynaviJobsCount(html);
+
     return {
       total: headerCount,
       source: headerCount != null ? "header" : "none",
@@ -406,7 +495,7 @@ export async function fetchMynaviJobsCount(
       headerCount,
     };
   } catch (err) {
-    console.error("mynavi fetch error", err, { url });
+    console.error("mynavi fetch (Playwright) error", err, { url });
     return {
       total: null,
       source: "none",
@@ -416,6 +505,6 @@ export async function fetchMynaviJobsCount(
       headerCount,
     };
   } finally {
-    clearTimeout(timer);
+    await browser.close();
   }
 }
