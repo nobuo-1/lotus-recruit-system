@@ -814,7 +814,7 @@ export async function fetchMynaviJobsCount(
  *
  * - 職種モーダル：Playwright で「内容を反映する」まで実行
  * - 勤務地モーダル：地域タブを切り替えながら、同一地域の都道府県を一度に読み込む
- * - Playwright 失敗時は 1回の fetch + HTML 解析でフォールバック
+ * - Playwright 失敗時 or 全件 null のときは 1回の fetch + HTML 解析でフォールバック
  */
 export async function fetchMynaviJobsCountForPrefectures(
   condBase: ManualCondition,
@@ -850,26 +850,13 @@ export async function fetchMynaviJobsCountForPrefectures(
     return results;
   }
 
-  // 1. Playwright でまとめて取得（職種モーダル + 勤務地モーダル）
+  /** ========================
+   * 1. Playwright バッチで取得
+   * ======================== */
+
+  let countsByCode: Record<string, number | null> | null = null;
   try {
-    const countsByCode = await fetchMynaviPrefCountsViaPlaywrightBatch(
-      url,
-      items
-    );
-
-    for (const item of items) {
-      const count = countsByCode[item.code] ?? null;
-      results[item.name] = {
-        total: count,
-        source: count != null ? "modal" : "none",
-        url,
-        prefCode: item.code,
-        modalCount: count,
-        headerCount: null,
-      };
-    }
-
-    return results;
+    countsByCode = await fetchMynaviPrefCountsViaPlaywrightBatch(url, items);
   } catch (err) {
     console.error("mynavi playwright batch error (outer)", err, {
       url,
@@ -877,7 +864,37 @@ export async function fetchMynaviJobsCountForPrefectures(
     });
   }
 
-  // 2. Playwright 失敗時は 1回の fetch + HTML 解析でフォールバック
+  // Playwright の結果があり、その中に 1つでも有効な数値があればそのまま採用
+  if (countsByCode) {
+    const hasAnyValid = Object.values(countsByCode).some(
+      (v) => typeof v === "number" && !Number.isNaN(v)
+    );
+
+    if (hasAnyValid) {
+      for (const item of items) {
+        const count = countsByCode[item.code] ?? null;
+        results[item.name] = {
+          total: count,
+          source: count != null ? "modal" : "none",
+          url,
+          prefCode: item.code,
+          modalCount: count,
+          headerCount: null,
+        };
+      }
+      return results;
+    } else {
+      console.warn(
+        "[mynavi] playwright batch returned no usable counts; falling back to fetch+HTML parse",
+        { url, prefectures }
+      );
+    }
+  }
+
+  /** ==========================================
+   * 2. Playwright 失敗 or 全件 null → fetch フォールバック
+   * ========================================== */
+
   const controller = new AbortController();
   const timeoutMs = 15000;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
