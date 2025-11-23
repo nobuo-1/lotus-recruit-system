@@ -166,6 +166,10 @@ async function loadJobBoardMappings(
  * - internal_small が指定されていれば small 優先でマッピング
  * - internal_small がなく internal_large のみの場合は large 基準でマッピング
  * - マッピングが見つからない場合は元の値をそのまま返す（従来通り）
+ *
+ * マイナビの場合:
+ * - external_small_code には「112+111+126…」のように職種小分類コード群を入れておき、
+ *   mynavi.ts 側で "o112+o111+o126…" に変換して URL パスに埋め込む想定
  */
 function resolveExternalJobCodes(
   base: BaseCondition,
@@ -218,9 +222,10 @@ function resolveExternalJobCodes(
 
 /** ========== マイナビ転職 ========== */
 /**
- * マイナビ転職（単一都道府県）:
- * - URL 生成＆HTML 解析は server/job-boards/mynavi.ts 側に委譲
- * - ここでは総件数とデバッグログだけを扱う
+ * マイナビ転職:
+ * - URL 生成は server/job-boards/mynavi.ts 側に委譲
+ * - external_small_code を Path 部分 "oコード+oコード…" に変換して検索ページを叩き、
+ *   「条件に合う求人 ○○件」などから件数を取得
  */
 async function fetchMynaviStats(cond: ManualCondition): Promise<SiteStats> {
   const result = await fetchMynaviJobsCount(cond);
@@ -356,7 +361,7 @@ export async function POST(req: Request) {
         base.internalSmall ?? "-"
       } → externalSmall=${mapped.small ?? "-"}`;
 
-      // 都道府県指定がない（全国のみ）の場合は従来どおり単発で取得
+      // 都道府県指定がない（全国のみ）の場合は単発で取得
       if (stringPrefs.length === 0) {
         const stats = await fetchMynaviStats(condBase);
 
@@ -382,7 +387,7 @@ export async function POST(req: Request) {
         continue;
       }
 
-      // 都道府県が複数ある場合：Playwright でまとめて取得
+      // 都道府県が複数ある場合：pref ごとに URL を組み立てて fetch（Playwright は使わない）
       const batchResults = await fetchMynaviJobsCountForPrefectures(
         condBase,
         stringPrefs

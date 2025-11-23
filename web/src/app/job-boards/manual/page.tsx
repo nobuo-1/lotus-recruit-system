@@ -1039,10 +1039,12 @@ export default function JobBoardsManualPage() {
                       : ": 未指定（全国）"}
                   </li>
                   <li>
-                    件数の取得方法（マイナビ）:
-                    「勤務地を選ぶ」モーダル内の都道府県横の数字（labelNumber）
-                    を最優先。取得できない場合はページ上部の 「条件に合う求人
-                    ○○件」などから取得。
+                    件数の取得方法（マイナビ）: external_small_code を用いて
+                    「https://tenshoku.mynavi.jp/list/pXX/（または
+                    p01+…+p47）/oコード…」
+                    の検索ページを開き、ページ内の「条件に合う求人{" "}
+                    <span className="font-mono">js__searchRecruit--count</span>
+                    」に表示される件数を取得します。
                   </li>
                   <li>
                     件数の取得方法（doda）:
