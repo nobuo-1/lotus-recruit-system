@@ -1,6 +1,7 @@
 // web/src/server/job-boards/doda.ts
 
 import type { ManualCondition } from "./types";
+import * as https from "https";
 
 /** ======== 共通ユーティリティ ======== */
 
@@ -24,7 +25,7 @@ function parseDodaJobsCountInternal(html: string): {
   // 0-1. <span class="search-sidebar__total-count__number">840</span>
   {
     const m = html.match(
-      /search-sidebar__total-count__number"[^>]*>\s*([0-9,]+)\s*<\/span>/i
+      /search-sidebar__total-count__number[^>]*>\s*([0-9,]+)\s*<\/span>/i
     );
     const n = safeParseCount(m?.[1]);
     if (n != null) {
@@ -38,7 +39,7 @@ function parseDodaJobsCountInternal(html: string): {
   // 0-2. <span class="displayJobCount__totalNum">840</span>
   {
     const m = html.match(
-      /displayJobCount__totalNum"[^>]*>\s*([0-9,]+)\s*<\/span>/i
+      /displayJobCount__totalNum[^>]*>\s*([0-9,]+)\s*<\/span>/i
     );
     const n = safeParseCount(m?.[1]);
     if (n != null) {
@@ -50,7 +51,7 @@ function parseDodaJobsCountInternal(html: string): {
   }
 
   // ① 「該当求人数 63 件中 1～50件 を表示」
-  //    ※ 「該当求人数<span>63</span>件中…」のようにタグを挟んでも拾えるように少しゆるめる
+  //    HTMLソース上は「該当求人数 31,043 件中 1～50 件 を表示」のようなテキストがある
   {
     const m = html.match(/該当求人数[\s\S]{0,80}?([0-9,]+)\s*件/);
     const n = safeParseCount(m?.[1]);
@@ -241,7 +242,7 @@ function buildDodaListUrl(
 }
 
 /** =========================
- * fetch ベースの実装
+ * fetch 実装（Node https フォールバック付き）
  * ========================= */
 
 export type DodaJobsCountResult = {
@@ -261,46 +262,152 @@ export type DodaJobsCountResult = {
   errorMessage?: string | null;
 };
 
+const COMMON_HEADERS = {
+  // なるべくブラウザアクセスに近づける
+  "user-agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
+  "accept-language": "ja-JP,ja;q=0.9,en;q=0.8",
+  accept:
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+  referer: "https://doda.jp/",
+  // Node https で扱いやすいように、常に非圧縮（identity）を要求
+  "accept-encoding": "identity",
+};
+
+/**
+ * Node の https モジュールを使ったフォールバック用 fetch
+ * - IPv4 (family:4) を強制して、IPv6 周りの問題を避ける
+ * - accept-encoding: identity で gzip 展開を不要にする
+ */
+async function fetchHtmlViaNodeHttps(
+  urlStr: string,
+  timeoutMs = 30000
+): Promise<{ html: string; status: number }> {
+  return new Promise((resolve, reject) => {
+    try {
+      const u = new URL(urlStr);
+      const req = https.request(
+        {
+          protocol: u.protocol,
+          hostname: u.hostname,
+          path: u.pathname + u.search,
+          method: "GET",
+          headers: COMMON_HEADERS,
+          timeout: timeoutMs,
+          family: 4, // IPv4 を優先
+        },
+        (res) => {
+          const status = res.statusCode ?? 0;
+          const chunks: Buffer[] = [];
+
+          res.on("data", (chunk) => {
+            chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+          });
+
+          res.on("end", () => {
+            const buf = Buffer.concat(chunks);
+            const html = buf.toString("utf8");
+            resolve({ html, status });
+          });
+        }
+      );
+
+      req.on("error", (err) => {
+        reject(err);
+      });
+
+      req.on("timeout", () => {
+        req.destroy(new Error("Request timeout"));
+      });
+
+      req.end();
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
 async function fetchDodaJobsCountViaFetch(
   url: string,
   prefCode: string | null,
   oc: string | null
 ): Promise<DodaJobsCountResult> {
-  try {
-    const res = await fetch(url, {
-      method: "GET",
-      headers: {
-        // なるべくブラウザアクセスに近づける
-        "user-agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
-        "accept-language": "ja-JP,ja;q=0.9,en;q=0.8",
-        accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        referer: "https://doda.jp/",
-      },
-    });
+  const timeoutMs = 30000;
 
-    const httpStatus = res.status;
+  // ========== 1. グローバル fetch を数回リトライ ==========
+  let lastError: any = null;
 
-    if (!res.ok) {
-      const msg = `doda list fetch failed: ${res.status} ${res.statusText}`;
-      console.error(msg, { url });
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: "GET",
+        headers: COMMON_HEADERS,
+        // Next.js のデフォルトキャッシュを避ける
+        cache: "no-store",
+      });
+
+      const httpStatus = res.status;
+
+      if (!res.ok) {
+        const msg = `doda list fetch failed (global fetch): ${res.status} ${res.statusText}`;
+        console.error(msg, { url, attempt });
+        return {
+          total: null,
+          url,
+          prefCode,
+          oc,
+          httpStatus,
+          parseHint: null,
+          errorMessage: msg,
+        };
+      }
+
+      const html = await res.text();
+      const { count, hint } = parseDodaJobsCountInternal(html);
+
+      if (count == null) {
+        const msg = "doda fetch could not parse jobs count (global fetch)";
+        console.error(msg, {
+          url,
+          attempt,
+          htmlSnippet: html.slice(0, 2000),
+        });
+        return {
+          total: null,
+          url,
+          prefCode,
+          oc,
+          httpStatus,
+          parseHint: hint,
+          errorMessage: msg,
+        };
+      }
+
       return {
-        total: null,
+        total: count,
         url,
         prefCode,
         oc,
         httpStatus,
-        parseHint: null,
-        errorMessage: msg,
+        parseHint: hint,
+        errorMessage: null,
       };
+    } catch (err: any) {
+      lastError = err;
+      console.error("doda fetch error (global fetch)", err, {
+        url,
+        attempt,
+      });
     }
+  }
 
-    const html = await res.text();
+  // ========== 2. Node https でフォールバック ==========
+  try {
+    const { html, status } = await fetchHtmlViaNodeHttps(url, timeoutMs);
     const { count, hint } = parseDodaJobsCountInternal(html);
 
     if (count == null) {
-      const msg = "doda fetch could not parse jobs count";
+      const msg = "doda fetch could not parse jobs count (node https fallback)";
       console.error(msg, {
         url,
         htmlSnippet: html.slice(0, 2000),
@@ -310,7 +417,7 @@ async function fetchDodaJobsCountViaFetch(
         url,
         prefCode,
         oc,
-        httpStatus,
+        httpStatus: status,
         parseHint: hint,
         errorMessage: msg,
       };
@@ -321,18 +428,29 @@ async function fetchDodaJobsCountViaFetch(
       url,
       prefCode,
       oc,
-      httpStatus,
+      httpStatus: status,
       parseHint: hint,
       errorMessage: null,
     };
-  } catch (err: any) {
-    // AbortError も含めて「ネットワークレベルの失敗」として扱う
-    const msg =
-      err?.name === "AbortError"
-        ? "doda fetch aborted (タイムアウト or ホスト側のブロックの可能性)"
-        : `doda fetch error: ${err?.message ?? String(err)}`;
+  } catch (err2: any) {
+    const msg = `doda fetch error (both global fetch & https fallback failed): ${
+      lastError?.message ?? "unknown"
+    } / fallback=${err2?.message ?? String(err2)}`;
 
-    console.error("doda fetch error", err, { url });
+    // cause もあればログに出す
+    console.error("doda fetch fatal error", {
+      url,
+      firstError: {
+        message: lastError?.message,
+        name: lastError?.name,
+        cause: (lastError as any)?.cause,
+      },
+      fallbackError: {
+        message: err2?.message,
+        name: err2?.name,
+        cause: (err2 as any)?.cause,
+      },
+    });
 
     return {
       total: null,
