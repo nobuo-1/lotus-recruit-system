@@ -21,9 +21,38 @@ function parseDodaJobsCountInternal(html: string): {
   count: number | null;
   hint: string | null;
 } {
-  // ① 「該当求人数 63 件中 1～50件 を表示」
+  // 0-1. <span class="search-sidebar__total-count__number">840</span>
   {
-    const m = html.match(/該当求人数[\s　]*([0-9,]+)[\s　]*件/);
+    const m = html.match(
+      /search-sidebar__total-count__number"[^>]*>\s*([0-9,]+)\s*<\/span>/i
+    );
+    const n = safeParseCount(m?.[1]);
+    if (n != null) {
+      return {
+        count: n,
+        hint: "class:search-sidebar__total-count__number",
+      };
+    }
+  }
+
+  // 0-2. <span class="displayJobCount__totalNum">840</span>
+  {
+    const m = html.match(
+      /displayJobCount__totalNum"[^>]*>\s*([0-9,]+)\s*<\/span>/i
+    );
+    const n = safeParseCount(m?.[1]);
+    if (n != null) {
+      return {
+        count: n,
+        hint: "class:displayJobCount__totalNum",
+      };
+    }
+  }
+
+  // ① 「該当求人数 63 件中 1～50件 を表示」
+  //    ※ 「該当求人数<span>63</span>件中…」のようにタグを挟んでも拾えるように少しゆるめる
+  {
+    const m = html.match(/該当求人数[\s\S]{0,80}?([0-9,]+)\s*件/);
     const n = safeParseCount(m?.[1]);
     if (n != null) {
       return { count: n, hint: "text:該当求人数○件" };
@@ -32,7 +61,7 @@ function parseDodaJobsCountInternal(html: string): {
 
   // ② 「この条件の求人数 63 件」
   {
-    const m = html.match(/この条件の求人数[\s　]*([0-9,]+)[\s　]*件/);
+    const m = html.match(/この条件の求人数[\s\S]{0,80}?([0-9,]+)\s*件/);
     const n = safeParseCount(m?.[1]);
     if (n != null) {
       return { count: n, hint: "text:この条件の求人数○件" };
@@ -41,7 +70,7 @@ function parseDodaJobsCountInternal(html: string): {
 
   // ③ 「公開求人数 58 件」
   {
-    const m = html.match(/公開求人数[\s　]*([0-9,]+)[\s　]*件/);
+    const m = html.match(/公開求人数[\s\S]{0,80}?([0-9,]+)\s*件/);
     const n = safeParseCount(m?.[1]);
     if (n != null) {
       return { count: n, hint: "text:公開求人数○件" };
@@ -62,7 +91,7 @@ function parseDodaJobsCountInternal(html: string): {
   // ⑤ かなり緩い fallback：「求人」「該当求人数」「この条件の求人数」付近の「○○件」
   {
     const m = html.match(
-      /(該当求人数|この条件の求人数|求人)[\s\S]{0,80}?([0-9,]+)\s*件/
+      /(該当求人数|この条件の求人数|求人)[\s\S]{0,120}?([0-9,]+)\s*件/
     );
     const n = safeParseCount(m?.[2]);
     if (n != null) {
@@ -297,7 +326,7 @@ async function fetchDodaJobsCountViaFetch(
       errorMessage: null,
     };
   } catch (err: any) {
-    // ここでは AbortError も含めて「ネットワークレベルの失敗」として扱う
+    // AbortError も含めて「ネットワークレベルの失敗」として扱う
     const msg =
       err?.name === "AbortError"
         ? "doda fetch aborted (タイムアウト or ホスト側のブロックの可能性)"
