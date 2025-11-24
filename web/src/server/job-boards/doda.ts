@@ -2,96 +2,228 @@
 
 import type { ManualCondition } from "./types";
 
+/** ======== 共通ユーティリティ ======== */
+
+/** 数字文字列（カンマ付き）→ number | null */
+function safeParseCount(raw: string | undefined | null): number | null {
+  if (!raw) return null;
+  const n = Number(raw.replace(/,/g, ""));
+  if (Number.isNaN(n)) return null;
+  return n;
+}
+
 /**
- * doda の検索結果ページ HTML から件数を抜き出す
+ * HTML から doda の求人件数を抜き出す内部処理
  *
- * 優先順：
- *   1. <p class="overlay-search-area__total">
- *        この条件の求人数<span class="overlay-search-area__number">753</span>件
- *      </p>
- *   2. <p class="search-sidebar__total-count">
- *        この条件の求人数<span class="search-sidebar__total-count__number">753</span>件
- *      </p>
- *   3. 「該当求人数 753 件中 ...」パターン
+ * - どのパターンで拾えたかを hint として返す
+ */
+function parseDodaJobsCountInternal(html: string): {
+  count: number | null;
+  hint: string | null;
+} {
+  // ① 「該当求人数 63 件中 1～50件 を表示」
+  {
+    const m = html.match(
+      /該当求人数[\s　]*([0-9,]+)[\s　]*件/ // 「中」は後ろに続くので含めなくてOK
+    );
+    const n = safeParseCount(m?.[1]);
+    if (n != null) {
+      return { count: n, hint: "text:該当求人数○件" };
+    }
+  }
+
+  // ② 「この条件の求人数 63 件」
+  {
+    const m = html.match(/この条件の求人数[\s　]*([0-9,]+)[\s　]*件/);
+    const n = safeParseCount(m?.[1]);
+    if (n != null) {
+      return { count: n, hint: "text:この条件の求人数○件" };
+    }
+  }
+
+  // ③ 「公開求人数 58 件」
+  {
+    const m = html.match(/公開求人数[\s　]*([0-9,]+)[\s　]*件/);
+    const n = safeParseCount(m?.[1]);
+    if (n != null) {
+      return { count: n, hint: "text:公開求人数○件" };
+    }
+  }
+
+  // ④ <meta name="description" content="…公開求人数58件…"> のようなメタタグから拾う
+  {
+    const m = html.match(
+      /<meta[^>]+name=["']description["'][^>]+content=["'][^"'>]*?([0-9,]+)\s*件[^"'>]*["'][^>]*>/i
+    );
+    const n = safeParseCount(m?.[1]);
+    if (n != null) {
+      return { count: n, hint: "meta[name=description]" };
+    }
+  }
+
+  // ⑤ かなり緩い fallback：「求人」「該当求人数」「この条件の求人数」付近の「○○件」
+  {
+    const m = html.match(
+      /(該当求人数|この条件の求人数|求人)[\s\S]{0,80}?([0-9,]+)\s*件/
+    );
+    const n = safeParseCount(m?.[2]);
+    if (n != null) {
+      return { count: n, hint: "text:ゆるい近傍マッチ" };
+    }
+  }
+
+  return { count: null, hint: null };
+}
+
+/**
+ * 旧来の公開 API: HTML 全体から件数だけを返す
+ * （他のファイル互換用）
  */
 export function parseDodaJobsCount(html: string): number | null {
-  // ① overlay-search-area__number
-  let m = html.match(
-    /<span[^>]*class=["'][^"']*overlay-search-area__number[^"']*["'][^>]*>\s*([\d,]+)\s*<\/span>/i
-  );
-  if (m?.[1]) {
-    const n = Number(m[1].replace(/,/g, ""));
-    if (!Number.isNaN(n)) return n;
-  }
-
-  // ② search-sidebar__total-count__number
-  m = html.match(
-    /<span[^>]*class=["'][^"']*search-sidebar__total-count__number[^"']*["'][^>]*>\s*([\d,]+)\s*<\/span>/i
-  );
-  if (m?.[1]) {
-    const n = Number(m[1].replace(/,/g, ""));
-    if (!Number.isNaN(n)) return n;
-  }
-
-  // ③ フォールバック：該当求人数 753 件中 ...
-  m = html.match(/該当求人数\s*([\d,]+)\s*件中/);
-  if (m?.[1]) {
-    const n = Number(m[1].replace(/,/g, ""));
-    if (!Number.isNaN(n)) return n;
-  }
-
-  return null;
+  return parseDodaJobsCountInternal(html).count;
 }
 
+/** =========================
+ * 都道府県名 → doda pr コード対応（1〜47）
+ * ========================= */
+
+const PREF_NAME_TO_DODA_CODE: Record<string, string> = {
+  北海道: "1",
+  青森県: "2",
+  岩手県: "3",
+  宮城県: "4",
+  秋田県: "5",
+  山形県: "6",
+  福島県: "7",
+  茨城県: "8",
+  栃木県: "9",
+  群馬県: "10",
+  埼玉県: "11",
+  千葉県: "12",
+  東京都: "13",
+  神奈川県: "14",
+  新潟県: "15",
+  富山県: "16",
+  石川県: "17",
+  福井県: "18",
+  山梨県: "19",
+  長野県: "20",
+  岐阜県: "21",
+  静岡県: "22",
+  愛知県: "23",
+  三重県: "24",
+  滋賀県: "25",
+  京都府: "26",
+  大阪府: "27",
+  兵庫県: "28",
+  奈良県: "29",
+  和歌山県: "30",
+  鳥取県: "31",
+  島根県: "32",
+  岡山県: "33",
+  広島県: "34",
+  山口県: "35",
+  徳島県: "36",
+  香川県: "37",
+  愛媛県: "38",
+  高知県: "39",
+  福岡県: "40",
+  佐賀県: "41",
+  長崎県: "42",
+  熊本県: "43",
+  大分県: "44",
+  宮崎県: "45",
+  鹿児島県: "46",
+  沖縄県: "47",
+};
+
 /**
- * doda 検索 URL を条件から組み立てる。
- *
- * 参考にいただいた URL:
- * https://doda.jp/DodaFront/View/JobSearchList.action?sid=TopSearch&usrclk=PC_logout_kyujinSearchArea_searchButton
- *
- * まずは「キーワードにまとめて投げる」簡易版。
- * internalLarge / internalSmall / prefecture / ageBand / employmentType / salaryBand
- * に入っている文字列を keyword として連結している。
+ * ManualCondition.prefecture（「大阪府」や「13」など）から
+ * doda の pr コード（"27" など）を返す。
  */
-function buildDodaUrl(cond: ManualCondition): string {
-  const base = "https://doda.jp/DodaFront/View/JobSearchList.action";
+function getDodaPrefectureCode(cond: ManualCondition): string | null {
+  const raw = cond.prefecture?.trim();
+  if (!raw) return null;
 
-  const u = new URL(base);
-
-  // ベースパラメータ（指定があれば合わせる）
-  u.searchParams.set("sid", "TopSearch");
-  u.searchParams.set("usrclk", "PC_logout_kyujinSearchArea_searchButton");
-
-  const kwParts = [
-    cond.internalLarge,
-    cond.internalSmall,
-    cond.prefecture,
-    cond.ageBand,
-    cond.employmentType,
-    cond.salaryBand,
-  ]
-    .filter((v): v is string => !!v)
-    .map((v) => v.trim())
-    .filter(Boolean);
-
-  if (kwParts.length > 0) {
-    u.searchParams.set("keyword", kwParts.join(" "));
+  // すでに数字コードっぽいとき（1〜47）
+  if (/^\d{1,2}$/.test(raw)) {
+    const n = Number(raw);
+    if (1 <= n && n <= 47) return String(n);
   }
 
-  return u.toString();
+  // 「東京都」などの日本語からコードを引く
+  const mapped = PREF_NAME_TO_DODA_CODE[raw];
+  return mapped ?? null;
 }
 
-/**
- * doda の検索件数を取得するメイン関数
- *
- * - fetch は AbortController + try/catch でラップ
- * - 通信エラーやタイムアウト時は例外を投げず null を返す
- */
-export async function fetchDodaJobsCount(
-  cond: ManualCondition
-): Promise<number | null> {
-  const url = buildDodaUrl(cond);
+/** =========================
+ * URL 組み立て
+ * ========================= */
 
+/**
+ * ManualCondition から doda の検索 URL を組み立てる。
+ *
+ * 例:
+ *   https://doda.jp/DodaFront/View/JobSearchList.action
+ *     ?oc=0311M
+ *     &pr=13
+ *     &ss=1&pic=1&ds=0&tp=1&bf=1&leftPanelType=1
+ *
+ * - oc: job_board_mappings でマッピング済みの external_small_code（例: "0311M"）
+ * - pr: 都道府県コード（1〜47）
+ */
+function buildDodaListUrl(
+  cond: ManualCondition,
+  prefCode: string | null
+): { url: string; oc: string | null } {
+  const BASE_URL = "https://doda.jp/DodaFront/View/JobSearchList.action";
+
+  // 職種コード: 小分類優先 → 大分類
+  const oc = cond.internalSmall?.trim() || cond.internalLarge?.trim() || null;
+
+  const params = new URLSearchParams();
+
+  if (oc) params.set("oc", oc);
+  if (prefCode) params.set("pr", prefCode);
+
+  // 固定パラメータ（UI のデフォルト値に合わせる）
+  params.set("ss", "1");
+  params.set("pic", "1");
+  params.set("ds", "0");
+  params.set("tp", "1");
+  params.set("bf", "1");
+  params.set("leftPanelType", "1");
+
+  const url = `${BASE_URL}?${params.toString()}`;
+  return { url, oc };
+}
+
+/** =========================
+ * fetch ベースの実装
+ * ========================= */
+
+export type DodaJobsCountResult = {
+  /** 最終的に返した件数（null の場合は取得失敗） */
+  total: number | null;
+  /** 実際に叩いた URL */
+  url: string;
+  /** 使用した都道府県コード（例: "13"）*/
+  prefCode: string | null;
+  /** 使用した職種コード（例: "0311M"） */
+  oc: string | null;
+  /** HTTP ステータスコード（fetch結果） */
+  httpStatus?: number | null;
+  /** 件数パース時に使用したパターンのヒント */
+  parseHint?: string | null;
+  /** 失敗時のメッセージ（成功時は null） */
+  errorMessage?: string | null;
+};
+
+async function fetchDodaJobsCountViaFetch(
+  url: string,
+  prefCode: string | null,
+  oc: string | null
+): Promise<DodaJobsCountResult> {
   const controller = new AbortController();
   const timeoutMs = 15000;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -103,22 +235,106 @@ export async function fetchDodaJobsCount(
         "user-agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
         "accept-language": "ja-JP,ja;q=0.9,en;q=0.8",
+        accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
       },
       signal: controller.signal,
     });
 
+    const httpStatus = res.status;
+
     if (!res.ok) {
-      console.error("doda fetch failed", res.status, res.statusText);
-      return null;
+      const msg = `doda list fetch failed: ${res.status} ${res.statusText}`;
+      console.error(msg, { url });
+      return {
+        total: null,
+        url,
+        prefCode,
+        oc,
+        httpStatus,
+        parseHint: null,
+        errorMessage: msg,
+      };
     }
 
     const html = await res.text();
-    return parseDodaJobsCount(html);
-  } catch (err) {
-    // fetch 失敗時は例外を上に投げず null にする
-    console.error("doda fetch error", err);
-    return null;
+    const { count, hint } = parseDodaJobsCountInternal(html);
+
+    if (count == null) {
+      const msg = "doda fetch could not parse jobs count";
+      console.error(msg, {
+        url,
+        htmlSnippet: html.slice(0, 2000),
+      });
+      return {
+        total: null,
+        url,
+        prefCode,
+        oc,
+        httpStatus,
+        parseHint: hint,
+        errorMessage: msg,
+      };
+    }
+
+    return {
+      total: count,
+      url,
+      prefCode,
+      oc,
+      httpStatus,
+      parseHint: hint,
+      errorMessage: null,
+    };
+  } catch (err: any) {
+    const msg = `doda fetch error: ${err?.message ?? String(err)}`;
+    console.error("doda fetch error", err, { url });
+    return {
+      total: null,
+      url,
+      prefCode,
+      oc,
+      httpStatus: null,
+      parseHint: null,
+      errorMessage: msg,
+    };
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** =========================
+ * 公開 API: doda 件数取得（単一条件）
+ * ========================= */
+
+/**
+ * run-batch/route.ts から呼び出される公開関数。
+ *
+ * - job_board_mappings でマッピング済みの ManualCondition を受け取り
+ * - 職種コード（oc）＋都道府県コード（pr）入りの URL を叩き
+ * - HTML から該当求人数（公開求人数）を抜き出して number | null を返す
+ */
+export async function fetchDodaJobsCount(
+  cond: ManualCondition
+): Promise<number | null> {
+  const prefCode = getDodaPrefectureCode(cond);
+  const { url, oc } = buildDodaListUrl(cond, prefCode);
+
+  const result = await fetchDodaJobsCountViaFetch(url, prefCode, oc);
+
+  // ここでは数値だけ返し、詳細は console に吐いておく
+  if (result.errorMessage) {
+    console.error("doda jobs count error", result);
+  } else {
+    console.info("doda jobs count ok", {
+      url: result.url,
+      total: result.total,
+      prefCode: result.prefCode,
+      oc: result.oc,
+      hint: result.parseHint,
+      httpStatus: result.httpStatus,
+    });
+  }
+
+  return result.total;
 }
