@@ -23,9 +23,7 @@ function parseDodaJobsCountInternal(html: string): {
 } {
   // ① 「該当求人数 63 件中 1～50件 を表示」
   {
-    const m = html.match(
-      /該当求人数[\s　]*([0-9,]+)[\s　]*件/ // 「中」は後ろに続くので含めなくてOK
-    );
+    const m = html.match(/該当求人数[\s　]*([0-9,]+)[\s　]*件/);
     const n = safeParseCount(m?.[1]);
     if (n != null) {
       return { count: n, hint: "text:該当求人数○件" };
@@ -165,11 +163,11 @@ function getDodaPrefectureCode(cond: ManualCondition): string | null {
  *
  * 例:
  *   https://doda.jp/DodaFront/View/JobSearchList.action
- *     ?oc=0311M
+ *     ?oc=031201S
  *     &pr=13
- *     &ss=1&pic=1&ds=0&tp=1&bf=1&leftPanelType=1
+ *     &ss=1&pic=1&ds=0&tp=1&bf=1&mpsc_sid=10&oldestDayWdtno=0&leftPanelType=1
  *
- * - oc: job_board_mappings でマッピング済みの external_small_code（例: "0311M"）
+ * - oc: job_board_mappings.external_small_code（例: "031201"）に "S" を付与したもの
  * - pr: 都道府県コード（1〜47）
  */
 function buildDodaListUrl(
@@ -178,21 +176,36 @@ function buildDodaListUrl(
 ): { url: string; oc: string | null } {
   const BASE_URL = "https://doda.jp/DodaFront/View/JobSearchList.action";
 
-  // 職種コード: 小分類優先 → 大分類
-  const oc = cond.internalSmall?.trim() || cond.internalLarge?.trim() || null;
+  // job_board_mappings からマッピング済みの値を想定
+  const rawSmall = cond.internalSmall?.trim() || "";
+  const rawLarge = cond.internalLarge?.trim() || "";
+
+  let oc: string | null = null;
+
+  if (rawSmall) {
+    // 小分類コード（例: "031201"）を前提に "S" を付ける
+    const digits = rawSmall.replace(/[^0-9]/g, "");
+    oc = digits ? `${digits}S` : null;
+  } else if (rawLarge) {
+    // 小分類が無い場合の保険として、大分類コードに "L" を付けて利用
+    const digits = rawLarge.replace(/[^0-9]/g, "");
+    oc = digits ? `${digits}L` : null;
+  }
 
   const params = new URLSearchParams();
 
   if (oc) params.set("oc", oc);
   if (prefCode) params.set("pr", prefCode);
 
-  // 固定パラメータ（UI のデフォルト値に合わせる）
+  // 固定パラメータ（UI のデフォルト値 & 参考 URL に合わせる）
   params.set("ss", "1");
   params.set("pic", "1");
   params.set("ds", "0");
   params.set("tp", "1");
   params.set("bf", "1");
   params.set("leftPanelType", "1");
+  params.set("mpsc_sid", "10");
+  params.set("oldestDayWdtno", "0");
 
   const url = `${BASE_URL}?${params.toString()}`;
   return { url, oc };
@@ -209,7 +222,7 @@ export type DodaJobsCountResult = {
   url: string;
   /** 使用した都道府県コード（例: "13"）*/
   prefCode: string | null;
-  /** 使用した職種コード（例: "0311M"） */
+  /** 使用した職種コード（例: "031201S"） */
   oc: string | null;
   /** HTTP ステータスコード（fetch結果） */
   httpStatus?: number | null;
@@ -225,7 +238,7 @@ async function fetchDodaJobsCountViaFetch(
   oc: string | null
 ): Promise<DodaJobsCountResult> {
   const controller = new AbortController();
-  const timeoutMs = 15000;
+  const timeoutMs = 30000; // 30秒に延長
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
@@ -322,7 +335,6 @@ export async function fetchDodaJobsCount(
 
   const result = await fetchDodaJobsCountViaFetch(url, prefCode, oc);
 
-  // ここではログだけ残して詳細な扱いは呼び出し側に任せる
   if (result.errorMessage) {
     console.error("doda jobs count error", result);
   } else {
