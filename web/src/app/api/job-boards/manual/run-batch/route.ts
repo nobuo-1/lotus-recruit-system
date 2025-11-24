@@ -14,7 +14,10 @@ import {
   fetchMynaviJobsCountForPrefectures,
   type MynaviJobsCountResult,
 } from "@/server/job-boards/mynavi";
-import { fetchDodaJobsCount } from "@/server/job-boards/doda";
+import {
+  fetchDodaJobsCount,
+  type DodaJobsCountResult,
+} from "@/server/job-boards/doda";
 import { supabaseServer } from "@/lib/supabaseServer";
 
 type RequestBody = {
@@ -301,9 +304,27 @@ async function fetchMynaviStats(cond: ManualCondition): Promise<SiteStats> {
 
 /** ========== doda ========== */
 async function fetchDodaStats(cond: ManualCondition): Promise<SiteStats> {
-  const total = await fetchDodaJobsCount(cond);
+  const result: DodaJobsCountResult = await fetchDodaJobsCount(cond);
+
+  const debugLines: string[] = [];
+
+  debugLines.push(
+    [
+      "doda-detail",
+      `url=${result.url}`,
+      `prefecture=${cond.prefecture ?? "（指定なし）"}`,
+      `prefCode=${result.prefCode ?? "（なし）"}`,
+      `oc=${result.oc ?? "（なし）"}`,
+      `httpStatus=${result.httpStatus ?? "n/a"}`,
+      `total=${result.total ?? "null"}`,
+      `parseHint=${result.parseHint ?? "unknown"}`,
+      `error=${result.errorMessage ?? "none"}`,
+    ].join(" / ")
+  );
+
   return {
-    jobsTotal: total,
+    jobsTotal: result.total,
+    debugInfo: { lines: debugLines },
   };
 }
 

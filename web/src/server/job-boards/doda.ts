@@ -312,17 +312,17 @@ async function fetchDodaJobsCountViaFetch(
  *
  * - job_board_mappings でマッピング済みの ManualCondition を受け取り
  * - 職種コード（oc）＋都道府県コード（pr）入りの URL を叩き
- * - HTML から該当求人数（公開求人数）を抜き出して number | null を返す
+ * - HTML から該当求人数（公開求人数）を抜き出して結果オブジェクトを返す
  */
 export async function fetchDodaJobsCount(
   cond: ManualCondition
-): Promise<number | null> {
+): Promise<DodaJobsCountResult> {
   const prefCode = getDodaPrefectureCode(cond);
   const { url, oc } = buildDodaListUrl(cond, prefCode);
 
   const result = await fetchDodaJobsCountViaFetch(url, prefCode, oc);
 
-  // ここでは数値だけ返し、詳細は console に吐いておく
+  // ここではログだけ残して詳細な扱いは呼び出し側に任せる
   if (result.errorMessage) {
     console.error("doda jobs count error", result);
   } else {
@@ -336,5 +336,5 @@ export async function fetchDodaJobsCount(
     });
   }
 
-  return result.total;
+  return result;
 }
