@@ -16,13 +16,18 @@ function safeParseCount(raw: string | undefined | null): number | null {
  * HTML から doda の求人件数を抜き出す内部処理
  *
  * - どのパターンで拾えたかを hint として返す
+ *
+ * 優先度:
+ *   0-1. <span class="search-sidebar__total-count__number">91</span>
+ *   0-2. <span class="displayJobCount__totalNum">91</span>
+ *   ①〜⑤: テキストベースのフォールバック
  */
 function parseDodaJobsCountInternal(html: string): {
   count: number | null;
   hint: string | null;
 } {
   // 0-1. サイドバー上部の件数
-  // <span class="search-sidebar__total-count__number">840</span>
+  // <span class="search-sidebar__total-count__number">91</span>
   {
     const m = html.match(
       /<span[^>]*class=["'][^"']*search-sidebar__total-count__number[^"']*["'][^>]*>\s*([\d,]+)\s*<\/span>/i
@@ -37,7 +42,7 @@ function parseDodaJobsCountInternal(html: string): {
   }
 
   // 0-2. 検索結果ヘッダー部の件数
-  // <span class="displayJobCount__totalNum">840</span>
+  // <span class="displayJobCount__totalNum">91</span>
   {
     const m = html.match(
       /<span[^>]*class=["'][^"']*displayJobCount__totalNum[^"']*["'][^>]*>\s*([\d,]+)\s*<\/span>/i
@@ -51,7 +56,7 @@ function parseDodaJobsCountInternal(html: string): {
     }
   }
 
-  // ① 「該当求人数 63 件中 1～50件 を表示」
+  // ① 「該当求人数 91 件中 1～50件 を表示」
   {
     const m = html.match(/該当求人数[\s\S]{0,80}?([\d,]+)\s*件/);
     const n = safeParseCount(m?.[1]);
@@ -60,7 +65,7 @@ function parseDodaJobsCountInternal(html: string): {
     }
   }
 
-  // ② 「この条件の求人数 63 件」
+  // ② 「この条件の求人数 91 件」
   {
     const m = html.match(/この条件の求人数[\s\S]{0,80}?([\d,]+)\s*件/);
     const n = safeParseCount(m?.[1]);
@@ -195,7 +200,7 @@ function getDodaPrefectureCode(cond: ManualCondition): string | null {
  *   https://doda.jp/DodaFront/View/JobSearchList.action
  *     ?oc=031201S
  *     &pr=13
- *     &ss=1&pic=1&ds=0&tp=1&bf=1&mpsc_sid=10&oldestDayWdtno=0&leftPanelType=1
+ *     &ss=1&pic=1&ds=0&tp=1&bf=1&leftPanelType=1&mpsc_sid=10&oldestDayWdtno=0
  *
  * - oc: job_board_mappings.external_small_code（例: "031201"）に "S" を付与したもの
  * - pr: 都道府県コード（1〜47）
@@ -276,6 +281,9 @@ const COMMON_HEADERS = {
  * - AbortController で 15 秒タイムアウト
  * - 1 回だけ試行
  * - 失敗したら total=null を即返す（Vercel の 300 秒タイムアウトを避ける）
+ *
+ * ※ ここで "doda fetch aborted (timeout)" になっている場合は、
+ *    コードではなく Vercel→doda 間のネットワーク問題が原因です。
  */
 async function fetchDodaJobsCountViaFetch(
   url: string,
