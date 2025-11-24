@@ -237,21 +237,18 @@ async function fetchDodaJobsCountViaFetch(
   prefCode: string | null,
   oc: string | null
 ): Promise<DodaJobsCountResult> {
-  const controller = new AbortController();
-  const timeoutMs = 30000; // 30秒に延長
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
   try {
     const res = await fetch(url, {
       method: "GET",
       headers: {
+        // なるべくブラウザアクセスに近づける
         "user-agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
         "accept-language": "ja-JP,ja;q=0.9,en;q=0.8",
         accept:
           "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        referer: "https://doda.jp/",
       },
-      signal: controller.signal,
     });
 
     const httpStatus = res.status;
@@ -300,8 +297,14 @@ async function fetchDodaJobsCountViaFetch(
       errorMessage: null,
     };
   } catch (err: any) {
-    const msg = `doda fetch error: ${err?.message ?? String(err)}`;
+    // ここでは AbortError も含めて「ネットワークレベルの失敗」として扱う
+    const msg =
+      err?.name === "AbortError"
+        ? "doda fetch aborted (タイムアウト or ホスト側のブロックの可能性)"
+        : `doda fetch error: ${err?.message ?? String(err)}`;
+
     console.error("doda fetch error", err, { url });
+
     return {
       total: null,
       url,
@@ -311,8 +314,6 @@ async function fetchDodaJobsCountViaFetch(
       parseHint: null,
       errorMessage: msg,
     };
-  } finally {
-    clearTimeout(timer);
   }
 }
 
