@@ -251,7 +251,6 @@ const TYPE_BASE_URL = "https://type.jp/job/search/";
  *   https://type.jp/job/search/
  *     ?job3IdList=3&job3IdList=140
  *     &workplaceIdList=10
- *     &pathway=37
  *     &isFirstPage=true
  *     &isLogin=false
  *     &keyword=
@@ -259,6 +258,10 @@ const TYPE_BASE_URL = "https://type.jp/job/search/";
  * prefCode が "22,23" のような場合は、
  *   ?workplaceIdList=22&workplaceIdList=23
  * として付与する。
+ *
+ * ※ 以前は pathway=37 を固定で入れていたが、
+ *   職種カテゴリによって無効な pathway になるケースがあり 404 が発生するため
+ *   現在は pathway を付与しない実装にしている。
  */
 function buildTypeListUrl(
   cond: ManualCondition,
@@ -279,8 +282,7 @@ function buildTypeListUrl(
     }
   }
 
-  // 参考URLに合わせた固定パラメータ
-  params.set("pathway", "37");
+  // pathway は付与しない（カテゴリによって値が異なるため）
   params.set("isFirstPage", "true");
   params.set("isLogin", "false");
   params.set("keyword", "");
@@ -342,6 +344,21 @@ async function fetchTypeJobsCountViaDirectFetch(
     const httpStatus = res.status;
 
     if (!res.ok) {
+      // 404 の場合は「条件に合う求人が存在しない」とみなして 0 件でフォールバック
+      if (res.status === 404) {
+        const msg = "type list not found (404, treat as 0件)";
+        console.warn(msg, { url });
+        return {
+          total: 0,
+          url,
+          prefCode,
+          job3Ids,
+          httpStatus,
+          parseHint: "fallback:404->0",
+          errorMessage: null,
+        };
+      }
+
       const msg = `type list fetch failed: ${res.status} ${res.statusText}`;
       console.error(msg, { url });
       return {
@@ -364,14 +381,15 @@ async function fetchTypeJobsCountViaDirectFetch(
         url,
         htmlSnippet: html.slice(0, 2000),
       });
+      // パースできなかった場合も「0件」として扱う（バッチ全体をこけさないため）
       return {
-        total: null,
+        total: 0,
         url,
         prefCode,
         job3Ids,
         httpStatus,
-        parseHint: hint,
-        errorMessage: msg,
+        parseHint: hint ?? "fallback:parse-failed->0",
+        errorMessage: null,
       };
     }
 
