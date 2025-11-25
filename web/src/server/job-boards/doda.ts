@@ -198,11 +198,11 @@ function getDodaPrefectureCode(cond: ManualCondition): string | null {
  *
  * 例:
  *   https://doda.jp/DodaFront/View/JobSearchList.action
- *     ?oc=031201S
+ *     ?oc=031201S,140902S
  *     &pr=13
  *     &ss=1&pic=1&ds=0&tp=1&bf=1&leftPanelType=1&mpsc_sid=10&oldestDayWdtno=0
  *
- * - oc: job_board_mappings.external_small_code（例: "031201"）に "S" を付与したもの
+ * - oc: job_board_mappings.external_small_code（例: "031201,140902"）に "S" を付与したものをカンマ区切りで連結
  * - pr: 都道府県コード（1〜47）
  */
 function buildDodaListUrl(
@@ -211,21 +211,31 @@ function buildDodaListUrl(
 ): { url: string; oc: string | null } {
   const BASE_URL = "https://doda.jp/DodaFront/View/JobSearchList.action";
 
-  // job_board_mappings からマッピング済みの値を想定
+  // run-batch 側の resolveExternalJobCodes から渡ってくる値を想定:
+  // - small: "031201"  または  "031201,140902" のようなカンマ区切り
+  // - large: "03" など（small がなければ L を使って "03L" にする）
   const rawSmall = cond.internalSmall?.trim() || "";
   const rawLarge = cond.internalLarge?.trim() || "";
 
-  let oc: string | null = null;
+  const ocParts: string[] = [];
 
   if (rawSmall) {
-    // 小分類コード（例: "031201"）を前提に "S" を付ける
-    const digits = rawSmall.replace(/[^0-9]/g, "");
-    oc = digits ? `${digits}S` : null;
+    // "031201,140902" → ["031201","140902"] → ["031201S","140902S"]
+    const pieces = rawSmall.split(/[,\s]+/);
+    for (const piece of pieces) {
+      const digits = piece.replace(/[^0-9]/g, "");
+      if (!digits) continue;
+      ocParts.push(`${digits}S`);
+    }
   } else if (rawLarge) {
-    // 小分類が無い場合の保険として、大分類コードに "L" を付けて利用
+    // small が無い場合の保険として、大分類コードに "L" を付ける
     const digits = rawLarge.replace(/[^0-9]/g, "");
-    oc = digits ? `${digits}L` : null;
+    if (digits) {
+      ocParts.push(`${digits}L`);
+    }
   }
+
+  const oc = ocParts.length > 0 ? ocParts.join(",") : null;
 
   const params = new URLSearchParams();
 
@@ -257,7 +267,7 @@ export type DodaJobsCountResult = {
   url: string;
   /** 使用した都道府県コード（例: "13"）*/
   prefCode: string | null;
-  /** 使用した職種コード（例: "031201S"） */
+  /** 使用した職種コード（例: "031201S" や "031201S,140902S"） */
   oc: string | null;
   /** HTTP ステータスコード（fetch結果） */
   httpStatus?: number | null;
