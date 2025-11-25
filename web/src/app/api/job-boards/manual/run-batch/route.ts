@@ -171,11 +171,16 @@ async function loadJobBoardMappings(
  * - internal_small がなく internal_large のみの場合は large 基準でマッピング
  * - マッピングが見つからない場合は元の値をそのまま返す（従来通り）
  *
- * マイナビの場合（重要な変更点）:
+ * マイナビ:
  * - 同じ internal_small に対して複数行存在する場合、
  *   すべての external_small_code を「11105+12105+…」の形で結合
  *   → mynavi.ts 側で "o11105+o12105+…" に変換され、
  *     マイナビの複数小分類選択と同じ動きになる
+ *
+ * doda:
+ * - 同じ internal_small に対して複数行存在する場合、
+ *   すべての external_small_code を「031201,140902,…」の形で結合
+ *   → doda.ts 側で "031201S,140902S,…" のように oc パラメータに展開される
  */
 function resolveExternalJobCodes(
   base: BaseCondition,
@@ -192,7 +197,7 @@ function resolveExternalJobCodes(
     const rowsForSmall = siteMappings.filter((m) => m.internal_small === S);
 
     if (rowsForSmall.length > 0) {
-      // ===== マイナビ専用: 複数小分類コードをまとめて結合 =====
+      // ===== マイナビ専用: 複数小分類コードをまとめて結合（"+" 区切り） =====
       if (base.siteKey === "mynavi") {
         const smallCodeSet = new Set<string>();
 
@@ -233,7 +238,48 @@ function resolveExternalJobCodes(
         }
       }
 
-      // ===== マイナビ以外、または結合に失敗した場合のフォールバック =====
+      // ===== doda 専用: 複数小分類コードをカンマ区切りで結合（"031201,140902"） =====
+      if (base.siteKey === "doda") {
+        const smallCodeSet = new Set<string>();
+
+        for (const row of rowsForSmall) {
+          const raw = (row.external_small_code || "").trim();
+          if (!raw) continue;
+
+          // 「031201,140902」や「031201+140902」など既に結合済みも想定して分割
+          for (const piece of raw.split(/[,+]/)) {
+            const code = piece.trim();
+            if (code) smallCodeSet.add(code);
+          }
+        }
+
+        const mergedSmall =
+          smallCodeSet.size > 0 ? Array.from(smallCodeSet).join(",") : null;
+
+        // large 側は、external_large_code → internal_large(L一致) → それ以外 の優先度で決定
+        const largeFromRows =
+          // external_large_code が明示されている行を優先
+          rowsForSmall.find((r) => !!r.external_large_code)
+            ?.external_large_code ??
+          // internal_large が L と一致する行を優先
+          (L
+            ? rowsForSmall.find((r) => r.internal_large === L)
+                ?.external_large_code
+            : null) ??
+          // それでもなければ、どこかに入っている internal_large を採用
+          rowsForSmall.find((r) => !!r.internal_large)?.internal_large ??
+          L;
+
+        if (mergedSmall || largeFromRows) {
+          return {
+            large: largeFromRows || L,
+            // small 側は、結合結果が取れなかった場合でも最低限 S は維持
+            small: mergedSmall || S,
+          };
+        }
+      }
+
+      // ===== 上記以外、または結合に失敗した場合のフォールバック =====
       const preferredRow =
         // internal_large が一致する行を優先
         rowsForSmall.find((m) => !!L && m.internal_large === L) ??
