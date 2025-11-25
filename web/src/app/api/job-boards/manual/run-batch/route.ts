@@ -18,11 +18,16 @@ import {
   fetchDodaJobsCount,
   type DodaJobsCountResult,
 } from "@/server/job-boards/doda";
-// ★ type 用モジュールを追加
+// ★ type 用モジュール
 import {
   fetchTypeJobsCount,
   type TypeJobsCountResult,
 } from "@/server/job-boards/type";
+// ★ 女の転職type 用モジュール
+import {
+  fetchWomanTypeJobsCount,
+  type WomanTypeJobsCountResult,
+} from "@/server/job-boards/womantype";
 
 import { supabaseServer } from "@/lib/supabaseServer";
 
@@ -205,18 +210,18 @@ async function loadJobBoardMappings(
  * マイナビ:
  * - 同じ internal_small に対して複数行存在する場合、
  *   すべての external_small_code を「11105+12105+…」の形で結合
- *   → mynavi.ts 側で "o11105+o12105+…" に変換され、
- *     マイナビの複数小分類選択と同じ動きになる
  *
  * doda:
  * - 同じ internal_small に対して複数行存在する場合、
  *   すべての external_small_code を「031201,140902,…」の形で結合
- *   → doda.ts 側で "031201S,140902S,…" のように oc パラメータに展開される
  *
  * type:
  * - 同じ internal_small に対して複数行存在する場合、
  *   すべての external_small_code を「3,140,…」の形で結合
- *   → type.ts 側で job3IdList=3&job3IdList=140 のように展開される
+ *
+ * womantype:
+ * - 同じ internal_small に対して複数行存在する場合、
+ *   すべての external_small_code を「10401,10402,…」の形で結合
  */
 function resolveExternalJobCodes(
   base: BaseCondition,
@@ -253,22 +258,18 @@ function resolveExternalJobCodes(
 
         // large 側は、external_large_code → internal_large(L一致) → それ以外 の優先度で決定
         const largeFromRows =
-          // external_large_code が明示されている行を優先
           rowsForSmall.find((r) => !!r.external_large_code)
             ?.external_large_code ??
-          // internal_large が L と一致する行を優先
           (L
             ? rowsForSmall.find((r) => r.internal_large === L)
                 ?.external_large_code
             : null) ??
-          // それでもなければ、どこかに入っている internal_large を採用
           rowsForSmall.find((r) => !!r.internal_large)?.internal_large ??
           L;
 
         if (mergedSmall || largeFromRows) {
           return {
             large: largeFromRows || L,
-            // small 側は、結合結果が取れなかった場合でも最低限 S は維持
             small: mergedSmall || S,
           };
         }
@@ -294,22 +295,18 @@ function resolveExternalJobCodes(
 
         // large 側は、external_large_code → internal_large(L一致) → それ以外 の優先度で決定
         const largeFromRows =
-          // external_large_code が明示されている行を優先
           rowsForSmall.find((r) => !!r.external_large_code)
             ?.external_large_code ??
-          // internal_large が L と一致する行を優先
           (L
             ? rowsForSmall.find((r) => r.internal_large === L)
                 ?.external_large_code
             : null) ??
-          // それでもなければ、どこかに入っている internal_large を採用
           rowsForSmall.find((r) => !!r.internal_large)?.internal_large ??
           L;
 
         if (mergedSmall || largeFromRows) {
           return {
             large: largeFromRows || L,
-            // small 側は、結合結果が取れなかった場合でも最低限 S は維持
             small: mergedSmall || S,
           };
         }
@@ -333,7 +330,42 @@ function resolveExternalJobCodes(
         const mergedSmall =
           smallCodeSet.size > 0 ? Array.from(smallCodeSet).join(",") : null;
 
-        // large 側は、external_large_code → internal_large(L一致) → それ以外 の優先度で決定
+        const largeFromRows =
+          rowsForSmall.find((r) => !!r.external_large_code)
+            ?.external_large_code ??
+          (L
+            ? rowsForSmall.find((r) => r.internal_large === L)
+                ?.external_large_code
+            : null) ??
+          rowsForSmall.find((r) => !!r.internal_large)?.internal_large ??
+          L;
+
+        if (mergedSmall || largeFromRows) {
+          return {
+            large: largeFromRows || L,
+            small: mergedSmall || S,
+          };
+        }
+      }
+
+      // ===== womantype 専用: 複数小分類コードをカンマ区切りで結合（"10401,10402"） =====
+      if (base.siteKey === "womantype") {
+        const smallCodeSet = new Set<string>();
+
+        for (const row of rowsForSmall) {
+          const raw = (row.external_small_code || "").trim();
+          if (!raw) continue;
+
+          // 「10401,10402」や「10401+10402」など既に結合済みも想定して分割
+          for (const piece of raw.split(/[,+]/)) {
+            const code = piece.trim();
+            if (code) smallCodeSet.add(code);
+          }
+        }
+
+        const mergedSmall =
+          smallCodeSet.size > 0 ? Array.from(smallCodeSet).join(",") : null;
+
         const largeFromRows =
           rowsForSmall.find((r) => !!r.external_large_code)
             ?.external_large_code ??
@@ -390,12 +422,6 @@ function resolveExternalJobCodes(
 }
 
 /** ========== マイナビ転職 ========== */
-/**
- * マイナビ転職:
- * - URL 生成は server/job-boards/mynavi.ts 側に委譲
- * - external_small_code を Path 部分 "oコード+oコード…" に変換して検索ページを叩き、
- *   「条件に合う求人 ○○件」などから件数を取得
- */
 async function fetchMynaviStats(cond: ManualCondition): Promise<SiteStats> {
   const result = await fetchMynaviJobsCount(cond);
   const total = result.total;
@@ -473,6 +499,32 @@ async function fetchTypeStats(cond: ManualCondition): Promise<SiteStats> {
   };
 }
 
+/** ========== 女の転職type ========== */
+async function fetchWomanTypeStats(cond: ManualCondition): Promise<SiteStats> {
+  const result: WomanTypeJobsCountResult = await fetchWomanTypeJobsCount(cond);
+
+  const debugLines: string[] = [];
+
+  debugLines.push(
+    [
+      "womantype-detail",
+      `url=${result.url}`,
+      `prefecture=${cond.prefecture ?? "（指定なし）"}`,
+      `areaSlug=${result.areaSlug ?? "（なし）"}`,
+      `jobCode=${result.jobCode ?? "（なし）"}`,
+      `httpStatus=${result.httpStatus ?? "n/a"}`,
+      `total=${result.total ?? "null"}`,
+      `parseHint=${result.parseHint ?? "unknown"}`,
+      `error=${result.errorMessage ?? "none"}`,
+    ].join(" / ")
+  );
+
+  return {
+    jobsTotal: result.total,
+    debugInfo: { lines: debugLines },
+  };
+}
+
 /** その他サイト：とりあえず総件数も不明として返す（必要に応じて追加） */
 async function fetchUnknownSiteStats(
   _cond: ManualCondition
@@ -492,6 +544,7 @@ async function fetchStatsForSite(cond: ManualCondition): Promise<SiteStats> {
     case "type":
       return fetchTypeStats(cond);
     case "womantype":
+      return fetchWomanTypeStats(cond);
     default:
       return fetchUnknownSiteStats(cond);
   }
