@@ -74,7 +74,10 @@ app.get("/doda/jobs-count", async (req, res) => {
   }
 });
 
+// ★ここを修正：0.0.0.0 に明示的にバインドする
 const port = Number(process.env.PORT || 3001);
-app.listen(port, () => {
-  console.log(`Doda proxy listening on port ${port}`);
+const host = process.env.HOST || "0.0.0.0";
+
+app.listen(port, host, () => {
+  console.log(`Doda proxy listening on http://${host}:${port}`);
 });
