@@ -277,15 +277,110 @@ const COMMON_HEADERS = {
 };
 
 /**
- * マイナビと同じ思想のシンプルな fetch 実装
- * - AbortController で 15 秒タイムアウト
- * - 1 回だけ試行
- * - 失敗したら total=null を即返す（Vercel の 300 秒タイムアウトを避ける）
- *
- * ※ ここで "doda fetch aborted (timeout)" になっている場合は、
- *    コードではなく Vercel→doda 間のネットワーク問題が原因です。
+ * さくらVPS上の doda-proxy API を叩く実装
+ * - 環境変数 DODA_PROXY_BASE_URL が設定されている場合のみ有効
+ * - 成功すればその結果を返し、失敗した場合は null を返す
  */
-async function fetchDodaJobsCountViaFetch(
+async function fetchDodaJobsCountViaProxy(
+  url: string,
+  prefCode: string | null,
+  oc: string | null
+): Promise<DodaJobsCountResult | null> {
+  const base = process.env.DODA_PROXY_BASE_URL;
+  if (!base) return null; // プロキシ未設定
+
+  const apiKey = process.env.DODA_PROXY_API_KEY || "";
+
+  const proxyUrl =
+    base.replace(/\/+$/, "") +
+    "/doda/jobs-count?target=" +
+    encodeURIComponent(url);
+
+  try {
+    const res = await fetch(proxyUrl, {
+      method: "GET",
+      headers: {
+        "x-api-key": apiKey,
+        accept: "application/json",
+      },
+      cache: "no-store",
+    });
+
+    const httpStatus = res.status;
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      console.error("doda proxy fetch failed", {
+        proxyUrl,
+        httpStatus,
+        body: text.slice(0, 500),
+      });
+      return {
+        total: null,
+        url,
+        prefCode,
+        oc,
+        httpStatus,
+        parseHint: null,
+        errorMessage: `doda proxy error: ${httpStatus}`,
+      };
+    }
+
+    const data = (await res.json()) as {
+      ok: boolean;
+      total: number | null;
+      url: string;
+      httpStatus?: number;
+      parseHint?: string | null;
+      error?: string;
+    };
+
+    if (!data.ok) {
+      console.error("doda proxy returned error", { proxyUrl, data });
+      return {
+        total: null,
+        url,
+        prefCode,
+        oc,
+        httpStatus: data.httpStatus ?? httpStatus,
+        parseHint: data.parseHint ?? null,
+        errorMessage: data.error ?? "doda proxy returned ok=false",
+      };
+    }
+
+    return {
+      total:
+        typeof data.total === "number" && !Number.isNaN(data.total)
+          ? data.total
+          : null,
+      url: data.url || url,
+      prefCode,
+      oc,
+      httpStatus: data.httpStatus ?? httpStatus,
+      parseHint: data.parseHint ?? null,
+      errorMessage: null,
+    };
+  } catch (err: any) {
+    console.error("doda proxy fetch error", err, { proxyUrl });
+    return {
+      total: null,
+      url,
+      prefCode,
+      oc,
+      httpStatus: null,
+      parseHint: null,
+      errorMessage: `doda proxy fetch exception: ${
+        err?.message ?? String(err)
+      }`,
+    };
+  }
+}
+
+/**
+ * Vercel から doda へ直接アクセスする実装
+ * - こちらは主にローカル開発用のフォールバックとして利用
+ */
+async function fetchDodaJobsCountViaDirectFetch(
   url: string,
   prefCode: string | null,
   oc: string | null
@@ -297,7 +392,7 @@ async function fetchDodaJobsCountViaFetch(
   try {
     const res = await fetch(url, {
       method: "GET",
-      headers: COMMON_HEADERS,
+      headers: COMMON_HEADERS as any,
       cache: "no-store",
       signal: controller.signal,
     });
@@ -379,6 +474,10 @@ async function fetchDodaJobsCountViaFetch(
  * - job_board_mappings でマッピング済みの ManualCondition を受け取り
  * - 職種コード（oc）＋都道府県コード（pr）入りの URL を叩き
  * - HTML から該当求人数（公開求人数）を抜き出して結果オブジェクトを返す
+ *
+ * 優先順:
+ *   1. さくらVPS の doda-proxy 経由（本番用）
+ *   2. 直接 doda への fetch（プロキシ未設定 or 失敗時のフォールバック）
  */
 export async function fetchDodaJobsCount(
   cond: ManualCondition
@@ -386,12 +485,31 @@ export async function fetchDodaJobsCount(
   const prefCode = getDodaPrefectureCode(cond);
   const { url, oc } = buildDodaListUrl(cond, prefCode);
 
-  const result = await fetchDodaJobsCountViaFetch(url, prefCode, oc);
+  // 1. まず さくらVPS の proxy 経由を試す
+  const viaProxy = await fetchDodaJobsCountViaProxy(url, prefCode, oc);
+  if (viaProxy && !viaProxy.errorMessage && viaProxy.total != null) {
+    console.info("doda jobs count via proxy ok", {
+      url: viaProxy.url,
+      total: viaProxy.total,
+      prefCode: viaProxy.prefCode,
+      oc: viaProxy.oc,
+      hint: viaProxy.parseHint,
+      httpStatus: viaProxy.httpStatus,
+    });
+    return viaProxy;
+  }
+
+  if (viaProxy?.errorMessage) {
+    console.error("doda jobs count via proxy error", viaProxy);
+  }
+
+  // 2. プロキシが使えない or 失敗した場合のみ、直接 Doda にアクセス
+  const result = await fetchDodaJobsCountViaDirectFetch(url, prefCode, oc);
 
   if (result.errorMessage) {
-    console.error("doda jobs count error", result);
+    console.error("doda jobs count error (direct)", result);
   } else {
-    console.info("doda jobs count ok", {
+    console.info("doda jobs count ok (direct)", {
       url: result.url,
       total: result.total,
       prefCode: result.prefCode,
