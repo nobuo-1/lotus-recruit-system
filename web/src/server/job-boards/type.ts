@@ -20,50 +20,77 @@ function safeParseCount(raw: string | undefined | null): number | null {
  *  1. 「この条件の求人 123 件」
  *  2. 「123 件中 1～50 件を表示」
  *  3. 緩めのフォールバック
+ *
+ * ※ それぞれ「複数回出現する」ことを想定し、すべて走査して最大値を採用する。
+ *   （初期表示が 0 件で、JS 後に 246 件に書き換わるケースなどに対応）
  */
 function parseTypeJobsCountInternal(html: string): {
   count: number | null;
   hint: string | null;
 } {
-  // 0. span.whole-num 配下の span.num
+  // 0. span.whole-num 配下の span.num（候補1/候補2どちらも対象）
   {
-    const m = html.match(
-      /<span[^>]*class=["'][^"']*whole-num[^"']*["'][^>]*>[\s\S]*?<span[^>]*class=["'][^"']*num[^"']*["'][^>]*>\s*([\d,]+)\s*<\/span>[\s\S]*?件/s
-    );
-    const n = safeParseCount(m?.[1]);
-    if (n != null) {
-      return { count: n, hint: "span.whole-num span.num" };
+    const re =
+      /<span[^>]*class=["'][^"']*whole-num[^"']*["'][^>]*>[\s\S]*?<span[^>]*class=["'][^"']*num[^"']*["'][^>]*>\s*([\d,]+)\s*<\/span>[\s\S]*?件/g;
+
+    let max: number | null = null;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(html)) !== null) {
+      const n = safeParseCount(m[1]);
+      if (n == null) continue;
+      if (max == null || n > max) max = n;
+    }
+    if (max != null) {
+      return { count: max, hint: "span.whole-num span.num(max)" };
     }
   }
 
-  // 1. 「この条件の求人 123 件」
+  // 1. 「この条件の求人○件」 （間に <span class="num"> が挟まってもOKにする）
   {
-    const m = html.match(/この条件の求人[\s　]*([\d,]+)[\s　]*件/);
-    const n = safeParseCount(m?.[1]);
-    if (n != null) {
-      return { count: n, hint: "text:この条件の求人○件" };
+    const re = /この条件の求人[\s\S]{0,80}?([\d,]+)[\s　]*件/g;
+
+    let max: number | null = null;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(html)) !== null) {
+      const n = safeParseCount(m[1]);
+      if (n == null) continue;
+      if (max == null || n > max) max = n;
+    }
+    if (max != null) {
+      return { count: max, hint: "text:この条件の求人○件(max)" };
     }
   }
 
   // 2. 「123 件中 1～50 件を表示」
   {
-    const m = html.match(
-      /([\d,]+)[\s　]*件中[\s　]*[\d,]+[\s　]*～[\s　]*[\d,]+[\s　]*件を表示/
-    );
-    const n = safeParseCount(m?.[1]);
-    if (n != null) {
-      return { count: n, hint: "text:○件中○～○件を表示" };
+    const re =
+      /([\d,]+)[\s　]*件中[\s　]*[\d,]+[\s　]*～[\s　]*[\d,]+[\s　]*件を表示/g;
+
+    let max: number | null = null;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(html)) !== null) {
+      const n = safeParseCount(m[1]);
+      if (n == null) continue;
+      if (max == null || n > max) max = n;
+    }
+    if (max != null) {
+      return { count: max, hint: "text:○件中○～○件を表示(max)" };
     }
   }
 
-  // 3. ゆるい fallback
+  // 3. ゆるい fallback（近傍に「件」がある数字を拾い、やはり最大値を採用）
   {
-    const m = html.match(
-      /(この条件の求人|件中)[\s\S]{0,120}?([\d,]+)[\s　]*件/
-    );
-    const n = safeParseCount(m?.[2]);
-    if (n != null) {
-      return { count: n, hint: "text:ゆるい近傍マッチ" };
+    const re = /(この条件の求人|件中)[\s\S]{0,120}?([\d,]+)[\s　]*件/g;
+
+    let max: number | null = null;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(html)) !== null) {
+      const n = safeParseCount(m[2]);
+      if (n == null) continue;
+      if (max == null || n > max) max = n;
+    }
+    if (max != null) {
+      return { count: max, hint: "text:ゆるい近傍マッチ(max)" };
     }
   }
 
