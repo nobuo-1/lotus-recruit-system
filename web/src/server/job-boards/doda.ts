@@ -202,7 +202,8 @@ function getDodaPrefectureCode(cond: ManualCondition): string | null {
  *     &pr=13
  *     &ss=1&pic=1&ds=0&tp=1&bf=1&leftPanelType=1&mpsc_sid=10&oldestDayWdtno=0
  *
- * - oc: job_board_mappings.external_small_code（例: "031201,140902"）に "S" を付与したものをカンマ区切りで連結
+ * - oc: run-batch 側から渡された internalSmall（例: "031201" または "031201,140902"）を
+ *       カンマで split し、それぞれに "S" を付与して再度カンマ結合したもの
  * - pr: 都道府県コード（1〜47）
  */
 function buildDodaListUrl(
@@ -211,9 +212,6 @@ function buildDodaListUrl(
 ): { url: string; oc: string | null } {
   const BASE_URL = "https://doda.jp/DodaFront/View/JobSearchList.action";
 
-  // run-batch 側の resolveExternalJobCodes から渡ってくる値を想定:
-  // - small: "031201"  または  "031201,140902" のようなカンマ区切り
-  // - large: "03" など（small がなければ L を使って "03L" にする）
   const rawSmall = cond.internalSmall?.trim() || "";
   const rawLarge = cond.internalLarge?.trim() || "";
 
@@ -239,7 +237,6 @@ function buildDodaListUrl(
 
   const params = new URLSearchParams();
 
-  if (oc) params.set("oc", oc);
   if (prefCode) params.set("pr", prefCode);
 
   // 固定パラメータ（UI のデフォルト値 & 参考 URL に合わせる）
@@ -252,7 +249,18 @@ function buildDodaListUrl(
   params.set("mpsc_sid", "10");
   params.set("oldestDayWdtno", "0");
 
-  const url = `${BASE_URL}?${params.toString()}`;
+  let query = params.toString();
+
+  if (oc) {
+    // ★ oc は URLSearchParams でエンコードせず、生のカンマ区切りで付与
+    if (query) {
+      query += `&oc=${oc}`;
+    } else {
+      query = `oc=${oc}`;
+    }
+  }
+
+  const url = `${BASE_URL}?${query}`;
   return { url, oc };
 }
 

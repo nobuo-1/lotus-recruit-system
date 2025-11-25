@@ -20,6 +20,9 @@ import {
 } from "@/server/job-boards/doda";
 import { supabaseServer } from "@/lib/supabaseServer";
 
+// ★ 大分類と小分類の正しい組み合わせを判定するために利用
+import { JOB_CATEGORIES } from "@/constants/jobCategories";
+
 type RequestBody = {
   sites?: string[];
   large?: string[];
@@ -62,6 +65,25 @@ function isValidSiteKey(v: string): v is SiteKey {
   return v === "mynavi" || v === "doda" || v === "type" || v === "womantype";
 }
 
+/**
+ * 大分類と小分類の組み合わせが有効かどうかを判定
+ *
+ * - large または small が null の場合は true（どちらか片方指定の検索は許容）
+ * - JOB_CATEGORIES[large] に small が含まれている場合のみ true
+ * - JOB_CATEGORIES に large が存在しない場合は、従来どおり true（既存の挙動を壊さない）
+ */
+function isValidLargeSmallPair(
+  large: string | null,
+  small: string | null
+): boolean {
+  if (!large || !small) return true;
+
+  const list = JOB_CATEGORIES[large];
+  if (!list) return true; // 想定外の大分類名は従来通り全て許容
+
+  return list.includes(small);
+}
+
 /** body から BaseCondition の組み合わせを作る（サイト × 大分類 × 小分類 × 都道府県） */
 function buildBaseConditions(
   sites: SiteKey[],
@@ -76,6 +98,9 @@ function buildBaseConditions(
   for (const siteKey of sites) {
     for (const L of largeList) {
       for (const S of smallList) {
+        // ★ 大分類・小分類の整合性チェックを追加
+        if (!isValidLargeSmallPair(L, S)) continue;
+
         for (const P of prefList) {
           out.push({
             siteKey,
