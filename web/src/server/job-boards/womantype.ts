@@ -18,7 +18,9 @@ function safeParseCount(raw: string | undefined | null): number | null {
  * 優先度:
  *  0. <span id="loading-count" ...>123</span>
  *  1. <span id="result-count" ...>123</span>
- *  2. 「123 件中 1～40 を表示」などのパターン
+ *  2. <span id="result_count" ...>123</span>
+ *  3. 「該当の求人件数 123 件」
+ *  4. 「123 件中 1～40 を表示」などのパターン
  *
  * ※ それぞれ複数回出現する可能性があるので、最大値を採用
  */
@@ -43,7 +45,7 @@ function parseWomanTypeJobsCountInternal(html: string): {
     }
   }
 
-  // 1. <span id="result-count" ...>123</span>
+  // 1. <span id="result-count" ...>123</span>（旧パターン想定）
   {
     const re = /<span[^>]*id=["']result-count["'][^>]*>\s*([\d,]+)\s*<\/span>/g;
 
@@ -59,7 +61,40 @@ function parseWomanTypeJobsCountInternal(html: string): {
     }
   }
 
-  // 2. 「123 件中 1～40 を表示」 っぽいテキストから拾うゆるい fallback
+  // 2. <span id="result_count" ...>123</span>（今回ご提示のパターン）
+  {
+    const re = /<span[^>]*id=["']result_count["'][^>]*>\s*([\d,]+)\s*<\/span>/g;
+
+    let max: number | null = null;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(html)) !== null) {
+      const n = safeParseCount(m[1]);
+      if (n == null) continue;
+      if (max == null || n > max) max = n;
+    }
+    if (max != null) {
+      return { count: max, hint: "span#result_count(max)" };
+    }
+  }
+
+  // 3. 「該当の求人件数 123 件」テキスト周りから拾う
+  // <span class="...">該当の求人件数<span ...>46</span>件</span>
+  {
+    const re = /該当の求人件数[\s\S]{0,80}?([\d,]+)[\s　]*件/g;
+
+    let max: number | null = null;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(html)) !== null) {
+      const n = safeParseCount(m[1]);
+      if (n == null) continue;
+      if (max == null || n > max) max = n;
+    }
+    if (max != null) {
+      return { count: max, hint: "text:該当の求人件数○件(max)" };
+    }
+  }
+
+  // 4. 「123 件中 1～40 を表示」 っぽいテキストから拾うゆるい fallback
   {
     const re =
       /([\d,]+)[\s　]*件中[\s　]*[\d,]+[\s　]*～[\s　]*[\d,]+[\s　]*を表示/g;
@@ -230,17 +265,6 @@ function pushHpCodesFromExpr(expr: string, set: Set<string>) {
 
 /**
  * ManualCondition.prefecture を元に hp コード配列を作る。
- *
- * 想定する prefecture の値:
- *   - 「東京都」「神奈川県」「大阪府」「石川県」などの日本語都道府県名
- *   - 「東京23区」「東京都(23区を除く)」「大阪市」「大阪府(大阪市を除く)」
- *     「横浜市」「川崎市」「神奈川県(横浜市、川崎市を除く)」などの細分名
- *   - もしくは "12,02,03,15" や "12+02+03+15" のような hp コード列
- *
- * カンマ or プラスで区切って複数指定も可能:
- *   - "東京都,神奈川県"
- *   - "東京23区+東京都(23区を除く)"
- *   - "11,12,13,14"
  */
 function buildWomanTypeHpCodes(cond: ManualCondition): string[] {
   const raw = cond.prefecture?.trim();
@@ -249,14 +273,12 @@ function buildWomanTypeHpCodes(cond: ManualCondition): string[] {
   const codes = new Set<string>();
 
   // 1) 純粋に「hp コード列」っぽい場合はそのまま使う
-  //    例: "12" / "12,02,03,15" / "12+02+03+15"
   if (/^\d+(?:[,+]\d+)*$/.test(raw)) {
     pushHpCodesFromExpr(raw, codes);
     return Array.from(codes);
   }
 
   // 2) 日本語名称 or 細分名称の場合
-  //    "東京都,神奈川県" / "東京23区+東京都(23区を除く)" などを想定
   for (const part of raw.split(/[,+]/)) {
     const key = part.trim();
     if (!key) continue;
@@ -278,21 +300,6 @@ const WOMAN_TYPE_SEARCH_URL = "https://woman-type.jp/job-search/";
 
 /**
  * ManualCondition から 女の転職type の検索 URL を組み立てる。
- *
- * 例:
- *   https://woman-type.jp/job-search/
- *     ?routeway=79
- *     &hopejob=10101
- *     &hopejob=10102
- *     &hp=12
- *     &hp=02
- *     &hp=03
- *     &hp=15
- *     &keyword=
- *
- * - 職種: hopejob=◯◯ を複数付与
- * - 勤務地: hp=◯◯ を複数付与
- * - その他は routeway=79 と keyword= を最低限付ける
  */
 function buildWomanTypeListUrl(cond: ManualCondition): {
   url: string;
