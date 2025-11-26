@@ -347,7 +347,6 @@ async function ensureTenantId(): Promise<string | null> {
 type ConditionModalProps = {
   open: boolean;
   onClose: () => void;
-  onRun: () => void;
   sites: string[];
   setSites: (s: string[]) => void;
   large: string[];
@@ -360,7 +359,6 @@ type ConditionModalProps = {
 const ConditionModal: React.FC<ConditionModalProps> = ({
   open,
   onClose,
-  onRun,
   sites,
   setSites,
   large,
@@ -486,13 +484,7 @@ const ConditionModal: React.FC<ConditionModalProps> = ({
             onClick={onClose}
             className="rounded-lg px-3 py-1 border border-neutral-300 text-xs hover:bg-neutral-50"
           >
-            キャンセル
-          </button>
-          <button
-            onClick={onRun}
-            className="rounded-lg px-4 py-1 border border-neutral-300 text-xs hover:bg-neutral-50"
-          >
-            この条件で実行する
+            閉じる
           </button>
         </div>
       </div>
@@ -932,8 +924,14 @@ export default function JobBoardsManualPage() {
                 </button>
                 <button
                   type="button"
-                  disabled
-                  className="inline-flex items-center gap-2 rounded-lg border border-dashed border-neutral-300 px-4 py-2 text-xs text-neutral-400"
+                  className="inline-flex items-center gap-2 rounded-lg border border-dashed border-neutral-300 px-4 py-2 text-xs text-neutral-600 hover:bg-neutral-50"
+                  onClick={() => {
+                    setMsg((prev) => {
+                      const add =
+                        "求職者の取得ボタンがクリックされました。（処理はまだ未実装です）";
+                      return prev ? `${prev}\n${add}` : add;
+                    });
+                  }}
                 >
                   求職者の取得（準備中）
                 </button>
@@ -1061,10 +1059,6 @@ export default function JobBoardsManualPage() {
       <ConditionModal
         open={openConditionModal}
         onClose={() => setOpenConditionModal(false)}
-        onRun={() => {
-          setOpenConditionModal(false);
-          void run();
-        }}
         sites={sites}
         setSites={setSites}
         large={large}
