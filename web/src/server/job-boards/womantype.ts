@@ -85,126 +85,249 @@ export function parseWomanTypeJobsCount(html: string): number | null {
 }
 
 /** =========================
- * 都道府県名 → 女の転職type エリアスラッグ
- * ========================= */
-/**
- * ManualCondition.prefecture に入ってくる文字列
- *   - 「東京都」「神奈川県」「大阪府」など
- *   - もしくは "tokyo" や "area-tokyo" などのスラッグ文字列
- *
- * ここでは最低限、現状よく使いそうな都道府県だけマッピングしておき、
- * 足りないものは必要に応じて追加する前提にしている。
- */
-const PREF_NAME_TO_WOMAN_AREA_SLUG: Record<string, string> = {
-  東京都: "tokyo",
-  神奈川県: "kanagawa",
-  千葉県: "chiba",
-  埼玉県: "saitama",
-
-  大阪府: "osaka",
-  兵庫県: "hyogo",
-  京都府: "kyoto",
-
-  愛知県: "aichi",
-
-  北海道: "hokkaido",
-  宮城県: "miyagi",
-  福岡県: "fukuoka",
-
-  // ★ ユーザーさんがすでに使っている石川県も追加
-  石川県: "ishikawa",
-  // ここに他県も必要に応じて足していく
-};
-
-/**
- * ManualCondition.prefecture から woman-type の「area-xxx」用スラッグを返す
- *
- * 例:
- *   "東京都"   → "tokyo"
- *   "area-tokyo" → "tokyo"
- *   "tokyo"    → "tokyo"
- */
-function getWomanTypeAreaSlug(cond: ManualCondition): string | null {
-  const raw = cond.prefecture?.trim();
-  if (!raw) return null;
-
-  // すでに "area-tokyo" のような形なら "tokyo" に変換
-  if (/^area-[a-z0-9-]+$/i.test(raw)) {
-    return raw.slice("area-".length);
-  }
-
-  // すでにスラッグっぽい場合はそのまま使う
-  if (/^[a-z0-9-]+$/i.test(raw)) {
-    return raw;
-  }
-
-  // 日本語都道府県名 → スラッグ
-  const mapped = PREF_NAME_TO_WOMAN_AREA_SLUG[raw];
-  return mapped ?? null;
-}
-
-/** =========================
- * 職種（external_small_code）→ job-office コード
+ * 職種（external_small_code）→ hopejob パラメータ
  * ========================= */
 /**
  * cond.internalSmall には job_board_mappings.external_small_code が入る想定。
- * 「10402」や「10402,10403」のような値を想定し、最初のコードを job-office コードとして使う。
+ *
+ * - 例: "10101" や "10101,10102" や "10101+10102"
+ * - カンマ/プラス区切りで分割して、それぞれを hopejob=◯◯ として付与する。
+ *
+ * internalSmall が空で、かつ internalLarge に "10100" のような
+ * 大分類コードが入っている場合は、それを hopejob として使う。
  */
-function buildWomanTypeJobCode(cond: ManualCondition): string | null {
-  const raw = cond.internalSmall?.trim();
-  if (!raw) return null;
+function buildWomanTypeJobCodes(cond: ManualCondition): string[] {
+  const codes: string[] = [];
 
-  // カンマやプラスで複数指定されている可能性もあるので最初の1つを採用
-  const first = raw.split(/[,+]/)[0]?.trim();
-  if (!first) return null;
+  const pushFromRaw = (raw: string | null | undefined) => {
+    if (!raw) return;
+    for (const piece of raw.split(/[,+]/)) {
+      const digits = piece.trim().replace(/[^0-9]/g, "");
+      if (!digits) continue;
+      codes.push(digits);
+    }
+  };
 
-  const digits = first.replace(/[^0-9]/g, "");
-  return digits || null;
+  if (cond.internalSmall) {
+    pushFromRaw(cond.internalSmall);
+  } else if (cond.internalLarge) {
+    // internalLarge 側に 10100 のようなコードを入れているケースの保険
+    if (/^\d+(?:[,+]\d+)*$/.test(cond.internalLarge.trim())) {
+      pushFromRaw(cond.internalLarge);
+    }
+  }
+
+  return codes;
 }
 
 /** =========================
- * URL 組み立て
+ * 勤務地（prefecture）→ hp パラメータ
  * ========================= */
 
-const WOMAN_TYPE_BASE_URL = "https://woman-type.jp";
+/**
+ * 女の転職type の「hp」コードマッピング
+ *
+ * - 01〜47: 都道府県コード
+ * - 99    : 海外
+ * - 13001/13007/14001/14002/14003/27001/27002: 東京・神奈川・大阪の細分エリア
+ *
+ * ※ キーは type.ts の PREF_NAME_TO_TYPE_CODE と揃えておくと、
+ *    job_board_mappings 側で同じ prefecture 名をそのまま流用しやすい。
+ */
+const PREF_NAME_TO_WOMAN_HP_CODE: Record<string, string> = {
+  // 北海道・東北
+  北海道: "01",
+  青森県: "02",
+  岩手県: "03",
+  宮城県: "04",
+  秋田県: "05",
+  山形県: "06",
+  福島県: "07",
+
+  // 北関東
+  茨城県: "08",
+  栃木県: "09",
+  群馬県: "10",
+
+  // 首都圏
+  埼玉県: "11",
+  千葉県: "12",
+  東京都: "13", // 都道府県単位の「東京都」
+  神奈川県: "14",
+
+  // 「東京都」を 23区 / 23区外に分けて指定したい場合（type.ts と同じキー）
+  東京23区: "13001",
+  "東京都(23区を除く)": "13007",
+
+  // 神奈川県の細分
+  横浜市: "14001",
+  川崎市: "14002",
+  "神奈川県(横浜市、川崎市を除く)": "14003",
+
+  // 北陸・甲信越
+  新潟県: "15",
+  富山県: "16",
+  石川県: "17",
+  福井県: "18",
+  山梨県: "19",
+  長野県: "20",
+
+  // 東海
+  岐阜県: "21",
+  静岡県: "22",
+  愛知県: "23",
+  三重県: "24",
+
+  // 関西
+  滋賀県: "25",
+  京都府: "26",
+  大阪府: "27",
+  兵庫県: "28",
+  奈良県: "29",
+  和歌山県: "30",
+
+  // 「大阪府」を 大阪市 / 大阪市外 に分けて指定したい場合
+  大阪市: "27001",
+  "大阪府(大阪市を除く)": "27002",
+
+  // 中国・四国
+  鳥取県: "31",
+  島根県: "32",
+  岡山県: "33",
+  広島県: "34",
+  山口県: "35",
+  徳島県: "36",
+  香川県: "37",
+  愛媛県: "38",
+  高知県: "39",
+
+  // 九州・沖縄
+  福岡県: "40",
+  佐賀県: "41",
+  長崎県: "42",
+  熊本県: "43",
+  大分県: "44",
+  宮崎県: "45",
+  鹿児島県: "46",
+  沖縄県: "47",
+
+  // 海外
+  海外: "99",
+};
+
+/**
+ * hp コード文字列を Set に追加するユーティリティ
+ *
+ * - expr: "12" / "12,02,03" / "12+02+03" など
+ */
+function pushHpCodesFromExpr(expr: string, set: Set<string>) {
+  for (const piece of expr.split(/[,+]/)) {
+    const digits = piece.trim().replace(/[^0-9]/g, "");
+    if (!digits) continue;
+    set.add(digits);
+  }
+}
+
+/**
+ * ManualCondition.prefecture を元に hp コード配列を作る。
+ *
+ * 想定する prefecture の値:
+ *   - 「東京都」「神奈川県」「大阪府」「石川県」などの日本語都道府県名
+ *   - 「東京23区」「東京都(23区を除く)」「大阪市」「大阪府(大阪市を除く)」
+ *     「横浜市」「川崎市」「神奈川県(横浜市、川崎市を除く)」などの細分名
+ *   - もしくは "12,02,03,15" や "12+02+03+15" のような hp コード列
+ *
+ * カンマ or プラスで区切って複数指定も可能:
+ *   - "東京都,神奈川県"
+ *   - "東京23区+東京都(23区を除く)"
+ *   - "11,12,13,14"
+ */
+function buildWomanTypeHpCodes(cond: ManualCondition): string[] {
+  const raw = cond.prefecture?.trim();
+  if (!raw) return [];
+
+  const codes = new Set<string>();
+
+  // 1) 純粋に「hp コード列」っぽい場合はそのまま使う
+  //    例: "12" / "12,02,03,15" / "12+02+03+15"
+  if (/^\d+(?:[,+]\d+)*$/.test(raw)) {
+    pushHpCodesFromExpr(raw, codes);
+    return Array.from(codes);
+  }
+
+  // 2) 日本語名称 or 細分名称の場合
+  //    "東京都,神奈川県" / "東京23区+東京都(23区を除く)" などを想定
+  for (const part of raw.split(/[,+]/)) {
+    const key = part.trim();
+    if (!key) continue;
+
+    const mapped = PREF_NAME_TO_WOMAN_HP_CODE[key];
+    if (!mapped) continue;
+
+    pushHpCodesFromExpr(mapped, codes);
+  }
+
+  return Array.from(codes);
+}
+
+/** =========================
+ * URL 組み立て（/job-search/? ...）
+ * ========================= */
+
+const WOMAN_TYPE_SEARCH_URL = "https://woman-type.jp/job-search/";
 
 /**
  * ManualCondition から 女の転職type の検索 URL を組み立てる。
  *
  * 例:
- *   https://woman-type.jp/job-office/10402/area-tokyo/?routeway=79
+ *   https://woman-type.jp/job-search/
+ *     ?routeway=79
+ *     &hopejob=10101
+ *     &hopejob=10102
+ *     &hp=12
+ *     &hp=02
+ *     &hp=03
+ *     &hp=15
+ *     &keyword=
  *
- * - 職種: /job-office/{jobCode}/
- * - 都道府県: /area-{slug}/
- * - その他は routeway=79 をクエリに付与（検索結果ページのルートウェイ）
- *
- * ※ prefecture が null の場合は /job-office/10402/?routeway=79 のような URL になる
+ * - 職種: hopejob=◯◯ を複数付与
+ * - 勤務地: hp=◯◯ を複数付与
+ * - その他は routeway=79 と keyword= を最低限付ける
  */
 function buildWomanTypeListUrl(cond: ManualCondition): {
   url: string;
+  /** ログ用: hopejob に使ったコード（カンマ連結） */
   jobCode: string | null;
+  /** ログ用: hp に使ったコード（カンマ連結） */
   areaSlug: string | null;
 } {
-  const jobCode = buildWomanTypeJobCode(cond);
-  const areaSlug = getWomanTypeAreaSlug(cond);
+  const jobCodes = buildWomanTypeJobCodes(cond);
+  const hpCodes = buildWomanTypeHpCodes(cond);
 
-  const segments: string[] = [];
+  const params = new URLSearchParams();
 
-  if (jobCode) {
-    segments.push("job-office", jobCode);
+  // ルートウェイ固定
+  params.set("routeway", "79");
+  // キーワードは未使用だが、例にならって空で付与
+  params.set("keyword", "");
+
+  // 職種 (hopejob)
+  for (const code of jobCodes) {
+    params.append("hopejob", code);
   }
 
-  if (areaSlug) {
-    segments.push(`area-${areaSlug}`);
+  // 勤務地（hp）
+  for (const code of hpCodes) {
+    params.append("hp", code);
   }
 
-  // segments が空になることは基本想定していないが、保険でルートにしておく
-  const path =
-    segments.length > 0 ? `/${segments.join("/")}/` : "/job-search/?";
+  const url = `${WOMAN_TYPE_SEARCH_URL}?${params.toString()}`;
 
-  const url = `${WOMAN_TYPE_BASE_URL.replace(/\/$/, "")}${path}?routeway=79`;
-
-  return { url, jobCode, areaSlug };
+  return {
+    url,
+    jobCode: jobCodes.length ? jobCodes.join(",") : null,
+    areaSlug: hpCodes.length ? hpCodes.join(",") : null,
+  };
 }
 
 /** =========================
@@ -216,9 +339,15 @@ export type WomanTypeJobsCountResult = {
   total: number | null;
   /** 実際に叩いた URL */
   url: string;
-  /** 使用したエリアスラッグ（例: "tokyo"） */
+  /**
+   * 使用した勤務地コード（hp）。
+   * 例: "12,02,03,15"（複数ある場合はカンマ連結）
+   */
   areaSlug: string | null;
-  /** 使用した職種コード（例: "10402"） */
+  /**
+   * 使用した職種コード（hopejob）。
+   * 例: "10101,10102"（複数ある場合はカンマ連結）
+   */
   jobCode: string | null;
   /** HTTP ステータスコード（fetch結果） */
   httpStatus?: number | null;
@@ -348,7 +477,7 @@ async function fetchWomanTypeJobsCountViaDirectFetch(
  * run-batch/route.ts から呼び出される公開関数。
  *
  * - job_board_mappings でマッピング済みの ManualCondition を受け取り
- * - 職種コード（job-office コード）＋エリアスラッグ入りの URL を叩き
+ * - 職種コード（hopejob）＋勤務地コード（hp）入りの URL を叩き
  * - HTML から該当求人数を抜き出して結果オブジェクトを返す
  */
 export async function fetchWomanTypeJobsCount(
@@ -368,8 +497,8 @@ export async function fetchWomanTypeJobsCount(
     console.info("woman-type jobs count ok (direct)", {
       url: result.url,
       total: result.total,
-      areaSlug: result.areaSlug,
-      jobCode: result.jobCode,
+      areaSlug: result.areaSlug, // 実態は hp コード列
+      jobCode: result.jobCode, // 実態は hopejob コード列
       hint: result.parseHint,
       httpStatus: result.httpStatus,
     });
