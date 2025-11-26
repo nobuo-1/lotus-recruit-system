@@ -713,6 +713,7 @@ export default function JobBoardsManualPage() {
     return () => window.clearInterval(id);
   }, [running, progressTotal]);
 
+  /** 求人件数の取得 */
   const run = async () => {
     if (running) return;
     setRunning(true);
@@ -753,7 +754,7 @@ export default function JobBoardsManualPage() {
         }),
       });
 
-      const j = await resp.json();
+      const j: any = await resp.json();
       if (!resp.ok || !j?.ok) {
         throw new Error(j?.error || `run failed (${resp.status})`);
       }
@@ -766,7 +767,7 @@ export default function JobBoardsManualPage() {
         (j?.history_id ? `履歴に保存しました（ID: ${j.history_id}）` : "");
 
       if (Array.isArray(j?.debugLogs) && j.debugLogs.length > 0) {
-        text += (text ? "\n\n" : "") + "デバッグログ:\n";
+        text += (text ? "\n\n" : "") + "デバッグログ（求人件数取得）:\n";
         text += j.debugLogs.join("\n");
       }
 
@@ -775,6 +776,73 @@ export default function JobBoardsManualPage() {
       setProgressDisplay(totalSteps);
     } catch (e: any) {
       setMsg(String(e?.message || e));
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  /** 求職者の取得 */
+  const fetchCandidates = async () => {
+    if (running) return;
+    setRunning(true);
+
+    // 求職者取得は件数テーブルには影響させず、ログだけ出す想定
+    setProgressTotal(0);
+    setProgressDisplay(0);
+
+    try {
+      const tenant = await ensureTenantId();
+      if (!isValidUuid(tenant)) {
+        setRunning(false);
+        setMsg((prev) => {
+          const add =
+            "【求職者取得】テナントID（UUID）が見つかりません。ログイン後、または x-tenant-id クッキー/ヘッダを設定してください。";
+          return prev ? `${prev}\n\n${add}` : add;
+        });
+        return;
+      }
+
+      const resp = await fetch("/api/job-boards/manual/fetch-candidates", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-tenant-id": tenant,
+        },
+        body: JSON.stringify({
+          sites,
+          large,
+          small,
+          pref: prefs,
+        }),
+      });
+
+      const j: any = await resp.json();
+      if (!resp.ok || !j?.ok) {
+        throw new Error(j?.error || `fetch-candidates failed (${resp.status})`);
+      }
+
+      let text = "【求職者取得】処理が完了しました。";
+
+      if (typeof j?.fetchedCount === "number") {
+        text += `\n取得した求職者数: ${j.fetchedCount}件`;
+      }
+      if (j?.history_id) {
+        text += `\n履歴ID: ${j.history_id}`;
+      }
+      if (j?.note) {
+        text += `\nメモ: ${j.note}`;
+      }
+      if (Array.isArray(j?.debugLogs) && j.debugLogs.length > 0) {
+        text += "\n\nデバッグログ（求職者取得）:\n";
+        text += j.debugLogs.join("\n");
+      }
+
+      setMsg((prev) => (prev ? `${prev}\n\n${text}` : text));
+    } catch (e: any) {
+      setMsg((prev) => {
+        const add = `【求職者取得】エラー: ${String(e?.message || e)}`;
+        return prev ? `${prev}\n\n${add}` : add;
+      });
     } finally {
       setRunning(false);
     }
@@ -857,8 +925,8 @@ export default function JobBoardsManualPage() {
               )}
               <span>
                 {running
-                  ? "求人件数を取得中です…"
-                  : "前回の取得が完了しました。"}
+                  ? "処理を実行中です…"
+                  : "前回の求人件数取得が完了しました。"}
               </span>
             </div>
             <div className="tabular-nums">{progressText}</div>
@@ -890,7 +958,7 @@ export default function JobBoardsManualPage() {
                 実行条件の設定
               </button>
               <div className="flex items-center gap-2">
-                {/* 求人件数ボタン：ホバー時を紺色（indigo-900）に変更 */}
+                {/* 求人件数ボタン（ホバー紺色） */}
                 <button
                   onClick={run}
                   disabled={running || sites.length === 0}
@@ -917,17 +985,12 @@ export default function JobBoardsManualPage() {
                   )}
                   求人件数を取得する
                 </button>
-                {/* 求職者ボタン：ホバー時を紺色（indigo-900）に変更 */}
+                {/* 求職者ボタン（ホバー紺色） */}
                 <button
                   type="button"
-                  className="inline-flex items-center gap-2 rounded-lg border border-dashed border-neutral-300 px-4 py-2 text-xs text-neutral-600 hover:bg-indigo-900 hover:text-white"
-                  onClick={() => {
-                    setMsg((prev) => {
-                      const add =
-                        "求職者の取得ボタンがクリックされました。（処理はまだ未実装です）";
-                      return prev ? `${prev}\n${add}` : add;
-                    });
-                  }}
+                  onClick={fetchCandidates}
+                  disabled={running || sites.length === 0}
+                  className="inline-flex items-center gap-2 rounded-lg border border-dashed border-neutral-300 px-4 py-2 text-xs text-neutral-600 hover:bg-indigo-900 hover:text-white disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-neutral-600"
                 >
                   求職者の取得
                 </button>
@@ -1043,6 +1106,12 @@ export default function JobBoardsManualPage() {
                   <li>
                     件数の取得方法（doda）:
                     検索結果画面上部などに表示される件数を取得（サーバー側ロジックに依存）。
+                  </li>
+                  <li>
+                    求職者の取得処理: /api/job-boards/manual/fetch-candidates
+                    を呼び出し、サーバー側で
+                    Mynaviログイン・候補者一覧取得処理（mynaviLogin /
+                    mynaviCandidates）を実行します（詳細はサーバーログおよびデバッグログを参照）。
                   </li>
                 </ul>
               </section>
