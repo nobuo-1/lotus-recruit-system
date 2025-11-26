@@ -47,13 +47,22 @@ function parseWomanTypeJobsCountInternal(html: string): {
     }
   };
 
+  // 「0000」などのプレースホルダ（ゼロ埋め）の0は無視する
+  const isZeroPaddingPlaceholder = (raw: string) => {
+    const digits = raw.replace(/,/g, "");
+    // 0 が 2桁以上続くときはプレースホルダ扱い（"0000", "00" など）
+    return /^0{2,}$/.test(digits);
+  };
+
   // 0. <span id="result_count" ...>123</span>（今回ご提示のパターン・最有力候補）
   {
     const re =
       /<span[^>]*id=["']result_count["'][^>]*>\s*([\d,]+)\s*<\/span>/gi;
     let m: RegExpExecArray | null;
     while ((m = re.exec(html)) !== null) {
-      consider(safeParseCount(m[1]), "span#result_count(max)");
+      const raw = m[1];
+      if (isZeroPaddingPlaceholder(raw)) continue;
+      consider(safeParseCount(raw), "span#result_count(max)");
     }
   }
 
@@ -63,7 +72,9 @@ function parseWomanTypeJobsCountInternal(html: string): {
       /<span[^>]*id=["']loading-count["'][^>]*>\s*([\d,]+)\s*<\/span>/gi;
     let m: RegExpExecArray | null;
     while ((m = re.exec(html)) !== null) {
-      consider(safeParseCount(m[1]), "span#loading-count(max)");
+      const raw = m[1];
+      if (isZeroPaddingPlaceholder(raw)) continue;
+      consider(safeParseCount(raw), "span#loading-count(max)");
     }
   }
 
@@ -73,7 +84,9 @@ function parseWomanTypeJobsCountInternal(html: string): {
       /<span[^>]*id=["']result-count["'][^>]*>\s*([\d,]+)\s*<\/span>/gi;
     let m: RegExpExecArray | null;
     while ((m = re.exec(html)) !== null) {
-      consider(safeParseCount(m[1]), "span#result-count(max)");
+      const raw = m[1];
+      if (isZeroPaddingPlaceholder(raw)) continue;
+      consider(safeParseCount(raw), "span#result-count(max)");
     }
   }
 
@@ -84,7 +97,9 @@ function parseWomanTypeJobsCountInternal(html: string): {
     const re = /該当の求人件数[\s\S]{0,120}?([\d,]+)[\s　]*件/g;
     let m: RegExpExecArray | null;
     while ((m = re.exec(html)) !== null) {
-      consider(safeParseCount(m[1]), "text:該当の求人件数○件(max)");
+      const raw = m[1];
+      if (isZeroPaddingPlaceholder(raw)) continue;
+      consider(safeParseCount(raw), "text:該当の求人件数○件(max)");
     }
   }
 
@@ -94,7 +109,9 @@ function parseWomanTypeJobsCountInternal(html: string): {
       /([\d,]+)[\s　]*件中[\s　]*[\d,]+[\s　]*～[\s　]*[\d,]+[\s　]*を表示/g;
     let m: RegExpExecArray | null;
     while ((m = re.exec(html)) !== null) {
-      consider(safeParseCount(m[1]), "text:○件中○～○を表示(max)");
+      const raw = m[1];
+      if (isZeroPaddingPlaceholder(raw)) continue;
+      consider(safeParseCount(raw), "text:○件中○～○を表示(max)");
     }
   }
 
@@ -104,7 +121,9 @@ function parseWomanTypeJobsCountInternal(html: string): {
       /<meta[^>]+name=["']description["'][^>]+content=["'][^"'>]*?([\d,]+)\s*件[^"'>]*["'][^>]*>/gi;
     let m: RegExpExecArray | null;
     while ((m = re.exec(html)) !== null) {
-      consider(safeParseCount(m[1]), "meta[name=description](max)");
+      const raw = m[1];
+      if (isZeroPaddingPlaceholder(raw)) continue;
+      consider(safeParseCount(raw), "meta[name=description](max)");
     }
   }
 
@@ -114,7 +133,9 @@ function parseWomanTypeJobsCountInternal(html: string): {
       /(検索結果|該当の求人|条件に合う求人|求人情報)[\s\S]{0,120}?([\d,]+)\s*件/g;
     let m: RegExpExecArray | null;
     while ((m = re.exec(html)) !== null) {
-      consider(safeParseCount(m[2]), "text:ゆるい近傍マッチ(max)");
+      const raw = m[2];
+      if (isZeroPaddingPlaceholder(raw)) continue;
+      consider(safeParseCount(raw), "text:ゆるい近傍マッチ(max)");
     }
   }
 
@@ -320,6 +341,9 @@ function buildWomanTypeListUrl(cond: ManualCondition): {
 
   const params = new URLSearchParams();
 
+  // 検索実行フラグ（これが無いと条件設定画面のまま 0000 件）
+  params.set("search", "true");
+
   // ルートウェイ固定
   params.set("routeway", "79");
   // キーワードは未使用だが、例にならって空で付与
@@ -440,15 +464,15 @@ async function fetchWomanTypeJobsCountViaDirectFetch(
         url,
         htmlSnippet: html.slice(0, 2000),
       });
-      // パースできなかった場合も「0件」として扱う（バッチ全体をこけさないため）
+      // ★パース失敗時は null + errorMessage で返す
       return {
-        total: 0,
+        total: null,
         url,
         areaSlug,
         jobCode,
         httpStatus,
-        parseHint: hint ?? "fallback:parse-failed->0",
-        errorMessage: null,
+        parseHint: hint ?? "parse-failed",
+        errorMessage: msg,
       };
     }
 
