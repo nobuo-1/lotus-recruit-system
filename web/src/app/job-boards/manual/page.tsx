@@ -384,12 +384,6 @@ const ConditionModal: React.FC<ConditionModalProps> = ({
       <div className="w-[720px] max-w-[96vw] rounded-2xl bg-white shadow-xl border border-neutral-200 overflow-hidden">
         <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200">
           <div className="font-semibold text-sm">実行条件の設定</div>
-          <button
-            onClick={onClose}
-            className="rounded-lg px-2 py-1 border border-neutral-300 hover:bg-neutral-50 text-xs"
-          >
-            閉じる
-          </button>
         </div>
 
         <div className="p-4 space-y-4 text-sm">
@@ -896,10 +890,11 @@ export default function JobBoardsManualPage() {
                 実行条件の設定
               </button>
               <div className="flex items-center gap-2">
+                {/* 求人件数ボタン：ホバー時を紺色（indigo-900）に変更 */}
                 <button
                   onClick={run}
                   disabled={running || sites.length === 0}
-                  className="inline-flex items-center gap-2 rounded-lg border border-neutral-800 px-4 py-2 text-xs font-medium text-neutral-900 hover:bg-neutral-900 hover:text-white disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-neutral-900"
+                  className="inline-flex items-center gap-2 rounded-lg border border-neutral-800 px-4 py-2 text-xs font-medium text-neutral-900 hover:bg-indigo-900 hover:text-white disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-neutral-900"
                 >
                   {running && (
                     <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
@@ -922,9 +917,10 @@ export default function JobBoardsManualPage() {
                   )}
                   求人件数を取得する
                 </button>
+                {/* 求職者ボタン：ホバー時を紺色（indigo-900）に変更 */}
                 <button
                   type="button"
-                  className="inline-flex items-center gap-2 rounded-lg border border-dashed border-neutral-300 px-4 py-2 text-xs text-neutral-600 hover:bg-neutral-50"
+                  className="inline-flex items-center gap-2 rounded-lg border border-dashed border-neutral-300 px-4 py-2 text-xs text-neutral-600 hover:bg-indigo-900 hover:text-white"
                   onClick={() => {
                     setMsg((prev) => {
                       const add =
@@ -933,7 +929,7 @@ export default function JobBoardsManualPage() {
                     });
                   }}
                 >
-                  求職者の取得（準備中）
+                  求職者の取得
                 </button>
               </div>
             </div>
