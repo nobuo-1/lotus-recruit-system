@@ -12,75 +12,60 @@ function safeParseCount(raw: string | undefined | null): number | null {
   return n;
 }
 
+/** HTML タグを除去してプレーンテキストを取り出す */
+function stripTags(htmlFragment: string): string {
+  return htmlFragment.replace(/<[^>]+>/g, " ");
+}
+
 /**
  * HTML から 女の転職type の求人件数を抜き出す内部処理
  *
  * 優先度:
- *  0. <span id="loading-count" ...>123</span>
- *  1. <span id="result-count" ...>123</span>
- *  2. <span id="result_count" ...>123</span>
+ *  0. id="result_count"                     （今回の実ページ想定・最有力）
+ *  1. id="loading-count"                   （旧パターン）
+ *  2. id="result-count"                    （旧パターン）
  *  3. 「該当の求人件数 123 件」
  *  4. 「123 件中 1～40 を表示」などのパターン
  *
  * ※ それぞれ複数回出現する可能性があるので、最大値を採用
+ *    id="result_count" が JS で 2 箇所に複製されていても最大値を拾える。
  */
 function parseWomanTypeJobsCountInternal(html: string): {
   count: number | null;
   hint: string | null;
 } {
-  // 0. <span id="loading-count" ...>123</span>
-  {
-    const re =
-      /<span[^>]*id=["']loading-count["'][^>]*>\s*([\d,]+)\s*<\/span>/g;
+  // 0〜2: id 指定の要素から数値を拾う（中に span がネストされていても OK なように、タグを一度剥がす）
+  const idPatterns: { id: string; hint: string }[] = [
+    { id: "result_count", hint: "id=result_count(max)" },
+    { id: "loading-count", hint: "id=loading-count(max)" },
+    { id: "result-count", hint: "id=result-count(max)" },
+  ];
+
+  for (const { id, hint } of idPatterns) {
+    // <span> に限らず、id="result_count" を持つ任意のタグを対象にする
+    const re = new RegExp(
+      `<[^>]*id=["']${id}["'][^>]*>([\\s\\S]*?)<\\/[^>]+>`,
+      "g"
+    );
 
     let max: number | null = null;
     let m: RegExpExecArray | null;
     while ((m = re.exec(html)) !== null) {
-      const n = safeParseCount(m[1]);
+      const inner = stripTags(m[1]); // 内部にネストされたタグがあっても数値だけ残る
+      const n = safeParseCount(inner);
       if (n == null) continue;
       if (max == null || n > max) max = n;
     }
     if (max != null) {
-      return { count: max, hint: "span#loading-count(max)" };
-    }
-  }
-
-  // 1. <span id="result-count" ...>123</span>（旧パターン想定）
-  {
-    const re = /<span[^>]*id=["']result-count["'][^>]*>\s*([\d,]+)\s*<\/span>/g;
-
-    let max: number | null = null;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(html)) !== null) {
-      const n = safeParseCount(m[1]);
-      if (n == null) continue;
-      if (max == null || n > max) max = n;
-    }
-    if (max != null) {
-      return { count: max, hint: "span#result-count(max)" };
-    }
-  }
-
-  // 2. <span id="result_count" ...>123</span>（今回ご提示のパターン）
-  {
-    const re = /<span[^>]*id=["']result_count["'][^>]*>\s*([\d,]+)\s*<\/span>/g;
-
-    let max: number | null = null;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(html)) !== null) {
-      const n = safeParseCount(m[1]);
-      if (n == null) continue;
-      if (max == null || n > max) max = n;
-    }
-    if (max != null) {
-      return { count: max, hint: "span#result_count(max)" };
+      return { count: max, hint };
     }
   }
 
   // 3. 「該当の求人件数 123 件」テキスト周りから拾う
+  // 例:
   // <span class="...">該当の求人件数<span ...>46</span>件</span>
   {
-    const re = /該当の求人件数[\s\S]{0,80}?([\d,]+)[\s　]*件/g;
+    const re = /該当の求人件数[\s\S]{0,120}?([\d,]+)[\s　]*件/g;
 
     let max: number | null = null;
     let m: RegExpExecArray | null;
