@@ -12,70 +12,79 @@ function safeParseCount(raw: string | undefined | null): number | null {
   return n;
 }
 
-/** HTML タグを除去してプレーンテキストを取り出す */
-function stripTags(htmlFragment: string): string {
-  return htmlFragment.replace(/<[^>]+>/g, " ");
-}
-
 /**
  * HTML から 女の転職type の求人件数を抜き出す内部処理
  *
- * 優先度:
- *  0. id="result_count"                     （今回の実ページ想定・最有力）
- *  1. id="loading-count"                   （旧パターン）
- *  2. id="result-count"                    （旧パターン）
- *  3. 「該当の求人件数 123 件」
- *  4. 「123 件中 1～40 を表示」などのパターン
+ * 優先度というより「候補を全部集めて最大値を採用」する方式。
  *
- * ※ それぞれ複数回出現する可能性があるので、最大値を採用
- *    id="result_count" が JS で 2 箇所に複製されていても最大値を拾える。
+ * 探索パターン:
+ *  - <span id="result_count">123</span>
+ *  - <span id="loading-count">123</span>
+ *  - <span id="result-count">123</span>
+ *  - 「該当の求人件数 123 件」
+ *  - 「123 件中 1～40 を表示」
+ *  - <meta name="description" content="…123件…">
+ *  - 「検索結果」「該当の求人」「条件に合う求人」「求人情報」近傍の「○○件」
+ *
+ * それぞれ複数回出現する可能性があるので、すべて走査して
+ * 「見つかった数値の最大値」を最終結果とする。
+ *
+ * ※ 初期 HTML で 0 が入っていても、他の場所に 230 件などがあれば
+ *    そちらが優先されるようにしている。
  */
 function parseWomanTypeJobsCountInternal(html: string): {
   count: number | null;
   hint: string | null;
 } {
-  // 0〜2: id 指定の要素から数値を拾う（中に span がネストされていても OK なように、タグを一度剥がす）
-  const idPatterns: { id: string; hint: string }[] = [
-    { id: "result_count", hint: "id=result_count(max)" },
-    { id: "loading-count", hint: "id=loading-count(max)" },
-    { id: "result-count", hint: "id=result-count(max)" },
-  ];
+  let best: number | null = null;
+  let bestHint: string | null = null;
 
-  for (const { id, hint } of idPatterns) {
-    // <span> に限らず、id="result_count" を持つ任意のタグを対象にする
-    const re = new RegExp(
-      `<[^>]*id=["']${id}["'][^>]*>([\\s\\S]*?)<\\/[^>]+>`,
-      "g"
-    );
+  const consider = (candidate: number | null, hint: string) => {
+    if (candidate == null) return;
+    if (best == null || candidate > best) {
+      best = candidate;
+      bestHint = hint;
+    }
+  };
 
-    let max: number | null = null;
+  // 0. <span id="result_count" ...>123</span>（今回ご提示のパターン・最有力候補）
+  {
+    const re =
+      /<span[^>]*id=["']result_count["'][^>]*>\s*([\d,]+)\s*<\/span>/gi;
     let m: RegExpExecArray | null;
     while ((m = re.exec(html)) !== null) {
-      const inner = stripTags(m[1]); // 内部にネストされたタグがあっても数値だけ残る
-      const n = safeParseCount(inner);
-      if (n == null) continue;
-      if (max == null || n > max) max = n;
+      consider(safeParseCount(m[1]), "span#result_count(max)");
     }
-    if (max != null) {
-      return { count: max, hint };
+  }
+
+  // 1. <span id="loading-count" ...>123</span>（旧パターン想定）
+  {
+    const re =
+      /<span[^>]*id=["']loading-count["'][^>]*>\s*([\d,]+)\s*<\/span>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(html)) !== null) {
+      consider(safeParseCount(m[1]), "span#loading-count(max)");
+    }
+  }
+
+  // 2. <span id="result-count" ...>123</span>（旧パターン想定）
+  {
+    const re =
+      /<span[^>]*id=["']result-count["'][^>]*>\s*([\d,]+)\s*<\/span>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(html)) !== null) {
+      consider(safeParseCount(m[1]), "span#result-count(max)");
     }
   }
 
   // 3. 「該当の求人件数 123 件」テキスト周りから拾う
   // 例:
-  // <span class="...">該当の求人件数<span ...>46</span>件</span>
+  // <p>該当の求人件数<span ...>230</span>件</p>
   {
     const re = /該当の求人件数[\s\S]{0,120}?([\d,]+)[\s　]*件/g;
-
-    let max: number | null = null;
     let m: RegExpExecArray | null;
     while ((m = re.exec(html)) !== null) {
-      const n = safeParseCount(m[1]);
-      if (n == null) continue;
-      if (max == null || n > max) max = n;
-    }
-    if (max != null) {
-      return { count: max, hint: "text:該当の求人件数○件(max)" };
+      consider(safeParseCount(m[1]), "text:該当の求人件数○件(max)");
     }
   }
 
@@ -83,20 +92,33 @@ function parseWomanTypeJobsCountInternal(html: string): {
   {
     const re =
       /([\d,]+)[\s　]*件中[\s　]*[\d,]+[\s　]*～[\s　]*[\d,]+[\s　]*を表示/g;
-
-    let max: number | null = null;
     let m: RegExpExecArray | null;
     while ((m = re.exec(html)) !== null) {
-      const n = safeParseCount(m[1]);
-      if (n == null) continue;
-      if (max == null || n > max) max = n;
-    }
-    if (max != null) {
-      return { count: max, hint: "text:○件中○～○を表示(max)" };
+      consider(safeParseCount(m[1]), "text:○件中○～○を表示(max)");
     }
   }
 
-  return { count: null, hint: null };
+  // 5. <meta name="description" content="…123件…"> から拾うフォールバック
+  {
+    const re =
+      /<meta[^>]+name=["']description["'][^>]+content=["'][^"'>]*?([\d,]+)\s*件[^"'>]*["'][^>]*>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(html)) !== null) {
+      consider(safeParseCount(m[1]), "meta[name=description](max)");
+    }
+  }
+
+  // 6. 「検索結果」「該当の求人」「条件に合う求人」「求人情報」周辺の ○○件（かなり緩い fallback）
+  {
+    const re =
+      /(検索結果|該当の求人|条件に合う求人|求人情報)[\s\S]{0,120}?([\d,]+)\s*件/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(html)) !== null) {
+      consider(safeParseCount(m[2]), "text:ゆるい近傍マッチ(max)");
+    }
+  }
+
+  return { count: best, hint: bestHint };
 }
 
 /** 旧来互換: HTML 全体から件数だけ返す */
@@ -436,7 +458,7 @@ async function fetchWomanTypeJobsCountViaDirectFetch(
       areaSlug,
       jobCode,
       httpStatus,
-      parseHint: hint,
+      parseHint: hint ?? undefined,
       errorMessage: null,
     };
   } catch (err: any) {
