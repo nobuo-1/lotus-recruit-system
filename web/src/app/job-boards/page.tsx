@@ -617,6 +617,14 @@ export default function JobBoardsPage() {
                 </li>
                 <li>
                   <Link
+                    href="/job-boards/mappings"
+                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
+                  >
+                    職種マッピング管理
+                  </Link>
+                </li>
+                <li>
+                  <Link
                     href="/job-boards/destinations"
                     className="text-base text-neutral-800 underline-offset-2 hover:underline"
                   >

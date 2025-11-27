@@ -985,14 +985,15 @@ export default function JobBoardsManualPage() {
                   )}
                   求人件数を取得する
                 </button>
-                {/* 求職者ボタン（ホバー紺色） */}
+
+                {/* 求職者数ボタン（デザインを揃える） */}
                 <button
                   type="button"
                   onClick={fetchCandidates}
                   disabled={running || sites.length === 0}
-                  className="inline-flex items-center gap-2 rounded-lg border border-dashed border-neutral-300 px-4 py-2 text-xs text-neutral-600 hover:bg-indigo-900 hover:text-white disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-neutral-600"
+                  className="inline-flex items-center gap-2 rounded-lg border border-neutral-800 px-4 py-2 text-xs font-medium text-neutral-900 hover:bg-indigo-900 hover:text-white disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-neutral-900"
                 >
-                  求職者の取得
+                  求職者数を取得する
                 </button>
               </div>
             </div>
