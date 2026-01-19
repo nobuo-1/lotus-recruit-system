@@ -291,6 +291,8 @@ async function hasRunningAuto(
 export async function POST(req: Request) {
   const trace: string[] = [];
   const startedAtServer = new Date().toISOString();
+  let adminSb: any | null = null;
+  let runId: string | null = null;
 
   try {
     const tenantId = req.headers.get("x-tenant-id") || "";
@@ -302,6 +304,7 @@ export async function POST(req: Request) {
     }
 
     const { sb, usingServiceRole } = getAdmin();
+    adminSb = sb;
 
     const body = (await req.json().catch(() => ({}))) as {
       max_new_prospects?: number;
@@ -453,7 +456,7 @@ export async function POST(req: Request) {
       );
     }
     const runRow = (insertedRuns || [])[0] as AutoRunRow | undefined;
-    const runId = runRow?.id;
+    runId = runRow?.id ?? null;
 
     // ========= crawl → enrich 呼び出し =========
     const u = new URL(req.url);
@@ -575,6 +578,23 @@ export async function POST(req: Request) {
       { status: 200 }
     );
   } catch (e: any) {
+    if (adminSb && runId) {
+      const finishedAt = new Date().toISOString();
+      try {
+        await adminSb
+          .from("form_outreach_auto_runs")
+          .update({
+            status: "error",
+            finished_at: finishedAt,
+            last_message: "auto company list run failed",
+            last_progress_at: finishedAt,
+            error_text: String(e?.message || e).slice(0, 2000),
+          })
+          .eq("id", runId);
+      } catch (updateErr: any) {
+        console.error("auto run update failed:", updateErr);
+      }
+    }
     return NextResponse.json(
       { error: String(e?.message || e) },
       { status: 500 }

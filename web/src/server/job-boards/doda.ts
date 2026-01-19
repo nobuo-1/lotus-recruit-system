@@ -56,6 +56,33 @@ function parseDodaJobsCountInternal(html: string): {
     }
   }
 
+  // 0-3. data 属性の件数
+  {
+    const m = html.match(
+      /data-(?:total|result|job)[_-]?count=["']?\s*([\d,]+)\s*["']?/i
+    );
+    const n = safeParseCount(m?.[1]);
+    if (n != null) {
+      return { count: n, hint: "attr:data-*-count" };
+    }
+  }
+
+  // 0-4. JSON 内の件数キー
+  {
+    const re =
+      /["']?(?:totalCount|resultCount|jobCount|hitCount|totalJobCount|jobTotalCount)["']?\s*:\s*([0-9]{1,7})/g;
+    let max: number | null = null;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(html)) !== null) {
+      const n = safeParseCount(m?.[1]);
+      if (n == null) continue;
+      if (max == null || n > max) max = n;
+    }
+    if (max != null) {
+      return { count: max, hint: "json:*Count(max)" };
+    }
+  }
+
   // ① 「該当求人数 91 件中 1～50件 を表示」
   {
     const m = html.match(/該当求人数[\s\S]{0,80}?([\d,]+)\s*件/);

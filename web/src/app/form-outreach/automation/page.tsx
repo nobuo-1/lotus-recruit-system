@@ -55,6 +55,38 @@ function getTenantIdFromCookie(): string | null {
   }
 }
 
+function isValidUuid(value: string | null | undefined): value is string {
+  if (!value) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    value
+  );
+}
+
+function setTenantCookies(id: string) {
+  try {
+    const base = "Path=/; SameSite=Lax";
+    document.cookie = `x-tenant-id=${encodeURIComponent(id)}; ${base}`;
+    document.cookie = `tenant_id=${encodeURIComponent(id)}; ${base}`;
+  } catch {
+    /* noop */
+  }
+}
+
+async function resolveTenantIdViaApi(): Promise<string | null> {
+  try {
+    let res = await fetch("/api/me/tenant", { cache: "no-store" });
+    if (!res.ok) {
+      res = await fetch("/api/me/tenant/", { cache: "no-store" });
+    }
+    const data = await res.json().catch(() => ({}));
+    const tid: string | null =
+      data?.tenant_id ?? data?.profile?.tenant_id ?? null;
+    return isValidUuid(tid) ? tid : null;
+  } catch {
+    return null;
+  }
+}
+
 export default function AutomationPage() {
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(false);
@@ -87,14 +119,32 @@ export default function AutomationPage() {
 
   // ▼ テナントID取得
   useEffect(() => {
-    const tid = getTenantIdFromCookie();
-    if (!tid) {
-      setMsg(
-        "テナントID（UUID）が見つかりません。ログイン後、または x-tenant-id クッキー/ヘッダを設定してください。"
-      );
-      return;
-    }
-    setTenantId(tid);
+    let active = true;
+    const loadTenant = async () => {
+      const cookieTid = getTenantIdFromCookie();
+      if (isValidUuid(cookieTid)) {
+        if (active) setTenantId(cookieTid);
+        return;
+      }
+
+      const apiTid = await resolveTenantIdViaApi();
+      if (isValidUuid(apiTid)) {
+        setTenantCookies(apiTid);
+        if (active) setTenantId(apiTid);
+        return;
+      }
+
+      if (active) {
+        setMsg(
+          "テナントID（UUID）が見つかりません。ログイン後、または x-tenant-id クッキー/ヘッダを設定してください。"
+        );
+      }
+    };
+
+    loadTenant();
+    return () => {
+      active = false;
+    };
   }, []);
 
   // ▼ 設定・被り候補のロード（テナントIDが取れてから）

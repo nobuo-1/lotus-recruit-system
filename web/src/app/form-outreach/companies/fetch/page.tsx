@@ -321,9 +321,10 @@ export default function ManualFetch() {
     setCountModalOpen(true);
   };
 
-  const confirmAndRun = async () => {
+  const confirmAndRun = async (target: number) => {
     setCountModalOpen(false);
-    localStorage.setItem(LS_FETCH_COUNT, String(fetchTotal));
+    setFetchTotal(target);
+    localStorage.setItem(LS_FETCH_COUNT, String(target));
 
     // 修正2: 「開始する」押下の瞬間を since に採用・既存表示をクリア
     const startIso = new Date().toISOString();
@@ -336,7 +337,7 @@ export default function ManualFetch() {
     setRtProspectCount(0);
     setRtSimilarCount(0);
 
-    await runLoop(fetchTotal, startIso);
+    await runLoop(target, startIso);
   };
 
   /** 実行ループ（修正2: リトライ & 追い込み） */
@@ -949,8 +950,7 @@ export default function ManualFetch() {
           defaultValue={fetchTotal}
           onCloseAction={() => setCountModalOpen(false)}
           onApplyAction={(n: number) => {
-            setFetchTotal(n);
-            confirmAndRun();
+            confirmAndRun(n);
           }}
         />
       )}

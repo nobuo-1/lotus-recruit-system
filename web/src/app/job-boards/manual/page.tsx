@@ -272,6 +272,8 @@ const SITE_LABEL_MAP: Record<string, string> = SITE_OPTIONS.reduce((acc, s) => {
   return acc;
 }, {} as Record<string, string>);
 
+const LS_SCOUT_URLS = "job_boards_manual_scout_urls";
+
 /** ===== UUID / Tenant ユーティリティ ===== */
 function isValidUuid(v: string | null | undefined): v is string {
   if (!v) return false;
@@ -685,6 +687,7 @@ export default function JobBoardsManualPage() {
   const [running, setRunning] = useState(false);
   const [msg, setMsg] = useState("");
   const [rows, setRows] = useState<ManualResultRow[]>([]);
+  const [scoutUrls, setScoutUrls] = useState<Record<string, string>>({});
 
   // 進捗表示用
   const [progressTotal, setProgressTotal] = useState(0);
@@ -696,6 +699,32 @@ export default function JobBoardsManualPage() {
       await ensureTenantId();
     })();
   }, []);
+
+  // 求職者数取得URLの復元
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(LS_SCOUT_URLS);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") {
+        setScoutUrls(parsed as Record<string, string>);
+      }
+    } catch {
+      /* noop */
+    }
+  }, []);
+
+  const updateScoutUrl = (siteKey: string, value: string) => {
+    setScoutUrls((prev) => {
+      const next = { ...prev, [siteKey]: value };
+      try {
+        localStorage.setItem(LS_SCOUT_URLS, JSON.stringify(next));
+      } catch {
+        /* noop */
+      }
+      return next;
+    });
+  };
 
   // 疑似プログレス
   useEffect(() => {
@@ -813,6 +842,7 @@ export default function JobBoardsManualPage() {
           large,
           small,
           pref: prefs,
+          scoutUrls,
         }),
       });
 
@@ -826,15 +856,25 @@ export default function JobBoardsManualPage() {
       if (typeof j?.fetchedCount === "number") {
         text += `\n取得した求職者数: ${j.fetchedCount}件`;
       }
-      if (j?.history_id) {
-        text += `\n履歴ID: ${j.history_id}`;
+
+      if (Array.isArray(j?.results) && j.results.length > 0) {
+        text += "\n\nサイト別結果:\n";
+        for (const r of j.results) {
+          const label = SITE_LABEL_MAP[r.siteKey] || r.siteKey;
+          if (typeof r.total === "number") {
+            text += `- ${label}: ${r.total}名\n`;
+          } else {
+            text += `- ${label}: 取得失敗（${r.errorMessage || "unknown"}）\n`;
+          }
+        }
       }
-      if (j?.note) {
-        text += `\nメモ: ${j.note}`;
-      }
-      if (Array.isArray(j?.debugLogs) && j.debugLogs.length > 0) {
-        text += "\n\nデバッグログ（求職者取得）:\n";
-        text += j.debugLogs.join("\n");
+
+      const debugLogs = Array.isArray(j?.results)
+        ? j.results.flatMap((r: any) => r?.debugLogs ?? [])
+        : [];
+      if (debugLogs.length > 0) {
+        text += "\nデバッグログ（求職者取得）:\n";
+        text += debugLogs.join("\n");
       }
 
       setMsg((prev) => (prev ? `${prev}\n\n${text}` : text));
@@ -1003,6 +1043,38 @@ export default function JobBoardsManualPage() {
             <pre className="whitespace-pre-wrap text-xs text-neutral-600 border-t border-neutral-200 pt-3 mt-2">
               {msg}
             </pre>
+          )}
+        </section>
+
+        {/* 求職者数取得URL */}
+        <section className="mt-4 rounded-2xl border border-neutral-200 p-4 space-y-3">
+          <div className="text-sm font-semibold text-neutral-800">
+            求職者数取得の設定
+          </div>
+          <p className="text-xs text-neutral-500">
+            各サイトのスカウト検索URLを貼り付けてください（ローカル保存）。
+            未設定のサイトは取得をスキップします。
+          </p>
+          {sites.length === 0 ? (
+            <div className="text-xs text-neutral-400">
+              先に対象サイトを選択してください。
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 gap-3">
+              {sites.map((siteKey) => (
+                <div key={siteKey} className="grid gap-1">
+                  <div className="text-xs font-medium text-neutral-600">
+                    {SITE_LABEL_MAP[siteKey] || siteKey}
+                  </div>
+                  <input
+                    value={scoutUrls[siteKey] ?? ""}
+                    onChange={(e) => updateScoutUrl(siteKey, e.target.value)}
+                    placeholder="https://... スカウト検索URL"
+                    className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-xs"
+                  />
+                </div>
+              ))}
+            </div>
           )}
         </section>
 
