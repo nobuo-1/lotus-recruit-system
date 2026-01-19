@@ -1212,7 +1212,13 @@ export default function JobBoardsManualPage() {
           onClose={() => setOpenCat(false)}
           initialSelectedLargeIds={large}
           initialSelectedSmallIds={small}
-          onApply={({ largeIds, smallIds }) => {
+          onApply={({
+            largeIds,
+            smallIds,
+          }: {
+            largeIds: string[];
+            smallIds: string[];
+          }) => {
             // 小分類 → 親の大分類にチェックが入るロジックは JobCategoryModal 内で実装済み
             setLarge(largeIds);
             setSmall(smallIds);
