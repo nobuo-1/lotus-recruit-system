@@ -329,9 +329,6 @@ export default function JobBoardsPage() {
   );
   const [largeChart, setLargeChart] = useState<string[]>([]);
   const [smallChart, setSmallChart] = useState<string[]>([]); // ★合成キー
-  const [ageChart, setAgeChart] = useState<string[]>([]);
-  const [empChart, setEmpChart] = useState<string[]>([]);
-  const [salChart, setSalChart] = useState<string[]>([]);
   const [prefChart, setPrefChart] = useState<string[]>([]);
   const [showChartFilters, setShowChartFilters] = useState(true);
   const [openChartCat, setOpenChartCat] = useState(false);
@@ -346,9 +343,6 @@ export default function JobBoardsPage() {
   );
   const [largeTable, setLargeTable] = useState<string[]>([]);
   const [smallTable, setSmallTable] = useState<string[]>([]); // ★合成キー
-  const [ageTable, setAgeTable] = useState<string[]>([]);
-  const [empTable, setEmpTable] = useState<string[]>([]);
-  const [salTable, setSalTable] = useState<string[]>([]);
   const [prefTable, setPrefTable] = useState<string[]>([]);
   const [showTableFilters, setShowTableFilters] = useState(true);
   const [openTableCat, setOpenTableCat] = useState(false);
@@ -392,9 +386,6 @@ export default function JobBoardsPage() {
             large: largeChart,
             // ★合成キー → 小分類名へ変換して送る（後方互換）
             small: decodeSmallKeysToNames(smallChart),
-            age: ageChart,
-            emp: empChart,
-            sal: salChart,
             pref: prefChart,
             range: rangeChart,
           }),
@@ -415,9 +406,6 @@ export default function JobBoardsPage() {
     sitesChart.join(","),
     largeChart.join(","),
     smallChart.join(","), // ★
-    ageChart.join(","),
-    empChart.join(","),
-    salChart.join(","),
     prefChart.join(","),
   ]);
 
@@ -434,9 +422,6 @@ export default function JobBoardsPage() {
             sites: sitesTable,
             large: largeTable,
             small: decodeSmallKeysToNames(smallTable), // ★
-            age: ageTable,
-            emp: empTable,
-            sal: salTable,
             pref: prefTable,
             range: rangeTable,
           }),
@@ -457,9 +442,6 @@ export default function JobBoardsPage() {
     sitesTable.join(","),
     largeTable.join(","),
     smallTable.join(","), // ★
-    ageTable.join(","),
-    empTable.join(","),
-    salTable.join(","),
     prefTable.join(","),
   ]);
 
@@ -485,73 +467,6 @@ export default function JobBoardsPage() {
       return row;
     });
   }, [rowsChart, dateKeyChart, metricChart]);
-
-  // マスタ
-  const AGE_BANDS = [
-    "20歳以下",
-    "25歳以下",
-    "30歳以下",
-    "35歳以下",
-    "40歳以下",
-    "45歳以下",
-    "50歳以下",
-    "55歳以下",
-    "60歳以下",
-    "65歳以下",
-  ];
-  const EMP_TYPES = [
-    "正社員",
-    "契約社員",
-    "派遣社員",
-    "アルバイト",
-    "業務委託",
-  ];
-  const SALARY_BAND = [
-    "~300万",
-    "300~400万",
-    "400~500万",
-    "500~600万",
-    "600~800万",
-    "800万~",
-  ];
-
-  // 共通タグ選択
-  function TagMulti({
-    values,
-    setValues,
-    options,
-  }: {
-    values: string[];
-    setValues: (v: string[]) => void;
-    options: string[];
-  }) {
-    const toggle = (v: string) =>
-      setValues(
-        values.includes(v) ? values.filter((x) => x !== v) : [...values, v]
-      );
-    return (
-      <div className="flex flex-wrap">
-        <Chip
-          active={values.length === options.length}
-          label="すべて"
-          onClick={() => setValues(options)}
-        />
-        <Chip
-          active={values.length === 0}
-          label="解除"
-          onClick={() => setValues([])}
-        />
-        {options.map((o) => (
-          <Chip
-            key={o}
-            label={o}
-            active={values.includes(o)}
-            onClick={() => toggle(o)}
-          />
-        ))}
-      </div>
-    );
-  }
 
   return (
     <>
@@ -802,37 +717,6 @@ export default function JobBoardsPage() {
                 </div>
               </div>
 
-              {/* 年齢層 / 雇用形態 / 年収帯 */}
-              <div className="mb-2">
-                <div className="mb-1 text-xs font-medium text-neutral-600">
-                  年齢層
-                </div>
-                <TagMulti
-                  values={ageChart}
-                  setValues={setAgeChart}
-                  options={AGE_BANDS}
-                />
-              </div>
-              <div className="mb-2">
-                <div className="mb-1 text-xs font-medium text-neutral-600">
-                  雇用形態
-                </div>
-                <TagMulti
-                  values={empChart}
-                  setValues={setEmpChart}
-                  options={EMP_TYPES}
-                />
-              </div>
-              <div>
-                <div className="mb-1 text-xs font-medium text-neutral-600">
-                  年収帯
-                </div>
-                <TagMulti
-                  values={salChart}
-                  setValues={setSalChart}
-                  options={SALARY_BAND}
-                />
-              </div>
             </div>
           )}
 
@@ -1010,37 +894,6 @@ export default function JobBoardsPage() {
                   </div>
                 </div>
 
-                {/* 年齢層など */}
-                <div className="mb-2">
-                  <div className="mb-1 text-xs font-medium text-neutral-600">
-                    年齢層
-                  </div>
-                  <TagMulti
-                    values={ageTable}
-                    setValues={setAgeTable}
-                    options={AGE_BANDS}
-                  />
-                </div>
-                <div className="mb-2">
-                  <div className="mb-1 text-xs font-medium text-neutral-600">
-                    雇用形態
-                  </div>
-                  <TagMulti
-                    values={empTable}
-                    setValues={setEmpTable}
-                    options={EMP_TYPES}
-                  />
-                </div>
-                <div>
-                  <div className="mb-1 text-xs font-medium text-neutral-600">
-                    年収帯
-                  </div>
-                  <TagMulti
-                    values={salTable}
-                    setValues={setSalTable}
-                    options={SALARY_BAND}
-                  />
-                </div>
               </div>
             </>
           )}

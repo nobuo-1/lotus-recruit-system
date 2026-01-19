@@ -421,6 +421,26 @@ function resolveExternalJobCodes(
   return { large: L, small: S };
 }
 
+function mappingMissingReason(
+  base: BaseCondition,
+  mappingsBySite: Map<SiteKey, MappingRow[]>
+): string | null {
+  const siteMappings = mappingsBySite.get(base.siteKey) ?? [];
+  if (base.internalSmall) {
+    const matched = siteMappings.some((m) => m.internal_small === base.internalSmall);
+    if (!matched) {
+      return `職種マッピングが見つかりません（小分類: ${base.internalSmall}）`;
+    }
+  }
+  if (base.internalLarge) {
+    const matched = siteMappings.some((m) => m.internal_large === base.internalLarge);
+    if (!matched) {
+      return `職種マッピングが見つかりません（大分類: ${base.internalLarge}）`;
+    }
+  }
+  return null;
+}
+
 /** ========== マイナビ転職 ========== */
 async function fetchMynaviStats(cond: ManualCondition): Promise<SiteStats> {
   const result = await fetchMynaviJobsCount(cond);
@@ -640,6 +660,33 @@ export async function POST(req: Request) {
     for (const group of mynaviGroups.values()) {
       const { base, prefectures } = group;
 
+      const missingReason = mappingMissingReason(base, mappingsBySite);
+      if (missingReason) {
+        const stringPrefs = prefectures.filter(
+          (p): p is string => typeof p === "string" && !!p
+        );
+        const prefList = stringPrefs.length > 0 ? stringPrefs : [null];
+        debugLogs.push(
+          [
+            "#workflow: mynavi mapping missing",
+            `internalLarge=${base.internalLarge ?? "-"}`,
+            `internalSmall=${base.internalSmall ?? "-"}`,
+            `reason=${missingReason}`,
+          ].join(" / ")
+        );
+        for (const prefName of prefList) {
+          preview.push({
+            site_key: base.siteKey,
+            internal_large: base.internalLarge,
+            internal_small: base.internalSmall,
+            prefecture: prefName,
+            jobs_total: null,
+            error_reason: missingReason,
+          });
+        }
+        continue;
+      }
+
       // internal → external コード変換
       const mapped = resolveExternalJobCodes(base, mappingsBySite);
 
@@ -754,6 +801,28 @@ export async function POST(req: Request) {
     );
 
     for (const base of otherConditions) {
+      const missingReason = mappingMissingReason(base, mappingsBySite);
+      if (missingReason) {
+        debugLogs.push(
+          [
+            "#workflow: mapping missing",
+            `site=${base.siteKey}`,
+            `internalLarge=${base.internalLarge ?? "-"}`,
+            `internalSmall=${base.internalSmall ?? "-"}`,
+            `reason=${missingReason}`,
+          ].join(" / ")
+        );
+        preview.push({
+          site_key: base.siteKey,
+          internal_large: base.internalLarge,
+          internal_small: base.internalSmall,
+          prefecture: base.prefecture,
+          jobs_total: null,
+          error_reason: missingReason,
+        });
+        continue;
+      }
+
       const mapped = resolveExternalJobCodes(base, mappingsBySite);
 
       let cond: ManualCondition = {
@@ -815,6 +884,7 @@ export async function POST(req: Request) {
         internal_small: base.internalSmall,
         prefecture: base.prefecture,
         jobs_total: stats.jobsTotal,
+        error_reason: stats.jobsTotal == null ? "取得に失敗しました" : null,
       });
     }
 

@@ -1,7 +1,7 @@
 // web/src/app/job-boards/manual/page.tsx
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import AppHeader from "@/components/AppHeader";
 import Link from "next/link";
 import dynamic from "next/dynamic";
@@ -342,6 +342,10 @@ async function ensureTenantId(): Promise<string | null> {
   return isValidUuid(supaTid) ? supaTid : null;
 }
 
+function isAbortError(err: any) {
+  return err?.name === "AbortError";
+}
+
 /** =========================
  * 条件設定モーダル
  * ========================= */
@@ -608,6 +612,9 @@ const DetailedResultTable: React.FC<{ rows: ManualResultRow[] }> = ({
               <th className="px-3 py-2 text-right font-medium text-neutral-600 whitespace-nowrap">
                 求人件数
               </th>
+              <th className="px-3 py-2 text-left font-medium text-neutral-600 whitespace-nowrap">
+                取得できなかった理由
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -633,10 +640,14 @@ const DetailedResultTable: React.FC<{ rows: ManualResultRow[] }> = ({
               const largeText = isNewGroup ? largeTextRaw : "";
               const smallText = isNewGroup ? smallTextRaw : "";
 
-              const jobsValue =
-                typeof r.jobs_total === "number"
-                  ? `${r.jobs_total.toLocaleString()}件`
-                  : "取得失敗"; // null は「取得失敗」と明示
+              const jobsTotal = r.jobs_total;
+              const hasJobs = typeof jobsTotal === "number";
+              const jobsValue = hasJobs
+                ? `${jobsTotal.toLocaleString()}件`
+                : "取得失敗"; // null は「取得失敗」と明示
+              const reasonText = hasJobs
+                ? "-"
+                : r.error_reason || "取得失敗";
 
               return (
                 <tr
@@ -657,6 +668,9 @@ const DetailedResultTable: React.FC<{ rows: ManualResultRow[] }> = ({
                   </td>
                   <td className="px-3 py-1.5 text-right tabular-nums">
                     {jobsValue}
+                  </td>
+                  <td className="px-3 py-1.5 text-neutral-600">
+                    {reasonText}
                   </td>
                 </tr>
               );
@@ -685,8 +699,13 @@ export default function JobBoardsManualPage() {
   const [openConditionModal, setOpenConditionModal] = useState(false);
 
   const [running, setRunning] = useState(false);
+  const [runningAction, setRunningAction] = useState<
+    "jobs" | "candidates" | null
+  >(null);
   const [msg, setMsg] = useState("");
   const [rows, setRows] = useState<ManualResultRow[]>([]);
+  const abortRef = useRef<AbortController | null>(null);
+  const cancelRef = useRef(false);
   const [scoutUrls, setScoutUrls] = useState<Record<string, string>>({});
 
   // 進捗表示用
@@ -746,8 +765,13 @@ export default function JobBoardsManualPage() {
   const run = async () => {
     if (running) return;
     setRunning(true);
+    setRunningAction("jobs");
     setMsg("");
     setRows([]);
+    cancelRef.current = false;
+    abortRef.current?.abort();
+    abortRef.current = new AbortController();
+    const signal = abortRef.current.signal;
 
     const siteCount = sites.length || 0;
     const largeCount = large.length || 1;
@@ -781,6 +805,7 @@ export default function JobBoardsManualPage() {
           want: 50,
           saveMode: "history",
         }),
+        signal,
       });
 
       const j: any = await resp.json();
@@ -804,9 +829,16 @@ export default function JobBoardsManualPage() {
 
       setProgressDisplay(totalSteps);
     } catch (e: any) {
+      if (isAbortError(e) || cancelRef.current) {
+        setMsg("求人件数の取得を中止しました。");
+        setProgressTotal(0);
+        setProgressDisplay(0);
+        return;
+      }
       setMsg(String(e?.message || e));
     } finally {
       setRunning(false);
+      setRunningAction(null);
     }
   };
 
@@ -814,10 +846,15 @@ export default function JobBoardsManualPage() {
   const fetchCandidates = async () => {
     if (running) return;
     setRunning(true);
+    setRunningAction("candidates");
 
     // 求職者取得は件数テーブルには影響させず、ログだけ出す想定
     setProgressTotal(0);
     setProgressDisplay(0);
+    cancelRef.current = false;
+    abortRef.current?.abort();
+    abortRef.current = new AbortController();
+    const signal = abortRef.current.signal;
 
     try {
       const tenant = await ensureTenantId();
@@ -844,6 +881,7 @@ export default function JobBoardsManualPage() {
           pref: prefs,
           scoutUrls,
         }),
+        signal,
       });
 
       const j: any = await resp.json();
@@ -879,13 +917,34 @@ export default function JobBoardsManualPage() {
 
       setMsg((prev) => (prev ? `${prev}\n\n${text}` : text));
     } catch (e: any) {
+      if (isAbortError(e) || cancelRef.current) {
+        setMsg((prev) => {
+          const add = "【求職者取得】中止しました。";
+          return prev ? `${prev}\n\n${add}` : add;
+        });
+        return;
+      }
       setMsg((prev) => {
         const add = `【求職者取得】エラー: ${String(e?.message || e)}`;
         return prev ? `${prev}\n\n${add}` : add;
       });
     } finally {
       setRunning(false);
+      setRunningAction(null);
     }
+  };
+
+  const cancelRunning = () => {
+    if (!running) return;
+    cancelRef.current = true;
+    abortRef.current?.abort();
+    const label =
+      runningAction === "candidates" ? "求職者取得" : "求人件数取得";
+    setMsg((prev) =>
+      prev
+        ? `${prev}\n\n${label}を中止しています…`
+        : `${label}を中止しています…`
+    );
   };
 
   const currentConditionSummary = useMemo(() => {
@@ -1035,6 +1094,16 @@ export default function JobBoardsManualPage() {
                 >
                   求職者数を取得する
                 </button>
+
+                {running && (
+                  <button
+                    type="button"
+                    onClick={cancelRunning}
+                    className="inline-flex items-center gap-2 rounded-lg border border-rose-300 px-4 py-2 text-xs font-medium text-rose-600 hover:bg-rose-50"
+                  >
+                    中止する
+                  </button>
+                )}
               </div>
             </div>
           </div>
