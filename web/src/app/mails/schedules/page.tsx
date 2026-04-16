@@ -6,6 +6,13 @@ import Link from "next/link";
 import { supabaseServer } from "@/lib/supabaseServer";
 import { formatJpDateTime } from "@/lib/formatDate";
 import ConfirmCancelButton from "@/components/ConfirmCancelButton";
+import {
+  DataTableCard,
+  PageHero,
+  PageMain,
+  SurfaceCard,
+  StatChip,
+} from "@/components/PageChrome";
 
 type Row = {
   id: string;
@@ -63,42 +70,32 @@ export default async function MailSchedulesPage() {
     Date.parse(r.scheduled_at) > Date.now();
 
   return (
-    <main className="mx-auto max-w-6xl p-6">
-      {/* ヘッダー */}
-      <div className="mb-6 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-        <div>
-          <h1 className="whitespace-nowrap text-2xl font-semibold text-neutral-900">
-            メール予約リスト
-          </h1>
-          <p className="text-sm text-neutral-500">作成済みの予約配信の一覧</p>
-        </div>
-        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
-          <Link
-            href="/email"
-            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
-          >
-            メール配信トップ
-          </Link>
-          <Link
-            href="/mails/new"
-            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
-          >
-            メール新規作成
-          </Link>
-          {/* ▼ 追加：メール一覧へ */}
-          <Link
-            href="/mails"
-            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
-          >
-            メール一覧
-          </Link>
-          {/* ▲ 追加ここまで */}
-        </div>
-      </div>
+    <PageMain className="space-y-6">
+      <PageHero
+        eyebrow="Mail Schedules"
+        title="予約済みメールを一覧で管理"
+        description="予約日時、作成日、詳細導線、キャンセル操作をメール一覧ページと同じ構造で整理しています。"
+        accent="blue"
+        actions={[
+          { href: "/mails", label: "メール一覧", variant: "secondary" },
+          { href: "/mails/new", label: "新規メール", variant: "primary" },
+        ]}
+      />
 
-      <div className="overflow-x-auto rounded-2xl border border-neutral-200">
+      <SurfaceCard>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          <StatChip label="予約件数" value={(rows ?? []).length} />
+          <StatChip
+            label="最短予約"
+            value={rows?.[0]?.scheduled_at ? formatJpDateTime(rows[0].scheduled_at) : "-"}
+          />
+          <StatChip label="表示条件" value="未来の scheduled のみ" />
+        </div>
+      </SurfaceCard>
+
+      <DataTableCard className="overflow-x-auto">
         <table className="min-w-[1080px] w-full text-sm">
-          <thead className="bg-neutral-50 text-neutral-600">
+          <thead className="bg-[linear-gradient(180deg,#fbfbfc_0%,#f3f5f8_100%)] text-neutral-600">
             <tr>
               <th className="px-3 py-3 text-left">メール名</th>
               <th className="px-3 py-3 text-left">件名</th>
@@ -110,7 +107,9 @@ export default async function MailSchedulesPage() {
           <tbody>
             {(rows ?? []).map((r) => (
               <tr key={r.id} className="border-t border-neutral-200">
-                <td className="px-3 py-3">{r.mails?.name ?? ""}</td>
+                <td className="px-3 py-3 font-medium text-neutral-950">
+                  {r.mails?.name ?? ""}
+                </td>
                 <td className="px-3 py-3 text-neutral-600">
                   {r.mails?.subject ?? ""}
                 </td>
@@ -151,7 +150,7 @@ export default async function MailSchedulesPage() {
             )}
           </tbody>
         </table>
-      </div>
-    </main>
+      </DataTableCard>
+    </PageMain>
   );
 }

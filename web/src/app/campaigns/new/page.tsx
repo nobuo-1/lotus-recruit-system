@@ -1,7 +1,7 @@
 "use client";
 import React, { useEffect, useMemo, useRef, useState, DragEvent } from "react";
-import Link from "next/link";
 import { toastSuccess, toastError } from "@/components/AppToast";
+import { PageHero, PageMain, SurfaceCard } from "@/components/PageChrome";
 
 type Settings = { from_email?: string | null };
 
@@ -126,36 +126,28 @@ export default function CampaignNewPage() {
   );
 
   return (
-    <main className="mx-auto max-w-3xl p-6">
-      {/* ヘッダー：スマホ縦積み */}
-      <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-        <div>
-          <h1 className="whitespace-nowrap text-2xl font-semibold text-neutral-900">
-            キャンペーン作成
-          </h1>
-          <p className="text-sm text-neutral-500">配信用の内容を登録します</p>
-        </div>
-        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
-          <Link
-            href="/email"
-            className="whitespace-nowrap rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
-          >
-            メール配信トップ
-          </Link>
-          <Link
-            href="/campaigns"
-            className="whitespace-nowrap rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
-          >
-            キャンペーン一覧
-          </Link>
-        </div>
-      </div>
+    <PageMain className="max-w-5xl space-y-6">
+      <PageHero
+        eyebrow="Campaign Composer"
+        title="新規キャンペーンを統一 UI で作成"
+        description="メール一覧やメール配信トップと同じ情報構造で、件名・本文・添付・送信設定を整理しています。"
+        accent="gold"
+        actions={[
+          { href: "/campaigns", label: "キャンペーン一覧", variant: "secondary" },
+        ]}
+      />
 
-      <form
-        onSubmit={onSubmit}
-        className="space-y-4 rounded-2xl border border-neutral-200 p-4"
-      >
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+      <form onSubmit={onSubmit} className="space-y-6">
+        <SurfaceCard>
+          <div className="mb-4">
+            <h2 className="text-xl font-semibold tracking-tight text-neutral-950">
+              基本情報
+            </h2>
+            <p className="mt-1 text-sm text-neutral-500">
+              管理名、件名、差出人を先に固めます。
+            </p>
+          </div>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <div>
             <div className="text-sm text-neutral-500">内部名</div>
             <input
@@ -196,63 +188,80 @@ export default function CampaignNewPage() {
             />
           </div>
         </div>
+        </SurfaceCard>
 
-        {/* 本文モード切替 */}
-        <div className="flex flex-wrap items-center gap-3">
-          <span className="text-sm text-neutral-500">本文入力形式</span>
-          <label className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-3 py-1 whitespace-nowrap">
-            <input
-              type="radio"
-              name="bodymode"
-              checked={mode === "plain"}
-              onChange={() => setMode("plain")}
-            />
-            文章
-          </label>
-          <label className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-3 py-1 whitespace-nowrap">
-            <input
-              type="radio"
-              name="bodymode"
-              checked={mode === "html"}
-              onChange={() => setMode("html")}
-            />
-            HTML
-          </label>
-        </div>
+        <SurfaceCard>
+          <div className="mb-4">
+            <h2 className="text-xl font-semibold tracking-tight text-neutral-950">
+              本文
+            </h2>
+            <p className="mt-1 text-sm text-neutral-500">
+              文章入力と HTML 入力を切り替えられます。
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="text-sm text-neutral-500">本文入力形式</span>
+            <label className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-3 py-1 whitespace-nowrap">
+              <input
+                type="radio"
+                name="bodymode"
+                checked={mode === "plain"}
+                onChange={() => setMode("plain")}
+              />
+              文章
+            </label>
+            <label className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-3 py-1 whitespace-nowrap">
+              <input
+                type="radio"
+                name="bodymode"
+                checked={mode === "html"}
+                onChange={() => setMode("html")}
+              />
+              HTML
+            </label>
+          </div>
 
-        <div>
-          <div className="text-sm text-neutral-500">{labelForBody}</div>
+          <div>
+            <div className="text-sm text-neutral-500">{labelForBody}</div>
 
-          {mode === "plain" ? (
-            <textarea
-              name="body_plain"
-              className="mt-1 w-full min-h-[220px] rounded-lg border border-neutral-300 px-3 py-2"
-              placeholder="そのまま文章を入力してください（改行は自動で&lt;br&gt;に変換されます）"
-              required
-            />
-          ) : (
-            <textarea
-              name="body_html"
-              className="mt-1 w-full min-h-[220px] font-mono rounded-lg border border-neutral-300 px-3 py-2"
-              placeholder="<p>Hello</p> のようなHTMLを記述してください"
-              required
-            />
-          )}
+            {mode === "plain" ? (
+              <textarea
+                name="body_plain"
+                className="mt-1 w-full min-h-[220px] rounded-lg border border-neutral-300 px-3 py-2"
+                placeholder="そのまま文章を入力してください（改行は自動で&lt;br&gt;に変換されます）"
+                required
+              />
+            ) : (
+              <textarea
+                name="body_html"
+                className="mt-1 w-full min-h-[220px] font-mono rounded-lg border border-neutral-300 px-3 py-2"
+                placeholder="<p>Hello</p> のようなHTMLを記述してください"
+                required
+              />
+            )}
 
-          <p className="mt-2 text-xs text-neutral-500">
-            差し込み可: <code className="font-mono">{"{{NAME}}"}</code>,{" "}
-            <code className="font-mono">
-              {
-                "{{EMAIL}}, {{COMPANY}},{{JOB}},{{GENDER}},{{AGE}},{{REGION}},{{PHONE}}"
-              }
-            </code>
-            <br />
-            ※「文章」モードでも保存時にHTML化され、送信時に自動で個別化されます。
-          </p>
-        </div>
+            <p className="mt-2 text-xs text-neutral-500">
+              差し込み可: <code className="font-mono">{"{{NAME}}"}</code>,{" "}
+              <code className="font-mono">
+                {
+                  "{{EMAIL}}, {{COMPANY}},{{JOB}},{{GENDER}},{{AGE}},{{REGION}},{{PHONE}}"
+                }
+              </code>
+              <br />
+              ※「文章」モードでも保存時にHTML化され、送信時に自動で個別化されます。
+            </p>
+          </div>
+        </SurfaceCard>
 
-        {/* 添付：ドロップゾーン + 複数選択 + 追加・削除 */}
-        <div>
+        <SurfaceCard>
+          <div className="mb-4">
+            <h2 className="text-xl font-semibold tracking-tight text-neutral-950">
+              添付ファイル
+            </h2>
+            <p className="mt-1 text-sm text-neutral-500">
+              資料や補足データをまとめて添付できます。
+            </p>
+          </div>
           <div className="text-sm text-neutral-500">添付ファイル</div>
           <div
             onDrop={onDrop}
@@ -306,12 +315,12 @@ export default function CampaignNewPage() {
               <div className="text-xs text-neutral-400">選択されていません</div>
             )}
           </div>
-        </div>
+        </SurfaceCard>
 
-        <div className="flex justify-end sm:justify-end">
+        <div className="flex justify-end">
           <button
             type="submit"
-            className="w-full rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 sm:w-auto"
+            className="w-full rounded-2xl bg-neutral-950 px-5 py-3 text-sm font-medium text-white hover:bg-neutral-800 sm:w-auto"
           >
             保存
           </button>
@@ -319,6 +328,6 @@ export default function CampaignNewPage() {
       </form>
 
       <pre className="mt-3 text-xs text-neutral-500">{msg}</pre>
-    </main>
+    </PageMain>
   );
 }

@@ -2,7 +2,6 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
-import AppHeader from "@/components/AppHeader";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -13,6 +12,7 @@ import {
   ArrowDown,
   Bug,
 } from "lucide-react";
+import { DataTableCard, PageHero, PageMain, StatChip, SurfaceCard } from "@/components/PageChrome";
 
 const PAGE_SIZE = 10;
 type Dataset = "prospects" | "rejected" | "similar";
@@ -318,7 +318,8 @@ export default function ManualRunsPage() {
   const toggleOne = (id: string) =>
     setSelected((prev) => {
       const n = new Set(prev);
-      n.has(id) ? n.delete(id) : n.add(id);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
       return n;
     });
 
@@ -412,14 +413,32 @@ export default function ManualRunsPage() {
   };
 
   return (
-    <>
-      <AppHeader showBack />
-      <main className="mx-auto max-w-7xl p-6">
-        <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+    <PageMain className="space-y-6">
+      <PageHero
+        eyebrow="Manual Send"
+        title="メッセージ手動送信"
+        description="対象テーブルを切り替えながら企業を選択し、テンプレートを指定してメールまたはフォーム送信を実行します。検索条件、送信済み状態、デバッグ結果まで一画面で確認できます。"
+        accent="rose"
+        actions={[
+          { href: "/form-outreach/waitlist", label: "待機リスト", variant: "secondary" },
+          { href: "/form-outreach/schedules", label: "実行ログ", variant: "secondary" },
+          { href: "/form-outreach/templates", label: "テンプレート管理", variant: "secondary" },
+        ]}
+      />
+
+      <div className="grid gap-3 md:grid-cols-4">
+        <StatChip label="テナント" value={tenantId ?? "-"} />
+        <StatChip label="選択件数" value={selected.size} />
+        <StatChip label="表示件数" value={rows.length} />
+        <StatChip label="送信モード" value={sendMode === "email" ? "メール" : "営業フォーム"} />
+      </div>
+
+      <SurfaceCard className="space-y-4">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <h1 className="text-2xl font-semibold text-neutral-900">
-              メッセージ手動送信
-            </h1>
+            <div className="text-lg font-semibold text-neutral-900">
+              実行設定
+            </div>
             <p className="text-sm text-neutral-500">
               3テーブル切替 / 検索 / 10件ページング。
               テンプレ選択→送信モード選択→「実行」で送信。
@@ -456,8 +475,7 @@ export default function ManualRunsPage() {
           </div>
         </div>
 
-        {/* タブ */}
-        <div className="mb-3 inline-flex rounded-lg border border-neutral-200 overflow-hidden">
+        <div className="inline-flex rounded-lg border border-neutral-200 overflow-hidden">
           {(["prospects", "rejected", "similar"] as Dataset[]).map((t) => (
             <button
               key={t}
@@ -475,13 +493,12 @@ export default function ManualRunsPage() {
                 ? "正規企業リスト"
                 : t === "rejected"
                 ? "不備企業リスト"
-                : "近似サイトリスト"}
+              : "近似サイトリスト"}
             </button>
           ))}
         </div>
 
-        {/* フィルタ */}
-        <section className="rounded-2xl border border-neutral-200 p-4 mb-3 bg-white">
+        <section className="rounded-2xl border border-neutral-200 p-4 bg-white">
           <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
             <div className="md:col-span-2">
               <label className="block text-xs text-neutral-600 mb-1">
@@ -586,8 +603,7 @@ export default function ManualRunsPage() {
           </div>
         </section>
 
-        {/* テンプレ＋送信モード＋実行 */}
-        <div className="mb-3 flex flex-wrap items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <button
             onClick={() => setShowTplModal(true)}
             className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
@@ -634,9 +650,9 @@ export default function ManualRunsPage() {
             </span>
           </div>
         </div>
+      </SurfaceCard>
 
-        {/* テーブル */}
-        <section className="rounded-2xl border border-neutral-200 overflow-hidden bg-white">
+      <DataTableCard>
           <div className="overflow-x-auto">
             <table className="min-w-[1200px] w-full text-sm">
               <thead className="bg-neutral-50 text-neutral-600">
@@ -825,17 +841,15 @@ export default function ManualRunsPage() {
               </button>
             </div>
           </div>
-        </section>
+      </DataTableCard>
 
-        {/* メッセージ */}
-        {msg && (
-          <pre className="mt-3 whitespace-pre-wrap text-xs text-red-600">
-            {msg}
-          </pre>
-        )}
+      {msg && (
+        <SurfaceCard>
+          <pre className="whitespace-pre-wrap text-xs text-red-600">{msg}</pre>
+        </SurfaceCard>
+      )}
 
-        {/* ★ フォーム送信デバッグパネル */}
-        <section className="mt-6 rounded-2xl border border-amber-200 bg-amber-50/60 px-4 py-3">
+      <section className="rounded-2xl border border-amber-200 bg-amber-50/60 px-4 py-3">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <div className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-amber-100 border border-amber-300">
@@ -1045,7 +1059,6 @@ export default function ManualRunsPage() {
             </div>
           )}
         </section>
-      </main>
 
       {/* テンプレ選択モーダル */}
       {showTplModal && (
@@ -1121,6 +1134,6 @@ export default function ManualRunsPage() {
           </div>
         </div>
       )}
-    </>
+    </PageMain>
   );
 }

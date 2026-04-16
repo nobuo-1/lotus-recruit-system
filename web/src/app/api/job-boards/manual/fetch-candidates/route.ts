@@ -5,6 +5,10 @@ import { NextResponse } from "next/server";
 import type { SiteKey } from "@/server/job-boards/types";
 import { createMynaviLoginSession } from "@/server/job-boards/mynaviLogin";
 import { fetchMynaviScoutCount } from "@/server/job-boards/mynaviCandidates";
+import {
+  saveJobBoardManualHistory,
+  type ManualHistoryStatus,
+} from "@/server/job-boards/manualHistory";
 
 type RequestBody = {
   /** 旧来互換: 単一サイト指定 */
@@ -19,6 +23,10 @@ type RequestBody = {
   sites?: SiteKey[];
   /** 新版: サイトごとのスカウト検索URL */
   scoutUrls?: Record<string, string>;
+  /** 条件の履歴保存用 */
+  large?: string[];
+  small?: string[];
+  pref?: string[];
 };
 
 type CandidateResult = {
@@ -148,11 +156,11 @@ async function fetchCandidateCountViaDirectFetch(
       parseHint: hint,
       errorMessage: null,
     };
-  } catch (err: any) {
+  } catch (err: unknown) {
     const msg =
-      err?.name === "AbortError"
+      err instanceof Error && err.name === "AbortError"
         ? "fetch aborted (timeout)"
-        : `fetch error: ${err?.message ?? String(err)}`;
+        : `fetch error: ${err instanceof Error ? err.message : String(err)}`;
     return {
       siteKey,
       url,
@@ -248,20 +256,66 @@ export async function POST(req: Request) {
       return sum + v;
     }, 0);
 
+    const successCount = results.filter(
+      (r) => typeof r.total === "number" && !Number.isNaN(r.total)
+    ).length;
+    const failureCount = Math.max(0, results.length - successCount);
+    const historyStatus: ManualHistoryStatus =
+      successCount === 0
+        ? "failed"
+        : failureCount > 0
+          ? "partial"
+          : "success";
+
+    let historyId: string | null = null;
+    let historyError: string | null = null;
+    try {
+      const saved = await saveJobBoardManualHistory({
+        req,
+        body,
+        params: {
+          action_type: "candidates",
+          status: historyStatus,
+          sites,
+          large: body.large ?? [],
+          small: body.small ?? [],
+          pref: body.pref ?? [],
+          fetched_count: fetchedCount,
+          success_count: successCount,
+          failure_count: failureCount,
+          preview_count: results.length,
+          note:
+            historyStatus === "failed"
+              ? "求職者取得に失敗しました。"
+              : historyStatus === "partial"
+                ? "一部失敗ありで求職者数を取得しました。"
+                : "求職者数を取得しました。",
+        },
+        results,
+        resultCount: fetchedCount,
+      });
+      historyId = saved.id;
+    } catch (err: unknown) {
+      historyError = err instanceof Error ? err.message : String(err);
+      console.error("fetch-candidates history save error", err);
+    }
+
     return NextResponse.json(
       {
         ok: true,
         results,
         fetchedCount,
+        history_id: historyId,
+        history_error: historyError,
       },
       { status: 200 }
     );
-  } catch (e: any) {
+  } catch (e: unknown) {
     console.error("fetch-candidates error", e);
     return NextResponse.json(
       {
         ok: false,
-        error: e?.message ? String(e.message) : String(e),
+        error: e instanceof Error ? e.message : String(e),
       },
       { status: 500 }
     );

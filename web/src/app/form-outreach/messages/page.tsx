@@ -2,7 +2,7 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import AppHeader from "@/components/AppHeader";
+import { DataTableCard, PageHero, PageMain, StatChip } from "@/components/PageChrome";
 
 const TENANT_ID = "175b1a9d-3f85-482d-9323-68a44d214424";
 
@@ -39,19 +39,21 @@ export default function TemplatesPage() {
   }, []);
 
   return (
-    <>
-      <AppHeader showBack />
-      <main className="mx-auto max-w-5xl p-6">
-        <div className="mb-4">
-          <h1 className="text-2xl font-semibold text-neutral-900">
-            メッセージテンプレート
-          </h1>
-          <p className="text-sm text-neutral-500">
-            form_outreach_messages テーブルの内容を表示します。
-          </p>
-        </div>
+    <PageMain className="space-y-6">
+      <PageHero
+        eyebrow="Templates"
+        title="メッセージテンプレート"
+        description="フォーム営業で使うテンプレート一覧です。名称、件名、チャンネル、作成日時を同じ見た目で確認できます。"
+        accent="rose"
+      />
 
-        <section className="rounded-2xl border border-neutral-200 overflow-hidden">
+      <div className="grid gap-3 md:grid-cols-3">
+        <StatChip label="テンプレート数" value={rows.length} />
+        <StatChip label="対象チャンネル数" value={new Set(rows.map((t) => t.channel || "-")).size} />
+        <StatChip label="状態" value={msg ? "確認あり" : "正常"} />
+      </div>
+
+      <DataTableCard>
           <table className="min-w-[720px] w-full text-sm">
             <thead className="bg-neutral-50 text-neutral-600">
               <tr>
@@ -84,14 +86,13 @@ export default function TemplatesPage() {
               )}
             </tbody>
           </table>
-        </section>
+      </DataTableCard>
 
-        {msg && (
-          <pre className="mt-3 whitespace-pre-wrap text-xs text-red-600">
-            {msg}
-          </pre>
-        )}
-      </main>
-    </>
+      {msg && (
+        <pre className="mt-3 whitespace-pre-wrap text-xs text-red-600">
+          {msg}
+        </pre>
+      )}
+    </PageMain>
   );
 }

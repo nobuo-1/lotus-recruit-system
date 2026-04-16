@@ -3,10 +3,10 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import AppHeader from "@/components/AppHeader";
-import Link from "next/link";
 import dynamic from "next/dynamic";
 import { supabase } from "@/lib/supabaseClient";
 import type { ManualResultRow } from "@/server/job-boards/types";
+import { PageHero, PageMain, SurfaceCard, StatChip } from "@/components/PageChrome";
 
 // 職種モーダル
 // ※ job/JobCategoryModal の named export を使う
@@ -895,6 +895,12 @@ export default function JobBoardsManualPage() {
         text += `\n取得した求職者数: ${j.fetchedCount}件`;
       }
 
+      if (j?.history_id) {
+        text += `\n履歴に保存しました（ID: ${j.history_id}）`;
+      } else if (j?.history_error) {
+        text += `\n履歴保存に失敗しました: ${j.history_error}`;
+      }
+
       if (Array.isArray(j?.results) && j.results.length > 0) {
         text += "\n\nサイト別結果:\n";
         for (const r of j.results) {
@@ -980,25 +986,28 @@ export default function JobBoardsManualPage() {
   return (
     <>
       <AppHeader showBack />
-      <main className="mx-auto max-w-6xl p-6">
-        <div className="mb-4 flex items-center justify-between gap-3">
-          <div>
-            <h1 className="text-2xl font-semibold text-neutral-900">
-              転職サイト 手動実行
-            </h1>
-            <p className="mt-1 text-sm text-neutral-500">
-              ログイン情報を利用して件数を取得。設定した条件すべてを集計し、サイトごとに結果を表示します。
-            </p>
+      <PageMain className="space-y-6">
+        <PageHero
+          eyebrow="Manual Research"
+          title="転職サイトの手動実行を統一 UI で操作"
+          description="サイト、職種、都道府県の条件設定から求人件数・求職者数の取得、結果確認までを一画面で進められます。"
+          accent="gold"
+          actions={[
+            { href: "/job-boards/manual/history", label: "手動実行履歴へ", variant: "secondary" },
+          ]}
+        />
+
+        <SurfaceCard>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+            <StatChip label="対象サイト" value={sites.length || "未選択"} />
+            <StatChip label="都道府県" value={prefs.length || "全国"} />
+            <StatChip label="取得結果" value={rows.length || 0} />
+            <StatChip
+              label="進捗"
+              value={progressText || (running ? "実行中" : "待機中")}
+            />
           </div>
-          <div className="flex items-center gap-2">
-            <Link
-              href="/job-boards/manual/history"
-              className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
-            >
-              手動実行履歴へ
-            </Link>
-          </div>
-        </div>
+        </SurfaceCard>
 
         {(running || progressTotal > 0) && (
           <div className="mb-4 flex items-center justify-between rounded-xl border border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800">
@@ -1033,7 +1042,7 @@ export default function JobBoardsManualPage() {
         )}
 
         {/* 実行条件サマリ & 実行ボタン */}
-        <section className="rounded-2xl border border-neutral-200 p-4 space-y-4">
+        <SurfaceCard className="space-y-4">
           <div className="flex items-start justify-between gap-3">
             <div>
               <div className="text-xs font-medium text-neutral-600 mb-1">
@@ -1113,10 +1122,10 @@ export default function JobBoardsManualPage() {
               {msg}
             </pre>
           )}
-        </section>
+        </SurfaceCard>
 
         {/* 求職者数取得URL */}
-        <section className="mt-4 rounded-2xl border border-neutral-200 p-4 space-y-3">
+        <SurfaceCard className="space-y-3">
           <div className="text-sm font-semibold text-neutral-800">
             求職者数取得の設定
           </div>
@@ -1145,10 +1154,10 @@ export default function JobBoardsManualPage() {
               ))}
             </div>
           )}
-        </section>
+        </SurfaceCard>
 
         {/* 結果表示 → サイト別集計 + 条件別テーブル */}
-        <section className="mt-6 rounded-2xl border border-neutral-200 p-4 space-y-6">
+        <SurfaceCard className="space-y-6">
           <div className="text-sm font-semibold">取得結果</div>
 
           {!hasResults ? (
@@ -1259,8 +1268,8 @@ export default function JobBoardsManualPage() {
               </section>
             </>
           )}
-        </section>
-      </main>
+        </SurfaceCard>
+      </PageMain>
 
       {/* 条件設定モーダル */}
       <ConditionModal

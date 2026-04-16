@@ -2,7 +2,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
-import AppHeader from "@/components/AppHeader";
+import { PageHero, PageMain, StatChip, SurfaceCard } from "@/components/PageChrome";
 
 /** =========================
  * 定数
@@ -476,30 +476,41 @@ export default function FiltersPage() {
   }, [filters.established_from, filters.established_to]);
 
   return (
-    <>
-      <AppHeader showBack />
-      <main className="mx-auto max-w-5xl p-6">
-        <div className="mb-4 flex items-center justify-between">
+    <PageMain className="space-y-6">
+      <PageHero
+        eyebrow="Filters"
+        title="取得フィルタ設定"
+        description="企業リスト取得時の対象条件をまとめて調整します。地域、業種、従業員規模、資本金、設立日、キーワードを同じデザインで管理できます。"
+        accent="rose"
+      />
+
+      <div className="grid gap-3 md:grid-cols-4">
+        <StatChip label="テナント" value={tenantId ?? "-"} />
+        <StatChip label="都道府県" value={filters.prefectures.length || "全国"} />
+        <StatChip label="業種" value={`${filters.industries_large.length}/${filters.industries_small.length}`} />
+        <StatChip label="最終更新" value={filters.updated_at ? formatTs(filters.updated_at) : "-"} />
+      </div>
+
+      <SurfaceCard className="space-y-6">
+        <div className="flex items-center justify-between gap-3">
           <div>
-            <h1 className="text-2xl font-semibold text-neutral-900">
-              取得フィルタ設定
-            </h1>
-            <p className="text-xs text-neutral-500 mt-1">
-              テナント: <span className="font-mono">{tenantId ?? "-"}</span> /
-              最終更新:{" "}
-              {filters.updated_at ? formatTs(filters.updated_at) : "-"}
+            <div className="text-xl font-semibold tracking-tight text-neutral-950">
+              フィルタ条件
+            </div>
+            <p className="mt-1 text-sm text-neutral-500">
+              手動取得・自動取得の両方に使う対象条件です。
             </p>
           </div>
           <button
             onClick={save}
             disabled={loading}
-            className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50 disabled:opacity-50"
+            className="rounded-2xl bg-neutral-950 px-4 py-3 text-sm font-medium text-white transition hover:bg-neutral-800 disabled:opacity-50"
           >
             {loading ? "保存中…" : "保存"}
           </button>
         </div>
 
-        <section className="rounded-2xl border border-neutral-200 p-4 space-y-6">
+        <div className="space-y-6">
           {/* 都道府県（モーダル起動） */}
           <div>
             <div className="mb-2 flex items-center justify-between">
@@ -720,14 +731,15 @@ export default function FiltersPage() {
               </div>
             )}
           </div>
-        </section>
+        </div>
 
-        {msg && (
-          <pre className="mt-3 whitespace-pre-wrap text-xs text-neutral-600">
-            {msg}
-          </pre>
-        )}
-      </main>
+      </SurfaceCard>
+
+      {msg && (
+        <pre className="mt-3 whitespace-pre-wrap text-xs text-neutral-600">
+          {msg}
+        </pre>
+      )}
 
       {/* 都道府県モーダル */}
       {prefModalOpen && (
@@ -757,7 +769,7 @@ export default function FiltersPage() {
           }}
         />
       )}
-    </>
+    </PageMain>
   );
 }
 

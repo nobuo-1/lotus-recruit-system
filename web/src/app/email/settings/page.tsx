@@ -1,10 +1,10 @@
 // web/src/app/email/settings/page.tsx
 "use client";
 import React, { useEffect, useState } from "react";
-import Link from "next/link";
 import dynamic from "next/dynamic";
 import AppHeader from "@/components/AppHeader";
 import { toastSuccess, toastError } from "@/components/AppToast";
+import { PageHero, PageMain, SurfaceCard } from "@/components/PageChrome";
 
 // 非SSRで読み込み（CSR専用）
 const RecipientListSettingsForm = dynamic(
@@ -62,29 +62,18 @@ export default function EmailSettingsPage() {
   return (
     <>
       <AppHeader showBack />
-      <main className="mx-auto max-w-3xl p-6">
-        {/* ヘッダー行 */}
-        <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-          <div>
-            <h1 className="whitespace-nowrap text-2xl font-semibold text-neutral-900">
-              メール用設定
-            </h1>
-            <p className="text-sm text-neutral-500">
-              メールフッターの会社名/住所/問い合わせ先、差出人メールを設定します
-            </p>
-          </div>
-          <Link
-            href="/email"
-            className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
-          >
-            メール配信トップ
-          </Link>
-        </div>
+      <PageMain className="max-w-5xl space-y-6">
+        <PageHero
+          eyebrow="Mail Settings"
+          title="メール配信の設定を統一 UI で管理"
+          description="会社情報、問い合わせ先、差出人メール、受信者リストの表示列を同じトーンのカードに整理しました。"
+          accent="blue"
+        />
 
-        {/* 会社情報フォーム（既存） */}
+        <SurfaceCard>
         <form
           onSubmit={onSubmit}
-          className="space-y-4 rounded-2xl border border-neutral-200 p-4"
+          className="space-y-4"
         >
           <div>
             <label className="block text-sm text-neutral-600">会社名</label>
@@ -144,19 +133,19 @@ export default function EmailSettingsPage() {
             </button>
           </div>
         </form>
+        </SurfaceCard>
 
-        {/* ▼ 受信者リストの表示列（新規セクション） */}
-        <div className="mt-8 rounded-2xl border border-neutral-200 p-4">
+        <SurfaceCard>
           <h2 className="mb-2 text-lg font-semibold">受信者リストの表示列</h2>
           <p className="mb-3 text-sm text-neutral-500">
             チェックした項目だけが「受信者リスト」の列とフィルターに出ます。
             会社名や職種（複数）も選択できます。
           </p>
           <RecipientListSettingsForm />
-        </div>
+        </SurfaceCard>
 
         <pre className="mt-3 text-xs text-neutral-500">{msg}</pre>
-      </main>
+      </PageMain>
     </>
   );
 }

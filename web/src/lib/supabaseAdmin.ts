@@ -1,4 +1,5 @@
 // web/src/lib/supabaseAdmin.ts
+import "@/lib/loadEnv";
 import { createClient } from "@supabase/supabase-js";
 
 export function supabaseAdmin() {

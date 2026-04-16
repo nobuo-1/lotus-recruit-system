@@ -2,9 +2,15 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
-import Link from "next/link";
 import KpiCard from "@/components/KpiCard";
 import AppHeader from "@/components/AppHeader";
+import {
+  ActionGrid,
+  PageHero,
+  PageMain,
+  SectionTitle,
+  SurfaceCard,
+} from "@/components/PageChrome";
 import {
   ResponsiveContainer,
   LineChart,
@@ -14,6 +20,14 @@ import {
   Tooltip,
   CartesianGrid,
 } from "recharts";
+import {
+  Boxes,
+  FileClock,
+  FileSearch,
+  MessageSquareText,
+  Send,
+  Settings2,
+} from "lucide-react";
 
 type SeriesPoint = { date: string; count: number };
 type Summary = {
@@ -151,128 +165,71 @@ export default function FormOutreachLanding() {
   return (
     <>
       <AppHeader />
-      <main className="mx-auto max-w-6xl p-6">
-        {/* タイトル */}
-        <div className="mb-4">
-          <h1 className="text-[26px] md:text-[24px] font-extrabold tracking-tight text-indigo-900">
-            フォーム営業
-          </h1>
-          <p className="mt-2 text-sm text-neutral-500">
-            実行・リスト・設定の操作とKPI確認
-          </p>
-        </div>
+      <PageMain className="space-y-6">
+        <PageHero
+          eyebrow="Form Outreach"
+          title="企業抽出から送信、自動化まで一続きで運用"
+          description="フォーム営業の実行、テンプレート管理、取得条件、待機リストを同じ設計で整理しました。右往左往せず、作業の入口を明確にしています。"
+          accent="green"
+          actions={[
+            { href: "/form-outreach/companies/fetch", label: "企業リストを取得", variant: "primary" },
+            { href: "/form-outreach/runs/manual", label: "手動送信", variant: "secondary" },
+          ]}
+        />
 
-        <div className="mb-6 rounded-2xl border border-neutral-200 p-5">
-          <div className="grid grid-cols-1 gap-7 md:grid-cols-3">
-            {/* 実行 */}
-            <section>
-              <h3 className="mb-2 text-lg font-semibold tracking-tight text-neutral-900 sm:text-xl">
-                実行
-              </h3>
-              <ul className="mt-1.5 space-y-1.5">
-                <li>
-                  <Link
-                    href="/form-outreach/companies/fetch"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    企業リスト手動取得
-                  </Link>
-                </li>
-                <li>
-                  <Link
-                    href="/form-outreach/runs/manual"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    メッセージ手動送信
-                  </Link>
-                </li>
-                <li>
-                  <Link
-                    href="/form-outreach/schedules"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    実行ログ
-                  </Link>
-                </li>
-              </ul>
-            </section>
+        <SurfaceCard>
+          <SectionTitle
+            title="主要な操作"
+            description="日常運用でよく開く画面をカード化しました。"
+          />
+          <ActionGrid
+            items={[
+              {
+                href: "/form-outreach/companies/fetch",
+                title: "企業リスト手動取得",
+                description: "対象条件を使って新しい企業リストを抽出します。",
+                icon: FileSearch,
+              },
+              {
+                href: "/form-outreach/companies",
+                title: "企業リスト",
+                description: "送信対象候補を確認し、状態を一覧で見ます。",
+                icon: Boxes,
+              },
+              {
+                href: "/form-outreach/templates",
+                title: "テンプレート管理",
+                description: "差し込み文面や営業文をまとめて整備します。",
+                icon: MessageSquareText,
+              },
+              {
+                href: "/form-outreach/schedules",
+                title: "実行ログ",
+                description: "送信実行の結果や予約状態を追跡します。",
+                icon: FileClock,
+              },
+              {
+                href: "/form-outreach/senders",
+                title: "送信元設定",
+                description: "送信元の整備と切り替えを行います。",
+                icon: Send,
+              },
+              {
+                href: "/form-outreach/settings/filters",
+                title: "取得フィルタ設定",
+                description: "企業抽出の条件を精密に管理します。",
+                icon: Settings2,
+              },
+            ]}
+          />
+        </SurfaceCard>
 
-            {/* リスト */}
-            <section>
-              <h3 className="mb-2 text-lg font-semibold tracking-tight text-neutral-900 sm:text-xl">
-                リスト
-              </h3>
-              <ul className="mt-1.5 space-y-1.5">
-                <li>
-                  <Link
-                    href="/form-outreach/companies"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    企業リスト
-                  </Link>
-                </li>
-                <li>
-                  <Link
-                    href="/form-outreach/templates"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    テンプレートリスト
-                  </Link>
-                </li>
-                <li>
-                  <Link
-                    href="/form-outreach/waitlist"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    待機リスト
-                  </Link>
-                </li>
-              </ul>
-            </section>
-
-            {/* 設定 */}
-            <section>
-              <h3 className="mb-2 text-lg font-semibold tracking-tight text-neutral-900 sm:text-xl">
-                設定
-              </h3>
-              <ul className="mt-1.5 space-y-1.5">
-                <li>
-                  <Link
-                    href="/form-outreach/settings/filters"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    取得フィルタ設定
-                  </Link>
-                </li>
-                <li>
-                  <Link
-                    href="/form-outreach/automation"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    自動実行設定
-                  </Link>
-                </li>
-                <li>
-                  <Link
-                    href="/form-outreach/senders"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    送信元設定
-                  </Link>
-                </li>
-              </ul>
-            </section>
-          </div>
-        </div>
-
-        {/* 各KPI */}
-        <header className="mb-2">
-          <h2 className="text-2xl md:text-[24px] font-semibold text-neutral-900">
-            各KPI
-          </h2>
-        </header>
-
-        <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
+        <SurfaceCard>
+          <SectionTitle
+            title="KPI"
+            description="取得量と実行効率を同じ粒度で確認できます。"
+          />
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
           <KpiCard label="テンプレ数" value={data?.templates ?? "-"} />
           <KpiCard label="企業数" value={data?.companies ?? "-"} />
           <KpiCard
@@ -285,25 +242,29 @@ export default function FormOutreachLanding() {
           />
           <KpiCard label="期間内合計" value={periodTotal} />
         </div>
+        </SurfaceCard>
 
-        {/* 折れ線グラフ（期間/対象切り替え） */}
-        <div className="mt-6 rounded-2xl border border-neutral-200 p-4">
-          <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <div className="text-base font-semibold text-neutral-800">
-              直近{labelOf(range)}のリスト取得数
+        <SurfaceCard>
+          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <div className="text-xl font-semibold tracking-tight text-neutral-950">
+                直近{labelOf(range)}のリスト取得数
+              </div>
+              <div className="mt-1 text-sm text-neutral-500">
+                取得対象の種類を切り替えながら増減を比較します。
+              </div>
             </div>
             <div className="flex flex-wrap gap-2">
-              {/* 期間 */}
-              <div className="inline-flex items-center gap-1">
+              <div className="inline-flex items-center gap-1 rounded-2xl border border-neutral-200 bg-neutral-50 p-1">
                 {(["7d", "14d", "1m", "3m", "6m", "1y"] as RangeKey[]).map(
                   (r) => (
                     <button
                       key={r}
                       onClick={() => setRange(r)}
-                      className={`rounded-lg px-2 py-1 text-xs ${
+                      className={`rounded-xl px-3 py-1.5 text-xs font-medium ${
                         range === r
-                          ? "border border-neutral-400 text-neutral-800"
-                          : "border border-neutral-200 text-neutral-500 hover:bg-neutral-50"
+                          ? "bg-white text-neutral-900 shadow-sm"
+                          : "text-neutral-500 hover:bg-white/70"
                       }`}
                     >
                       {labelOf(r)}
@@ -311,17 +272,16 @@ export default function FormOutreachLanding() {
                   )
                 )}
               </div>
-              {/* 対象（4種類） */}
-              <div className="inline-flex items-center gap-1">
+              <div className="inline-flex items-center gap-1 rounded-2xl border border-neutral-200 bg-neutral-50 p-1">
                 {(["all", "prospects", "rejected", "similar"] as Mode[]).map(
                   (m) => (
                     <button
                       key={m}
                       onClick={() => setMode(m)}
-                      className={`rounded-lg px-2 py-1 text-xs ${
+                      className={`rounded-xl px-3 py-1.5 text-xs font-medium ${
                         mode === m
-                          ? "border border-indigo-400 text-indigo-700"
-                          : "border border-neutral-200 text-neutral-500 hover:bg-neutral-50"
+                          ? "bg-white text-neutral-950 shadow-sm"
+                          : "text-neutral-500 hover:bg-white/70"
                       }`}
                     >
                       {m === "all"
@@ -338,30 +298,31 @@ export default function FormOutreachLanding() {
             </div>
           </div>
 
-          <div className="h-56">
+          <div className="h-64 rounded-[24px] border border-neutral-200 bg-[linear-gradient(180deg,#ffffff_0%,#f8fafc_100%)] p-3">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={series}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="date" tick={{ fontSize: 13 }} />
-                <YAxis allowDecimals={false} tick={{ fontSize: 13 }} />
+                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                <XAxis dataKey="date" tick={{ fontSize: 13, fill: "#737373" }} />
+                <YAxis allowDecimals={false} tick={{ fontSize: 13, fill: "#737373" }} />
                 <Tooltip />
                 <Line
                   type="monotone"
                   dataKey="count"
                   dot={false}
-                  strokeWidth={2}
+                  strokeWidth={3}
+                  stroke="#0f172a"
                 />
               </LineChart>
             </ResponsiveContainer>
           </div>
-        </div>
+        </SurfaceCard>
 
         {msg && (
           <pre className="mt-3 whitespace-pre-wrap text-xs text-neutral-500">
             {msg}
           </pre>
         )}
-      </main>
+      </PageMain>
     </>
   );
 }

@@ -2,7 +2,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
-import AppHeader from "@/components/AppHeader";
+import { DataTableCard, PageHero, PageMain, StatChip, SurfaceCard } from "@/components/PageChrome";
 
 /** Cookie から tenant_id を読む */
 function getTenantIdFromCookie(): string | null {
@@ -289,27 +289,31 @@ export default function TemplatesPage() {
   );
 
   return (
-    <>
-      <AppHeader showBack />
-      <main className="mx-auto max-w-5xl p-6">
-        <div className="mb-4 flex items-end justify-between">
-          <div>
-            <h1 className="text-2xl font-semibold text-neutral-900">
-              メッセージテンプレート
-            </h1>
-            <p className="text-sm text-neutral-500">
-              form_outreach_messages（channel='template'）を管理します。
-            </p>
-          </div>
-          <button
-            onClick={() => setOpen(true)}
-            className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
-          >
-            新規作成
-          </button>
-        </div>
+    <PageMain className="space-y-6">
+      <PageHero
+        eyebrow="Templates"
+        title="メッセージテンプレート"
+        description="フォーム営業で使う件名と本文テンプレートを管理します。差し込み変数の確認、編集、削除、新規作成まで同じ操作導線に揃えています。"
+        accent="rose"
+        actions={[{ href: "#", label: "新規作成", variant: "secondary" }]}
+        className="[&_a]:hidden"
+      />
 
-        <section className="rounded-2xl border border-neutral-200 overflow-hidden">
+      <SurfaceCard className="flex items-center justify-between gap-3">
+        <div className="grid flex-1 gap-3 md:grid-cols-3">
+          <StatChip label="テンプレート数" value={rows.length} />
+          <StatChip label="差し込み変数" value="12種" />
+          <StatChip label="状態" value={msg ? "要確認" : "正常"} />
+        </div>
+        <button
+          onClick={() => setOpen(true)}
+          className="rounded-2xl bg-neutral-950 px-4 py-3 text-sm font-medium text-white transition hover:bg-neutral-800"
+        >
+          新規作成
+        </button>
+      </SurfaceCard>
+
+      <DataTableCard>
           <table className="min-w-[880px] w-full text-sm">
             <thead className="bg-neutral-50 text-neutral-600">
               <tr>
@@ -359,18 +363,18 @@ export default function TemplatesPage() {
               )}
             </tbody>
           </table>
-        </section>
+      </DataTableCard>
 
-        {msg && (
-          <pre className="mt-3 whitespace-pre-wrap text-xs text-red-600">
-            {msg}
-          </pre>
-        )}
+      {msg && (
+        <pre className="mt-3 whitespace-pre-wrap text-xs text-red-600">
+          {msg}
+        </pre>
+      )}
 
-        {/* 新規作成モーダル */}
-        {open && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-            <div className="w-[900px] max-w-[95vw] max-h-[90vh] overflow-y-auto rounded-2xl bg-white shadow-xl border border-neutral-200">
+      {/* 新規作成モーダル */}
+      {open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="w-[900px] max-w-[95vw] max-h-[90vh] overflow-y-auto rounded-2xl bg-white shadow-xl border border-neutral-200">
               <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 sticky top-0 bg-white">
                 <div className="font-semibold">テンプレート新規作成</div>
                 <div className="flex items-center gap-2">
@@ -437,14 +441,14 @@ export default function TemplatesPage() {
                   </div>
                 </div>
               </div>
-            </div>
           </div>
-        )}
+        </div>
+      )}
 
-        {/* 編集モーダル */}
-        {editOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-            <div className="w-[900px] max-w-[95vw] max-h-[90vh] overflow-y-auto rounded-2xl bg-white shadow-xl border border-neutral-200">
+      {/* 編集モーダル */}
+      {editOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="w-[900px] max-w-[95vw] max-h-[90vh] overflow-y-auto rounded-2xl bg-white shadow-xl border border-neutral-200">
               <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 sticky top-0 bg-white">
                 <div className="font-semibold">テンプレートを編集</div>
                 <div className="flex items-center gap-2">
@@ -511,10 +515,9 @@ export default function TemplatesPage() {
                   </div>
                 </div>
               </div>
-            </div>
           </div>
-        )}
-      </main>
-    </>
+        </div>
+      )}
+    </PageMain>
   );
 }

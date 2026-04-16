@@ -5,6 +5,13 @@ import AppHeader from "@/components/AppHeader";
 import ConfirmCancelButton from "@/components/ConfirmCancelButton";
 import { supabaseServer } from "@/lib/supabaseServer";
 import { formatJpDateTime } from "@/lib/formatDate";
+import {
+  DataTableCard,
+  PageHero,
+  PageMain,
+  SurfaceCard,
+  StatChip,
+} from "@/components/PageChrome";
 
 export const dynamic = "force-dynamic";
 
@@ -24,7 +31,7 @@ export default async function CampaignSchedulesPage() {
     return (
       <>
         <AppHeader showBack />
-        <main className="mx-auto max-w-6xl p-6">ログインが必要です。</main>
+        <PageMain>ログインが必要です。</PageMain>
       </>
     );
   }
@@ -61,36 +68,28 @@ export default async function CampaignSchedulesPage() {
   return (
     <>
       <AppHeader showBack />
-      <main className="mx-auto max-w-6xl p-6">
-        {/* ヘッダー：右側にボタングループを寄せる */}
-        <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end">
-          <div>
-            <h1 className="whitespace-nowrap text-2xl font-semibold text-neutral-900">
-              キャンペーン予約リスト
-            </h1>
-            <p className="text-sm text-neutral-500">
-              予約中のメール配信を確認します
-            </p>
-          </div>
-          <div className="flex gap-2 md:ml-auto">
-            <Link
-              href="/email"
-              className="whitespace-nowrap rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
-            >
-              メール配信トップ
-            </Link>
-            <Link
-              href="/campaigns"
-              className="whitespace-nowrap rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
-            >
-              キャンペーン一覧
-            </Link>
-          </div>
-        </div>
+      <PageMain className="space-y-6">
+        <PageHero
+          eyebrow="Campaign Schedules"
+          title="予約中のキャンペーンを一覧で確認"
+          description="予約日時、作成日、詳細導線、キャンセル操作をメール一覧ページと同じ見た目で整理しています。"
+          accent="gold"
+          actions={[
+            { href: "/campaigns", label: "キャンペーン一覧", variant: "secondary" },
+          ]}
+        />
 
-        <div className="overflow-x-auto rounded-2xl border border-neutral-200">
+        <SurfaceCard>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+            <StatChip label="予約件数" value={(rows ?? []).length} />
+            <StatChip label="最短予約" value={rows?.[0]?.scheduled_at ? formatJpDateTime(rows[0].scheduled_at) : "-"} />
+            <StatChip label="表示内容" value="未来の scheduled のみ" />
+          </div>
+        </SurfaceCard>
+
+        <DataTableCard className="overflow-x-auto">
           <table className="min-w-[1080px] w-full text-sm">
-            <thead className="bg-neutral-50 text-neutral-600">
+            <thead className="bg-[linear-gradient(180deg,#fbfbfc_0%,#f3f5f8_100%)] text-neutral-600">
               <tr>
                 <th className="px-3 py-3 text-left">キャンペーン名</th>
                 <th className="px-3 py-3 text-left">件名</th>
@@ -102,7 +101,7 @@ export default async function CampaignSchedulesPage() {
             <tbody>
               {(rows ?? []).map((r) => (
                 <tr key={r.id} className="border-t border-neutral-200">
-                  <td className="px-3 py-3">
+                  <td className="px-3 py-3 font-medium text-neutral-950">
                     {r.campaigns?.name ?? "(無題キャンペーン)"}
                   </td>
                   <td className="px-3 py-3 text-neutral-600">
@@ -151,8 +150,8 @@ export default async function CampaignSchedulesPage() {
               )}
             </tbody>
           </table>
-        </div>
-      </main>
+        </DataTableCard>
+      </PageMain>
     </>
   );
 }

@@ -2,9 +2,8 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import AppHeader from "@/components/AppHeader";
-import Link from "next/link";
 import { ChevronLeft, ChevronRight } from "lucide-react";
+import { DataTableCard, PageHero, PageMain, StatChip, SurfaceCard } from "@/components/PageChrome";
 
 type RunRow = {
   id: string;
@@ -100,44 +99,26 @@ export default function SchedulesPage() {
   }, [tenantId]);
 
   return (
-    <>
-      <AppHeader showBack />
-      <main className="mx-auto max-w-7xl p-6">
-        <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <h1 className="text-2xl font-semibold text-neutral-900">
-              実行ログ
-            </h1>
-            <p className="text-sm text-neutral-500">
-              実行履歴を一覧。定期実行の設定は「自動実行設定」から管理します。
-            </p>
-            <p className="text-xs text-neutral-500 mt-1">
-              テナント: <span className="font-mono">{tenantId ?? "-"}</span>
-            </p>
-          </div>
-          <div className="flex gap-2">
-            <Link
-              href="/form-outreach/automation"
-              className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
-            >
-              自動実行設定へ
-            </Link>
-            <Link
-              href="/form-outreach/runs/manual"
-              className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
-            >
-              手動実行へ
-            </Link>
-            <Link
-              href="/form-outreach/waitlist"
-              className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
-            >
-              待機リストへ
-            </Link>
-          </div>
-        </div>
+    <PageMain className="space-y-6">
+      <PageHero
+        eyebrow="Runs"
+        title="実行ログ"
+        description="フォーム営業の手動送信・自動送信の履歴を一覧表示します。定期実行の設定や待機中データの確認にもすぐ移動できます。"
+        accent="rose"
+        actions={[
+          { href: "/form-outreach/automation", label: "自動実行設定", variant: "secondary" },
+          { href: "/form-outreach/runs/manual", label: "手動実行", variant: "secondary" },
+          { href: "/form-outreach/waitlist", label: "待機リスト", variant: "secondary" },
+        ]}
+      />
 
-        <section className="rounded-2xl border border-neutral-200 overflow-hidden bg-white">
+      <div className="grid gap-3 md:grid-cols-3">
+        <StatChip label="ログ件数" value={total} />
+        <StatChip label="表示ページ" value={`${page} / ${totalPages}`} />
+        <StatChip label="テナント" value={tenantId ?? "-"} />
+      </div>
+
+      <DataTableCard>
           <div className="overflow-x-auto">
             <table className="min-w-[1000px] w-full text-sm">
               <thead className="bg-neutral-50 text-neutral-600">
@@ -175,7 +156,6 @@ export default function SchedulesPage() {
             </table>
           </div>
 
-          {/* ページング */}
           <div className="flex items-center justify-between px-4 py-3 border-t border-neutral-200">
             <div className="text-xs text-neutral-500">
               全 {total} 件 / {page} / {totalPages} ページ（{PAGE_SIZE}
@@ -200,14 +180,13 @@ export default function SchedulesPage() {
               </button>
             </div>
           </div>
-        </section>
+      </DataTableCard>
 
-        {msg && (
-          <pre className="mt-3 whitespace-pre-wrap text-xs text-red-600">
-            {msg}
-          </pre>
-        )}
-      </main>
-    </>
+      {msg && (
+        <SurfaceCard>
+          <pre className="whitespace-pre-wrap text-xs text-red-600">{msg}</pre>
+        </SurfaceCard>
+      )}
+    </PageMain>
   );
 }

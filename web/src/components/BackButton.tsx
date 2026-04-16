@@ -3,13 +3,13 @@ import React from "react";
 import { useRouter } from "next/navigation";
 
 export default function BackButton({
-  fallback = "/dashboard",
+  fallback = "/email",
 }: {
   fallback?: string;
 }) {
   const router = useRouter();
   const onClick = () => {
-    // 履歴が無い時はダッシュボードへ
+    // 履歴が無い時はトップ機能ページへ
     if (typeof window !== "undefined" && window.history.length > 1) {
       router.back();
     } else {

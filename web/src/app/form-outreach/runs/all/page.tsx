@@ -2,7 +2,7 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import AppHeader from "@/components/AppHeader";
+import { DataTableCard, PageHero, PageMain, StatChip } from "@/components/PageChrome";
 
 type RunLite = {
   id: string;
@@ -27,17 +27,22 @@ export default function OutreachRunsAll() {
   }, [page]);
 
   return (
-    <>
-      <AppHeader showBack />
-      <main className="mx-auto max-w-6xl p-6">
-        <div className="mb-4">
-          <h1 className="text-2xl font-semibold text-neutral-900">
-            フロー詳細（一覧）
-          </h1>
-          <p className="text-sm text-neutral-500">40件ごとにページ切替</p>
-        </div>
+    <PageMain className="space-y-6">
+      <PageHero
+        eyebrow="Run History"
+        title="フロー詳細一覧"
+        description="フォーム営業の実行履歴をページ単位でたどれます。最新のログを中心に、過去データも同じレイアウトで確認できます。"
+        accent="rose"
+      />
 
-        <div className="overflow-x-auto rounded-2xl border border-neutral-200">
+      <div className="grid gap-3 md:grid-cols-3">
+        <StatChip label="ページ" value={page} />
+        <StatChip label="表示件数" value={rows.length} />
+        <StatChip label="ページサイズ" value="40件" />
+      </div>
+
+      <DataTableCard>
+        <div className="overflow-x-auto">
           <table className="min-w-[800px] w-full text-sm">
             <thead className="bg-neutral-50 text-neutral-600">
               <tr>
@@ -71,8 +76,9 @@ export default function OutreachRunsAll() {
             </tbody>
           </table>
         </div>
+      </DataTableCard>
 
-        <div className="mt-3 flex items-center gap-2">
+      <div className="flex items-center gap-2">
           <button
             onClick={() => setPage((p) => Math.max(1, p - 1))}
             className="rounded-lg border border-neutral-200 px-3 py-1 text-sm hover:bg-neutral-50"
@@ -86,8 +92,7 @@ export default function OutreachRunsAll() {
           >
             次へ
           </button>
-        </div>
-      </main>
-    </>
+      </div>
+    </PageMain>
   );
 }

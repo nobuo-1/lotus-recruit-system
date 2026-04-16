@@ -30,6 +30,10 @@ import {
 } from "@/server/job-boards/womantype";
 
 import { supabaseServer } from "@/lib/supabaseServer";
+import {
+  saveJobBoardManualHistory,
+  type ManualHistoryStatus,
+} from "@/server/job-boards/manualHistory";
 
 // ★ 大分類と小分類の正しい組み合わせを判定するために利用
 import { JOB_CATEGORIES } from "@/constants/jobCategories";
@@ -888,9 +892,68 @@ export async function POST(req: Request) {
       });
     }
 
+    const successCount = preview.filter(
+      (row) => typeof row.jobs_total === "number" && !Number.isNaN(row.jobs_total)
+    ).length;
+    const failureCount = Math.max(0, preview.length - successCount);
+    const totalJobs = preview.reduce((sum, row) => {
+      if (typeof row.jobs_total !== "number" || Number.isNaN(row.jobs_total)) {
+        return sum;
+      }
+      return sum + row.jobs_total;
+    }, 0);
+
+    const historyStatus: ManualHistoryStatus =
+      successCount === 0
+        ? "failed"
+        : failureCount > 0
+          ? "partial"
+          : "success";
+
+    let historyId: string | null = null;
+    let historyError: string | null = null;
+
+    if (body.saveMode === "history") {
+      try {
+        const saved = await saveJobBoardManualHistory({
+          req,
+          body,
+          params: {
+            action_type: "jobs",
+            status: historyStatus,
+            sites: rawSites,
+            large: body.large ?? [],
+            small: body.small ?? [],
+            pref: body.pref ?? [],
+            total_jobs: totalJobs,
+            success_count: successCount,
+            failure_count: failureCount,
+            preview_count: preview.length,
+            note:
+              historyStatus === "failed"
+                ? "求人件数の取得に失敗しました。"
+                : historyStatus === "partial"
+                  ? "一部失敗ありで求人件数を取得しました。"
+                  : "求人件数を取得しました。",
+            debug_logs: debugLogs,
+          },
+          results: preview,
+          resultCount: totalJobs,
+        });
+        historyId = saved.id;
+      } catch (err: unknown) {
+        historyError = err instanceof Error ? err.message : String(err);
+        console.error("manual run history save error", err);
+      }
+    }
+
     const note =
       body.saveMode === "history"
-        ? "履歴保存は未実装ですが、件数の取得は完了しました。"
+        ? historyId
+          ? `履歴に保存しました（ID: ${historyId}）`
+          : historyError
+            ? `履歴保存に失敗しました: ${historyError}`
+            : "履歴保存を試行しました。"
         : "プレビューのみ実行しました。";
 
     debugLogs.push("#workflow: done");
@@ -900,13 +963,15 @@ export async function POST(req: Request) {
       preview,
       note,
       debugLogs,
+      history_id: historyId,
+      history_error: historyError,
     });
-  } catch (e: any) {
+  } catch (e: unknown) {
     console.error("manual run-batch error", e);
     return NextResponse.json(
       {
         ok: false,
-        error: e?.message ? String(e.message) : String(e),
+        error: e instanceof Error ? e.message : String(e),
       },
       { status: 500 }
     );

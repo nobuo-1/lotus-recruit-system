@@ -2,7 +2,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
-import AppHeader from "@/components/AppHeader";
+import { DataTableCard, PageHero, PageMain, StatChip, SurfaceCard } from "@/components/PageChrome";
 
 type Settings = {
   auto_company_list: boolean;
@@ -192,8 +192,6 @@ export default function AutomationPage() {
   useEffect(() => {
     if (!tenantId) return;
 
-    let timer: ReturnType<typeof setInterval> | undefined;
-
     const fetchProgress = async () => {
       try {
         setProgressLoading(true);
@@ -260,10 +258,10 @@ export default function AutomationPage() {
     };
 
     fetchProgress();
-    timer = setInterval(fetchProgress, 10_000); // 10秒ごとに更新
+    const timer = setInterval(fetchProgress, 10_000); // 10秒ごとに更新
 
     return () => {
-      if (timer) clearInterval(timer);
+      clearInterval(timer);
     };
   }, [tenantId]);
 
@@ -404,31 +402,40 @@ export default function AutomationPage() {
   }, [progress]);
 
   return (
-    <>
-      <AppHeader showBack />
-      <main className="mx-auto max-w-6xl p-6">
-        <div className="mb-4">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <h1 className="text-2xl font-semibold text-neutral-900">
-                自動実行設定
-              </h1>
-              <p className="mt-1 text-xs text-neutral-500">
-                最終更新：{formatTsJST(settings.updated_at)}
-              </p>
-            </div>
-            <div className="shrink-0">
-              <button
-                onClick={openModal}
-                className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
-              >
-                設定変更
-              </button>
-            </div>
-          </div>
+    <PageMain className="space-y-6">
+      <PageHero
+        eyebrow="Automation"
+        title="自動実行設定"
+        description="法人リスト作成とメッセージ送信の自動化ルールをまとめて管理します。進捗、承認方法、スケジュール、件数上限まで同じトーンで確認できます。"
+        accent="rose"
+      />
 
-          {/* 現在設定の強調カード */}
-          <div className="mt-3 rounded-2xl border border-neutral-200 bg-neutral-50/60 p-4">
+      <div className="grid gap-3 md:grid-cols-4">
+        <StatChip label="最終更新" value={formatTsJST(settings.updated_at)} />
+        <StatChip label="法人リスト" value={settings.auto_company_list ? "自動化オン" : "停止中"} />
+        <StatChip label="送信" value={settings.auto_send_messages ? "自動化オン" : "停止中"} />
+        <StatChip label="進捗" value={statusLabel.replace("状態: ", "")} />
+      </div>
+
+      <SurfaceCard className="space-y-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-xl font-semibold tracking-tight text-neutral-950">
+              現在の設定
+            </div>
+            <p className="mt-1 text-sm text-neutral-500">
+              最終更新: {formatTsJST(settings.updated_at)}
+            </p>
+          </div>
+          <button
+            onClick={openModal}
+            className="rounded-2xl border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
+          >
+            設定変更
+          </button>
+        </div>
+
+        <div className="rounded-[24px] border border-neutral-200 bg-neutral-50/60 p-4">
             <div className="mb-2 text-sm font-medium text-neutral-800">
               現在の設定
             </div>
@@ -451,11 +458,10 @@ export default function AutomationPage() {
               <BlockB settings={settings} />
             </div>
           </div>
-        </div>
+      </SurfaceCard>
 
-        {/* 自動実行の進捗カード */}
-        {tenantId && (
-          <section className="mb-4 rounded-2xl border border-neutral-200 bg-white p-4">
+      {tenantId && (
+        <SurfaceCard>
             <div className="flex items-center justify-between gap-2">
               <div>
                 <div className="text-sm font-medium text-neutral-800">
@@ -598,11 +604,10 @@ export default function AutomationPage() {
                 のエンドポイントを実装してください。
               </div>
             )}
-          </section>
-        )}
+        </SurfaceCard>
+      )}
 
-        {/* 被り候補 */}
-        <section className="overflow-hidden rounded-2xl border border-neutral-200">
+      <DataTableCard>
           <div className="border-b border-neutral-200 bg-neutral-50 px-4 py-3 text-sm font-medium text-neutral-800">
             クライアントと被っている可能性のある企業
           </div>
@@ -648,14 +653,13 @@ export default function AutomationPage() {
               )}
             </tbody>
           </table>
-        </section>
+      </DataTableCard>
 
-        {msg && (
-          <pre className="mt-3 whitespace-pre-wrap text-xs text-neutral-600">
-            {msg}
-          </pre>
-        )}
-      </main>
+      {msg && (
+        <pre className="mt-3 whitespace-pre-wrap text-xs text-neutral-600">
+          {msg}
+        </pre>
+      )}
 
       {/* ▼ 設定変更モーダル（現設定を引き継いで編集） */}
       {modalOpen && (
@@ -906,7 +910,7 @@ export default function AutomationPage() {
           </div>
         </div>
       )}
-    </>
+    </PageMain>
   );
 }
 

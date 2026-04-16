@@ -1,9 +1,8 @@
 // web/src/app/form-outreach/runs/page.tsx
 import React from "react";
-import AppHeader from "@/components/AppHeader";
-import Link from "next/link";
 import { supabaseServer } from "@/lib/supabaseServer";
 import { formatJpDateTime } from "@/lib/formatDate";
+import { DataTableCard, PageHero, PageMain, StatChip } from "@/components/PageChrome";
 
 export const dynamic = "force-dynamic";
 
@@ -29,27 +28,25 @@ export default async function OutreachRuns() {
   } catch {}
 
   return (
-    <>
-      <AppHeader showBack />
-      <main className="mx-auto max-w-6xl p-6">
-        <div className="mb-6 flex items-end justify-between">
-          <div>
-            <h1 className="text-2xl font-semibold text-neutral-900">
-              フロー詳細
-            </h1>
-            <p className="text-sm text-neutral-500">
-              直近20件を表示。詳細一覧へ移動可。
-            </p>
-          </div>
-          <Link
-            href="/form-outreach/runs/all"
-            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
-          >
-            一覧（ページング）
-          </Link>
-        </div>
+    <PageMain className="space-y-6">
+      <PageHero
+        eyebrow="Run History"
+        title="フロー詳細"
+        description="直近 20 件のフォーム営業実行を見やすくまとめています。より長い履歴は一覧ページに移動して確認できます。"
+        accent="rose"
+        actions={[
+          { href: "/form-outreach/runs/all", label: "一覧（ページング）", variant: "secondary" },
+        ]}
+      />
 
-        <div className="overflow-x-auto rounded-2xl border border-neutral-200">
+      <div className="grid gap-3 md:grid-cols-3">
+        <StatChip label="表示件数" value={rows.length} />
+        <StatChip label="対象" value="直近20件" />
+        <StatChip label="最終行" value={rows[0]?.created_at ? formatJpDateTime(rows[0].created_at) : "-"} />
+      </div>
+
+      <DataTableCard>
+        <div className="overflow-x-auto">
           <table className="min-w-[880px] w-full text-sm">
             <thead className="bg-neutral-50 text-neutral-600">
               <tr>
@@ -85,7 +82,7 @@ export default async function OutreachRuns() {
             </tbody>
           </table>
         </div>
-      </main>
-    </>
+      </DataTableCard>
+    </PageMain>
   );
 }

@@ -45,8 +45,8 @@ export default function LoginClient() {
         return;
       }
 
-      setMsg("OK! ダッシュボードへ移動します。");
-      location.assign("/dashboard");
+      setMsg("OK! メール配信へ移動します。");
+      location.assign("/email");
     } catch (e) {
       const msg =
         e instanceof Error ? e.message : typeof e === "string" ? e : String(e);

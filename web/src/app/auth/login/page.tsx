@@ -34,8 +34,8 @@ export default function Login() {
         return;
       }
 
-      setMsg("OK! ダッシュボードへ移動します。");
-      router.push("/dashboard");
+      setMsg("OK! メール配信へ移動します。");
+      router.push("/email");
     } catch (e) {
       setMsg(`エラー: ${(e as Error).message}`);
       setLoading(false);
@@ -54,7 +54,7 @@ export default function Login() {
     <header className="sticky top-0 z-40 border-b border-neutral-200 bg-white/80 backdrop-blur">
       <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-4">
         <Link
-          href="/"
+          href="/email"
           className="inline-flex items-center gap-2"
           aria-label="トップへ"
         >
@@ -80,7 +80,7 @@ export default function Login() {
             if (typeof window !== "undefined" && window.history.length > 1) {
               window.history.back();
             } else {
-              router.push("/");
+              router.push("/email");
             }
           }}
           className="rounded-lg border border-neutral-200 px-3 py-1.5 text-sm hover:bg-neutral-50"

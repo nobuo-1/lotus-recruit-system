@@ -6,6 +6,14 @@ import Link from "next/link";
 import Toggle from "@/components/Toggle";
 import { PREFECTURES } from "@/constants/prefectures";
 import { JOB_CATEGORIES, JOB_LARGE } from "@/constants/jobCategories";
+import {
+  DataTableCard,
+  PageHero,
+  PageMain,
+  SectionTitle,
+  SurfaceCard,
+  StatChip,
+} from "@/components/PageChrome";
 import { Pencil, Trash2 } from "lucide-react";
 import { JobCategoriesCell } from "@/components/JobCategoriesCell";
 
@@ -19,6 +27,14 @@ type RecipientColumnKey =
   | "email"
   | "region"
   | "phone";
+
+type RecipientSortKey =
+  | "created_desc"
+  | "created_asc"
+  | "name_asc"
+  | "name_desc"
+  | "company_name_asc"
+  | "company_name_desc";
 
 const DEFAULT_VISIBLE: RecipientColumnKey[] = [
   "name",
@@ -65,6 +81,19 @@ type Row = {
 };
 
 const safe = (v: any) => v ?? "";
+const textCollator = new Intl.Collator("ja", {
+  numeric: true,
+  sensitivity: "base",
+});
+
+const SORT_OPTIONS: Array<{ value: RecipientSortKey; label: string }> = [
+  { value: "created_desc", label: "追加順（新しい順）" },
+  { value: "created_asc", label: "追加順（古い順）" },
+  { value: "name_asc", label: "名前（昇順）" },
+  { value: "name_desc", label: "名前（降順）" },
+  { value: "company_name_asc", label: "会社名（昇順）" },
+  { value: "company_name_desc", label: "会社名（降順）" },
+];
 
 // どんな値でも安全に文字列へ（.trim対策）
 const toText = (v: unknown): string => {
@@ -105,6 +134,27 @@ const normalizeJobs = (r: Row): string[] => {
   return L || S ? [L && S ? `${L}（${S}）` : L || S] : [];
 };
 
+const toTimestamp = (v: string | null | undefined): number => {
+  if (!v) return 0;
+  const t = Date.parse(v);
+  return Number.isFinite(t) ? t : 0;
+};
+
+const compareNullableText = (
+  a: unknown,
+  b: unknown,
+  dir: "asc" | "desc" = "asc"
+) => {
+  const aa = toText(a).trim();
+  const bb = toText(b).trim();
+  if (!aa && !bb) return 0;
+  if (!aa) return 1;
+  if (!bb) return -1;
+  return dir === "asc"
+    ? textCollator.compare(aa, bb)
+    : textCollator.compare(bb, aa);
+};
+
 export default function RecipientsPage() {
   const [rows, setRows] = useState<Row[]>([]);
   const [msg, setMsg] = useState("");
@@ -138,6 +188,7 @@ export default function RecipientsPage() {
   const [pref, setPref] = useState<string>("");
   const [large, setLarge] = useState<string>("");
   const [small, setSmall] = useState<string>("");
+  const [sortKey, setSortKey] = useState<RecipientSortKey>("created_desc");
 
   const smallOptions = useMemo(
     () => (large ? JOB_CATEGORIES[large] ?? [] : []),
@@ -215,6 +266,53 @@ export default function RecipientsPage() {
       return true;
     });
   }, [rows, q, companyQ, gender, pref, large, small, ageMin, ageMax, visible]);
+  const sorted = useMemo(() => {
+    const next = [...filtered];
+    next.sort((a, b) => {
+      switch (sortKey) {
+        case "created_asc": {
+          const diff = toTimestamp(a.created_at) - toTimestamp(b.created_at);
+          if (diff !== 0) return diff;
+          return compareNullableText(a.name, b.name);
+        }
+        case "name_asc": {
+          const diff = compareNullableText(a.name, b.name);
+          if (diff !== 0) return diff;
+          return toTimestamp(b.created_at) - toTimestamp(a.created_at);
+        }
+        case "name_desc": {
+          const diff = compareNullableText(a.name, b.name, "desc");
+          if (diff !== 0) return diff;
+          return toTimestamp(b.created_at) - toTimestamp(a.created_at);
+        }
+        case "company_name_asc": {
+          const diff = compareNullableText(a.company_name, b.company_name);
+          if (diff !== 0) return diff;
+          return compareNullableText(a.name, b.name);
+        }
+        case "company_name_desc": {
+          const diff = compareNullableText(
+            a.company_name,
+            b.company_name,
+            "desc"
+          );
+          if (diff !== 0) return diff;
+          return compareNullableText(a.name, b.name);
+        }
+        case "created_desc":
+        default: {
+          const diff = toTimestamp(b.created_at) - toTimestamp(a.created_at);
+          if (diff !== 0) return diff;
+          return compareNullableText(a.name, b.name);
+        }
+      }
+    });
+    return next;
+  }, [filtered, sortKey]);
+  const activeCount = useMemo(
+    () => filtered.filter((row) => !!row.is_active).length,
+    [filtered]
+  );
 
   const toggleActive = async (id: string, next: boolean) => {
     const res = await fetch("/api/recipients/toggle", {
@@ -352,39 +450,44 @@ export default function RecipientsPage() {
   };
 
   return (
-    <main className="mx-auto max-w-7xl p-6">
-      <div className="mb-4 flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold text-neutral-900">
-            受信者リスト
-          </h1>
-          <p className="text-sm text-neutral-500">登録・編集・配信対象の管理</p>
+    <PageMain className="space-y-6">
+      <PageHero
+        eyebrow="Recipients"
+        title="配信対象のリストを整理しやすい受信者管理画面"
+        description="フィルタと一覧を同じ画面内でまとめ、インポート・個別追加・編集の導線を整理しました。運用人数やアクティブ数も先に見える構成です。"
+        accent="blue"
+        actions={[
+          {
+            href: "/recipients/upload",
+            label: "リストをインポート",
+            variant: "primary",
+          },
+          { href: "/recipients/new", label: "受信者を追加", variant: "secondary" },
+        ]}
+      />
+
+      <SurfaceCard>
+        <SectionTitle
+          title="一覧サマリー"
+          description="現在の絞り込み結果とアクティブ状況を確認できます。"
+        />
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+          <StatChip label="総件数" value={rows.length} />
+          <StatChip label="絞り込み件数" value={filtered.length} />
+          <StatChip label="アクティブ" value={activeCount} />
+          <StatChip label="表示列数" value={orderedVisible.length} />
         </div>
-        <div className="flex items-center gap-2">
-          <Link
-            href="/email"
-            className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
-          >
-            メール配信トップ
-          </Link>
-          <Link
-            href="/recipients/new"
-            className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
-          >
-            受信者リスト新規追加
-          </Link>
-        </div>
-      </div>
+      </SurfaceCard>
 
       {/* フィルタ（選択された項目のみ表示） */}
-      <div className="mb-3 rounded-2xl border border-neutral-200">
+      <SurfaceCard className="p-0">
         <button
           type="button"
           aria-expanded={openFilter}
           onClick={() => setOpenFilter((v) => !v)}
-          className="flex w-full items-center justify-between px-4 py-3 text-left"
+          className="flex w-full items-center justify-between px-5 py-4 text-left"
         >
-          <span className="text-sm text-neutral-700">フィルター</span>
+          <span className="text-sm font-medium text-neutral-700">フィルター</span>
           <span
             className={`inline-block text-neutral-500 transition-transform ${
               openFilter ? "rotate-180" : ""
@@ -395,7 +498,7 @@ export default function RecipientsPage() {
           </span>
         </button>
         {openFilter && (
-          <div className="border-t border-neutral-200 px-4 py-4">
+          <div className="border-t border-neutral-200 px-5 py-5">
             <div className="mb-3 grid grid-cols-1 gap-3 md:grid-cols-3">
               {(visible.includes("name") || visible.includes("email")) && (
                 <input
@@ -511,37 +614,37 @@ export default function RecipientsPage() {
             </div>
           </div>
         )}
-      </div>
+      </SurfaceCard>
 
-      <div className="overflow-x-auto rounded-2xl border border-neutral-200">
-        <table className="min-w-[1080px] w-full text-sm">
-          <thead className="bg-neutral-50 text-neutral-600">
-            <tr>
-              {orderedVisible.map((c) => (
-                <th
-                  key={c}
-                  className={`px-3 py-3 ${
-                    c === "gender" ||
-                    c === "age" ||
-                    c === "region" ||
-                    c === "job_categories" ||
-                    c === "created_at"
-                      ? "text-center"
-                      : "text-left"
-                  }`}
-                >
-                  {HEADERS[c]}
-                </th>
+      <DataTableCard className="overflow-hidden">
+        <div className="flex flex-col gap-3 border-b border-neutral-200 px-5 py-4 md:flex-row md:items-center md:justify-between">
+          <div>
+            <p className="text-sm font-medium text-neutral-700">一覧</p>
+            <p className="text-xs text-neutral-500">
+              名前・会社名・追加順で表示順を切り替えられます。
+            </p>
+          </div>
+          <label className="flex items-center gap-2 text-sm text-neutral-600">
+            <span>並び替え</span>
+            <select
+              value={sortKey}
+              onChange={(e) => setSortKey(e.target.value as RecipientSortKey)}
+              className="rounded-lg border border-neutral-300 px-3 py-2 text-sm"
+            >
+              {SORT_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
               ))}
-              <th className="px-3 py-3 text-center">アクティブ</th>
-              <th className="px-3 py-3 text-center">操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map((r) => (
-              <tr key={r.id} className="border-t border-neutral-200">
+            </select>
+          </label>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="min-w-[1080px] w-full text-sm">
+            <thead className="bg-[linear-gradient(180deg,#fbfbfc_0%,#f3f5f8_100%)] text-neutral-600">
+              <tr>
                 {orderedVisible.map((c) => (
-                  <td
+                  <th
                     key={c}
                     className={`px-3 py-3 ${
                       c === "gender" ||
@@ -551,56 +654,80 @@ export default function RecipientsPage() {
                       c === "created_at"
                         ? "text-center"
                         : "text-left"
-                    } align-top`}
+                    }`}
                   >
-                    {renderCell(c, r)}
-                  </td>
+                    {HEADERS[c]}
+                  </th>
                 ))}
-
-                <td className="px-2.5 py-2.5 text-center whitespace-nowrap">
-                  <Toggle
-                    checked={!!r.is_active}
-                    onChange={(n) => toggleActive(r.id, n)}
-                    label="active"
-                  />
-                </td>
-                <td className="px-3 py-2 text-center">
-                  <div className="flex items-center justify-center gap-2">
-                    <Link
-                      href={`/recipients/${r.id}/edit`}
-                      className="inline-flex h-6 w-6 items-center justify-center rounded-lg border border-neutral-200 hover:bg-neutral-50"
-                      title="編集"
-                    >
-                      <Pencil className="h-3 w-3" />
-                    </Link>
-                    <button
-                      onClick={() => onDelete(r.id)}
-                      className="inline-flex h-6 w-6 items-center justify-center rounded-lg border border-neutral-200 text-red-600 hover:bg-red-50"
-                      title="削除"
-                      type="button"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                </td>
+                <th className="px-3 py-3 text-center">アクティブ</th>
+                <th className="px-3 py-3 text-center">操作</th>
               </tr>
-            ))}
+            </thead>
+            <tbody>
+              {sorted.map((r) => (
+                <tr key={r.id} className="border-t border-neutral-200">
+                  {orderedVisible.map((c) => (
+                    <td
+                      key={c}
+                      className={`px-3 py-3 ${
+                        c === "gender" ||
+                        c === "age" ||
+                        c === "region" ||
+                        c === "job_categories" ||
+                        c === "created_at"
+                          ? "text-center"
+                          : "text-left"
+                      } align-top`}
+                    >
+                      {renderCell(c, r)}
+                    </td>
+                  ))}
 
-            {filtered.length === 0 && (
-              <tr>
-                <td
-                  colSpan={orderedVisible.length + 2}
-                  className="px-4 py-8 text-center text-neutral-400"
-                >
-                  データがありません
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+                  <td className="px-2.5 py-2.5 text-center whitespace-nowrap">
+                    <Toggle
+                      checked={!!r.is_active}
+                      onChange={(n) => toggleActive(r.id, n)}
+                      label="active"
+                    />
+                  </td>
+                  <td className="px-3 py-2 text-center">
+                    <div className="flex items-center justify-center gap-2">
+                      <Link
+                        href={`/recipients/${r.id}/edit`}
+                        className="inline-flex h-7 w-7 items-center justify-center rounded-xl border border-neutral-200 hover:bg-neutral-50"
+                        title="編集"
+                      >
+                        <Pencil className="h-3 w-3" />
+                      </Link>
+                      <button
+                        onClick={() => onDelete(r.id)}
+                        className="inline-flex h-7 w-7 items-center justify-center rounded-xl border border-neutral-200 text-red-600 hover:bg-red-50"
+                        title="削除"
+                        type="button"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+
+              {sorted.length === 0 && (
+                <tr>
+                  <td
+                    colSpan={orderedVisible.length + 2}
+                    className="px-4 py-8 text-center text-neutral-400"
+                  >
+                    データがありません
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </DataTableCard>
 
       <pre className="mt-3 text-xs text-neutral-500">{msg}</pre>
-    </main>
+    </PageMain>
   );
 }

@@ -1,11 +1,12 @@
 // web/src/app/recipients/new/page.tsx
 "use client";
-import React, { useMemo, useRef, useState } from "react";
+import React, { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { PREFECTURES } from "@/constants/prefectures";
 import { JOB_CATEGORIES, JOB_LARGE } from "@/constants/jobCategories";
 import WheelDatePicker from "@/components/WheelDatePicker";
 import { toastSuccess, toastError } from "@/components/AppToast";
+import { PageHero, PageMain, SurfaceCard } from "@/components/PageChrome";
 
 type JobPair = { large: string; small: string };
 
@@ -79,15 +80,27 @@ export default function NewRecipientPage() {
   };
 
   return (
-    <main className="mx-auto max-w-3xl p-6">
-      <div className="mb-4">
-        <h1 className="text-2xl font-semibold text-neutral-900">
-          求職者の新規追加
-        </h1>
-      </div>
+    <PageMain className="max-w-5xl space-y-6">
+      <PageHero
+        eyebrow="Recipients"
+        title="受信者を新規追加"
+        description="基本情報と職種情報を分けて入力できる、メール配信画面と同じトーンのフォームです。"
+        accent="blue"
+        actions={[
+          { href: "/recipients", label: "受信者一覧", variant: "secondary" },
+        ]}
+      />
 
       <form ref={formRef} onSubmit={onSubmit} className="space-y-6">
-        {/* 基本情報 */}
+        <SurfaceCard>
+          <div className="mb-4">
+            <h2 className="text-xl font-semibold tracking-tight text-neutral-950">
+              基本情報
+            </h2>
+            <p className="mt-1 text-sm text-neutral-500">
+              連絡先とプロフィールの基本項目です。
+            </p>
+          </div>
         <section className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <div>
             <label className="block text-xs text-neutral-500">名前</label>
@@ -153,8 +166,17 @@ export default function NewRecipientPage() {
             </div>
           </div>
         </section>
+        </SurfaceCard>
 
-        {/* 複数職種 */}
+        <SurfaceCard>
+          <div className="mb-4">
+            <h2 className="text-xl font-semibold tracking-tight text-neutral-950">
+              職種
+            </h2>
+            <p className="mt-1 text-sm text-neutral-500">
+              複数の職種を追加できます。
+            </p>
+          </div>
         <section className="space-y-3">
           <div className="text-sm font-medium text-neutral-700">
             職種（複数追加可）
@@ -217,21 +239,22 @@ export default function NewRecipientPage() {
           <button
             type="button"
             onClick={addJob}
-            className="rounded-lg border px-3 py-1.5 text-sm"
+            className="rounded-xl border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
           >
             ＋ 職種を追加
           </button>
         </section>
+        </SurfaceCard>
 
         <button
           disabled={submitting}
-          className="rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 disabled:opacity-50"
+          className="rounded-2xl bg-neutral-950 px-5 py-3 text-sm font-medium text-white hover:bg-neutral-800 disabled:opacity-50"
         >
           {submitting ? "送信中…" : "登録する"}
         </button>
 
         <pre className="mt-3 text-xs text-neutral-500">{msg}</pre>
       </form>
-    </main>
+    </PageMain>
   );
 }

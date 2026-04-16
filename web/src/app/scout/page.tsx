@@ -1,7 +1,20 @@
 import React from "react";
 import AppHeader from "@/components/AppHeader";
-import Link from "next/link";
-import { Bot, Lock, TimerReset, CheckCircle2 } from "lucide-react";
+import {
+  ActionGrid,
+  PageHero,
+  PageMain,
+  SectionTitle,
+  SurfaceCard,
+  StatChip,
+} from "@/components/PageChrome";
+import {
+  Bot,
+  CheckCircle2,
+  Lock,
+  ShieldCheck,
+  TimerReset,
+} from "lucide-react";
 
 const FLOWS = [
   {
@@ -33,7 +46,7 @@ const FLOWS = [
     label: "type",
     summary: "候補者検索 → テンプレート送信を自動化。",
     steps: [
-      "ログイン → ダッシュボード遷移",
+      "ログイン → 作業画面へ遷移",
       "条件読み込み（職種/経験/勤務地）",
       "候補者抽出・除外",
       "メッセージ生成 → 送信",
@@ -64,18 +77,18 @@ function FlowCard({
   steps: string[];
 }) {
   return (
-    <div className="rounded-2xl border border-neutral-200 bg-white p-4 shadow-sm">
+    <div className="rounded-[24px] border border-neutral-200 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(247,249,252,0.94))] p-5 shadow-[0_14px_34px_rgba(15,23,42,0.05)]">
       <div className="flex items-center justify-between gap-2">
-        <div className="text-sm font-semibold text-neutral-900">{label}</div>
-        <span className="rounded-full border border-neutral-200 bg-neutral-50 px-2 py-0.5 text-[10px] text-neutral-600">
+        <div className="text-base font-semibold text-neutral-950">{label}</div>
+        <span className="rounded-full border border-neutral-200 bg-white px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-neutral-500">
           RPA
         </span>
       </div>
-      <p className="mt-1 text-xs text-neutral-500">{summary}</p>
-      <ol className="mt-3 space-y-1 text-xs text-neutral-700">
+      <p className="mt-2 text-sm leading-6 text-neutral-600">{summary}</p>
+      <ol className="mt-4 space-y-2 text-sm text-neutral-700">
         {steps.map((step, idx) => (
           <li key={idx} className="flex items-start gap-2">
-            <span className="mt-[2px] inline-flex h-4 w-4 items-center justify-center rounded-full border border-neutral-200 text-[10px] text-neutral-600">
+            <span className="mt-[2px] inline-flex h-5 w-5 items-center justify-center rounded-full border border-neutral-200 bg-white text-[10px] font-semibold text-neutral-600">
               {idx + 1}
             </span>
             <span>{step}</span>
@@ -89,67 +102,101 @@ function FlowCard({
 export default function ScoutAutoSendPage() {
   return (
     <>
-      <AppHeader showBack />
-      <main className="mx-auto max-w-6xl p-6">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <h1 className="text-2xl font-semibold text-neutral-900">
-              スカウト自動送信
-            </h1>
-            <p className="mt-1 text-xs text-neutral-500">
-              各転職サイトのRPAにより、候補者抽出から送信までを自動化します。
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Link
-              href="/scout/logins"
-              className="rounded-lg border border-neutral-200 px-3 py-2 text-xs hover:bg-neutral-50"
-            >
-              ログイン情報の設定
-            </Link>
-            <span className="rounded-lg border border-neutral-200 px-3 py-2 text-xs text-neutral-400">
-              テンプレート管理（準備中）
-            </span>
-          </div>
-        </div>
+      <AppHeader />
+      <PageMain className="space-y-6">
+        <PageHero
+          eyebrow="Scout Operations"
+          title="スカウト送信の準備と自動化設計を一画面で把握"
+          description="媒体ごとのログインやフロー差分を整理しながら、自動送信の前提条件を明確にします。設定不足の洗い出しがしやすい情報配置に変更しました。"
+          accent="rose"
+          actions={[
+            { href: "/scout/logins", label: "ログイン情報を設定", variant: "primary" },
+          ]}
+        />
 
-        <section className="mt-4 rounded-2xl border border-neutral-200 bg-neutral-50/70 p-4">
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-            <div className="rounded-xl border border-neutral-200 bg-white p-4">
-              <div className="flex items-center gap-2 text-xs font-semibold text-neutral-700">
+        <SurfaceCard>
+          <SectionTitle
+            title="準備状況"
+            description="自動送信フローの着手前に見ておきたい項目です。"
+          />
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+            <StatChip label="対応サイト" value={FLOWS.length} />
+            <StatChip label="ログイン設定" value="必須" />
+            <StatChip label="自動化ステータス" value="設計中" />
+          </div>
+        </SurfaceCard>
+
+        <SurfaceCard>
+          <SectionTitle
+            title="クイック操作"
+            description="スカウト運用の入口をまとめています。"
+          />
+          <ActionGrid
+            columns="two"
+            items={[
+              {
+                href: "/scout/logins",
+                title: "ログイン情報の設定",
+                description: "クライアント単位で媒体ログイン情報を管理します。",
+                icon: ShieldCheck,
+              },
+              {
+                href: "/scout/logins",
+                title: "媒体ごとの接続確認",
+                description: "送信前に認証情報の最新状態を見直します。",
+                icon: Lock,
+              },
+            ]}
+          />
+        </SurfaceCard>
+
+        <SurfaceCard>
+          <SectionTitle
+            title="運用前チェック"
+            description="自動化を安定運用するための前提条件です。"
+          />
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+            <div className="rounded-2xl border border-neutral-200 bg-[linear-gradient(180deg,#ffffff_0%,#f8fafc_100%)] p-4">
+              <div className="flex items-center gap-2 text-sm font-semibold text-neutral-800">
                 <Lock className="h-4 w-4" />
                 ログイン情報
               </div>
-              <p className="mt-1 text-xs text-neutral-500">
-                各サイトのログインID/パスワードを登録してください。
+              <p className="mt-2 text-sm leading-6 text-neutral-600">
+                各サイトのID、パスワード、補足情報を媒体ごとに保持します。
               </p>
             </div>
-            <div className="rounded-xl border border-neutral-200 bg-white p-4">
-              <div className="flex items-center gap-2 text-xs font-semibold text-neutral-700">
+            <div className="rounded-2xl border border-neutral-200 bg-[linear-gradient(180deg,#ffffff_0%,#f8fafc_100%)] p-4">
+              <div className="flex items-center gap-2 text-sm font-semibold text-neutral-800">
                 <Bot className="h-4 w-4" />
                 RPA稼働
               </div>
-              <p className="mt-1 text-xs text-neutral-500">
-                フローごとの稼働状況は順次表示予定です。
+              <p className="mt-2 text-sm leading-6 text-neutral-600">
+                フローごとの状態、失敗点、再試行対象を順次可視化する前提です。
               </p>
             </div>
-            <div className="rounded-xl border border-neutral-200 bg-white p-4">
-              <div className="flex items-center gap-2 text-xs font-semibold text-neutral-700">
+            <div className="rounded-2xl border border-neutral-200 bg-[linear-gradient(180deg,#ffffff_0%,#f8fafc_100%)] p-4">
+              <div className="flex items-center gap-2 text-sm font-semibold text-neutral-800">
                 <TimerReset className="h-4 w-4" />
                 実行スケジュール
               </div>
-              <p className="mt-1 text-xs text-neutral-500">
-                実行頻度と送信上限を設定する予定です。
+              <p className="mt-2 text-sm leading-6 text-neutral-600">
+                実行頻度、送信上限、媒体ごとの制約を後から調整しやすくします。
               </p>
             </div>
           </div>
-        </section>
+        </SurfaceCard>
 
-        <section className="mt-6">
-          <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-neutral-800">
-            <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-            サイト別フロー設計
-          </div>
+        <SurfaceCard>
+          <SectionTitle
+            title="サイト別フロー設計"
+            description="媒体ごとの違いを崩さず、工程を読みやすく整理しました。"
+            action={
+              <div className="inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                設計レビュー向け
+              </div>
+            }
+          />
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             {FLOWS.map((flow) => (
               <FlowCard
@@ -160,8 +207,8 @@ export default function ScoutAutoSendPage() {
               />
             ))}
           </div>
-        </section>
-      </main>
+        </SurfaceCard>
+      </PageMain>
     </>
   );
 }

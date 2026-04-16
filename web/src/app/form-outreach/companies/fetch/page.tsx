@@ -2,9 +2,9 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import AppHeader from "@/components/AppHeader";
 import Link from "next/link";
 import { CheckCircle, XCircle, Loader2, Play } from "lucide-react";
+import { DataTableCard, PageHero, PageMain, StatChip, SurfaceCard } from "@/components/PageChrome";
 
 /** ===== LocalStorage Keys ===== */
 const LS_KEY = "fo_manual_fetch_latest";
@@ -568,17 +568,33 @@ export default function ManualFetch() {
 
   /** ===== Render ===== */
   return (
-    <>
-      <AppHeader showBack />
-      <main className="mx-auto max-w-6xl p-6">
-        {/* Header & Actions */}
-        <div className="mb-4 flex items-start justify-between gap-3">
+    <PageMain className="space-y-6">
+      <PageHero
+        eyebrow="Company Fetch"
+        title="企業リスト手動取得"
+        description="二段フローで候補企業を取得し、保存結果をリアルタイムに確認します。フィルタ条件、進捗、追加結果、不適合理由まで同じデザインで確認できます。"
+        accent="rose"
+        actions={[
+          { href: "/form-outreach/companies", label: "企業一覧へ", variant: "secondary" },
+          { href: "/form-outreach/runs/manual", label: "メッセージ手動送信へ", variant: "secondary" },
+        ]}
+      />
+
+      <div className="grid gap-3 md:grid-cols-4">
+        <StatChip label="今回新規追加" value={rtProspectCount} />
+        <StatChip label="目標件数" value={fetchTotal} />
+        <StatChip label="近似サイト" value={rtSimilarCount} />
+        <StatChip label="状態" value={loading ? "実行中" : "待機中"} />
+      </div>
+
+      <SurfaceCard className="space-y-4">
+        <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <h1 className="text-2xl font-semibold text-neutral-900">
-              企業リスト手動取得
-            </h1>
+            <div className="text-lg font-semibold text-neutral-900">
+              実行コントロール
+            </div>
             <p className="text-sm text-neutral-500">
-              二段フローで保存を逐次反映。アイコンの動きは実処理に同期します。
+              二段フローで保存を逐次反映します。アイコンの動きは実処理に同期します。
             </p>
           </div>
           <div className="shrink-0 whitespace-nowrap flex gap-2">
@@ -615,13 +631,12 @@ export default function ManualFetch() {
           </div>
         </div>
 
-        {/* フィルタ内容（修正1: 20文字で省略） */}
-        <div className="mb-1 text-[12px] text-neutral-500">
+        <div className="text-[12px] text-neutral-500">
           {filterSummary || "フィルタ：指定なし"}
         </div>
+      </SurfaceCard>
 
-        {/* リアルタイムカウンタ */}
-        <section className="mb-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
+      <section className="grid grid-cols-1 gap-3 sm:grid-cols-3">
           <div className="rounded-xl border border-neutral-200 p-4 bg-white">
             <div className="text-xs text-neutral-500">
               今回新規追加（開始後のみカウント）
@@ -655,10 +670,10 @@ export default function ManualFetch() {
               {msg || "待機中"}
             </div>
           </div>
-        </section>
+      </section>
 
-        {/* Phase A */}
-        <section className="rounded-2xl border border-neutral-200 p-4 mb-4">
+      <SurfaceCard>
+        <section className="rounded-2xl border border-neutral-200 p-4">
           <div className="mb-3 flex items-center justify-between">
             <div className="text-sm font-medium text-neutral-800">
               Phase A: NTAクロール → キャッシュ保存
@@ -682,9 +697,10 @@ export default function ManualFetch() {
             ))}
           </div>
         </section>
+      </SurfaceCard>
 
-        {/* Phase B */}
-        <section className="rounded-2xl border border-neutral-200 p-4 mb-4">
+      <SurfaceCard>
+        <section className="rounded-2xl border border-neutral-200 p-4">
           <div className="mb-3 text-sm font-medium text-neutral-800">
             Phase B: HP解決 → 会社概要抽出（AI） → form_prospects保存 +
             不適合保存 → 取得件数到達まで反復
@@ -703,9 +719,9 @@ export default function ManualFetch() {
             })}
           </div>
         </section>
+      </SurfaceCard>
 
-        {/* 今回追加テーブル */}
-        <section className="rounded-2xl border border-neutral-200 overflow-hidden">
+      <DataTableCard>
           <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 bg-neutral-50">
             <div className="text-sm font-medium text-neutral-800">
               今回追加（開始後のみ・新しい順）
@@ -822,10 +838,9 @@ export default function ManualFetch() {
               </tbody>
             </table>
           </div>
-        </section>
+      </DataTableCard>
 
-        {/* 不適合一覧 */}
-        <section className="rounded-2xl border border-neutral-200 overflow-hidden mt-6">
+      <DataTableCard>
           <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200 bg-neutral-50">
             <div className="text-sm font-medium text-neutral-800">
               フィルタ不適合（直近12時間・重複除去済み / 直近取得が上）
@@ -942,8 +957,7 @@ export default function ManualFetch() {
               </tbody>
             </table>
           </div>
-        </section>
-      </main>
+      </DataTableCard>
 
       {countModalOpen && (
         <CountModal
@@ -954,7 +968,7 @@ export default function ManualFetch() {
           }}
         />
       )}
-    </>
+    </PageMain>
   );
 }
 

@@ -5,6 +5,14 @@ export const dynamic = "force-dynamic";
 import Link from "next/link";
 import { supabaseServer } from "@/lib/supabaseServer";
 import { formatJpDateTime } from "@/lib/formatDate";
+import {
+  DataTableCard,
+  PageHero,
+  PageMain,
+  SectionTitle,
+  SurfaceCard,
+  StatChip,
+} from "@/components/PageChrome";
 
 type MailRow = {
   id: string;
@@ -41,6 +49,13 @@ function deriveStatusFromDeliveries(ds: DeliLite[]) {
   if (hasFuture) return "scheduled";
   if (hasQueued || hasSent) return "queued";
   return "draft";
+}
+
+function statusClass(status: string) {
+  if (status === "scheduled") return "bg-amber-50 text-amber-700 border-amber-200";
+  if (status === "scheduled/queued") return "bg-sky-50 text-sky-700 border-sky-200";
+  if (status === "queued") return "bg-emerald-50 text-emerald-700 border-emerald-200";
+  return "bg-neutral-100 text-neutral-700 border-neutral-200";
 }
 
 export default async function MailsPage() {
@@ -117,40 +132,42 @@ export default async function MailsPage() {
   }
 
   return (
-    <main className="mx-auto max-w-6xl p-6">
-      {/* ヘッダー */}
-      <div className="mb-6 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-        <div>
-          <h1 className="whitespace-nowrap text-2xl font-semibold text-neutral-900">
-            メール一覧
-          </h1>
-          <p className="text-sm text-neutral-500">作成したメールの一覧</p>
-        </div>
-        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
-          <Link
-            href="/email"
-            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
-          >
-            メール配信トップ
-          </Link>
-          <Link
-            href="/mails/schedules"
-            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
-          >
-            メール予約リスト
-          </Link>
-          <Link
-            href="/mails/new"
-            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
-          >
-            メール新規作成
-          </Link>
-        </div>
-      </div>
+    <PageMain className="space-y-6">
+      <PageHero
+        eyebrow="Mail List"
+        title="作成済みメールを一覧で管理"
+        description="下書き、予約、送信待ちをまとめて見渡せる一覧です。個別の詳細や送信導線へ直接移動できます。"
+        accent="blue"
+        actions={[
+          { href: "/mails/new", label: "新規メール", variant: "primary" },
+          { href: "/mails/schedules", label: "予約一覧", variant: "secondary" },
+        ]}
+      />
 
-      <div className="overflow-x-auto rounded-2xl border border-neutral-200">
+      <SurfaceCard>
+        <SectionTitle
+          title="一覧サマリー"
+          description="運用量と現在の作業対象を把握しやすくしました。"
+        />
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          <StatChip label="登録メール数" value={rows.length} />
+          <StatChip
+            label="予約あり"
+            value={rows.filter((r) => deriveStatusFromDeliveries(byMail.get(r.id) ?? []) === "scheduled").length}
+          />
+          <StatChip
+            label="送信待ち/処理中"
+            value={rows.filter((r) => {
+              const status = deriveStatusFromDeliveries(byMail.get(r.id) ?? []);
+              return status === "queued" || status === "scheduled/queued";
+            }).length}
+          />
+        </div>
+      </SurfaceCard>
+
+      <DataTableCard className="overflow-x-auto">
         <table className="min-w-[1180px] w-full text-sm">
-          <thead className="bg-neutral-50 text-neutral-600">
+          <thead className="bg-[linear-gradient(180deg,#fbfbfc_0%,#f3f5f8_100%)] text-neutral-600">
             <tr>
               <th className="px-3 py-3 text-left">メール名</th>
               <th className="px-3 py-3 text-left">件名</th>
@@ -165,11 +182,15 @@ export default async function MailsPage() {
               const status = deriveStatusFromDeliveries(d);
               return (
                 <tr key={r.id} className="border-t border-neutral-200">
-                  <td className="px-3 py-3">{r.name ?? ""}</td>
+                  <td className="px-3 py-3 font-medium text-neutral-950">{r.name ?? ""}</td>
                   <td className="px-3 py-3 text-neutral-600">
                     {r.subject ?? ""}
                   </td>
-                  <td className="px-3 py-3">{status}</td>
+                  <td className="px-3 py-3">
+                    <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${statusClass(status)}`}>
+                      {status}
+                    </span>
+                  </td>
                   <td className="px-3 py-3">
                     {formatJpDateTime(r.created_at)}
                   </td>
@@ -178,7 +199,7 @@ export default async function MailsPage() {
                       <Link
                         href={`/mails/${r.id}`}
                         className="rounded-xl border border-neutral-200 px-3 py-1 hover:bg-neutral-50 whitespace-nowrap"
-                      >
+                  >
                         詳細
                       </Link>
                       <Link
@@ -204,7 +225,7 @@ export default async function MailsPage() {
             )}
           </tbody>
         </table>
-      </div>
-    </main>
+      </DataTableCard>
+    </PageMain>
   );
 }

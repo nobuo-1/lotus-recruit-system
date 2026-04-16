@@ -4,9 +4,23 @@
 import React, { useEffect, useMemo, useState } from "react";
 import AppHeader from "@/components/AppHeader";
 import KpiCard from "@/components/KpiCard";
-import Link from "next/link";
 import dynamic from "next/dynamic";
 import { JOB_LARGE } from "@/constants/jobCategories";
+import {
+  ActionGrid,
+  PageHero,
+  PageMain,
+  SectionTitle,
+  SurfaceCard,
+} from "@/components/PageChrome";
+import {
+  ChartSpline,
+  FileClock,
+  FileCog,
+  MapPinned,
+  PlayCircle,
+  ShieldCheck,
+} from "lucide-react";
 
 // Recharts（SSR回避）
 const ResponsiveContainer = dynamic(
@@ -470,114 +484,68 @@ export default function JobBoardsPage() {
 
   return (
     <>
-      <AppHeader showBack />
-      <main className="mx-auto max-w-6xl p-6">
-        {/* タイトル */}
-        <div className="mb-4">
-          <h1 className="text-[26px] md:text-[24px] font-extrabold tracking-tight text-indigo-900">
-            転職サイトリサーチ
-          </h1>
-          <p className="mt-1 text-sm text-neutral-500">
-            サイト別の求人数／求職者数のトレンド（週次・月次）
-          </p>
-        </div>
+      <AppHeader />
+      <PageMain className="space-y-6">
+        <PageHero
+          eyebrow="Research Dashboard"
+          title="媒体横断のトレンド把握と実行導線を統合"
+          description="手動実行、履歴確認、通知設定、送信先管理を同じ導線で扱えるように再構成しました。フィルタとグラフを並べて、探索から共有までを止めずに進められます。"
+          accent="gold"
+          actions={[
+            { href: "/job-boards/manual", label: "手動実行", variant: "primary" },
+            { href: "/job-boards/runs", label: "実行状況", variant: "secondary" },
+          ]}
+        />
 
-        {/* 機能メニュー */}
-        <header className="mb-3">
-          <h2 className="text-2xl md:text-[24px] font-semibold text-neutral-900">
-            機能メニュー
-          </h2>
-        </header>
-
-        <div className="mb-6 rounded-2xl border border-neutral-200 p-5">
-          <div className="grid grid-cols-1 gap-7 md:grid-cols-3">
-            {/* 実行 */}
-            <section>
-              <h3 className="mb-2 text-lg font-semibold tracking-tight text-neutral-900 sm:text-xl">
-                実行
-              </h3>
-              <ul className="mt-1.5 space-y-1.5">
-                <li>
-                  <Link
-                    href="/job-boards/manual"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    転職サイト 手動実行
-                  </Link>
-                </li>
-                <li>
-                  <Link
-                    href="/job-boards/runs"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    実行状況
-                  </Link>
-                </li>
-              </ul>
-            </section>
-
-            {/* リスト */}
-            <section>
-              <h3 className="mb-2 text-lg font-semibold tracking-tight text-neutral-900 sm:text-xl">
-                リスト
-              </h3>
-              <ul className="mt-1.5 space-y-1.5">
-                <li>
-                  <Link
-                    href="/job-boards/manual/history"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    手動実行履歴
-                  </Link>
-                </li>
-                <li>
-                  <Link
-                    href="/job-boards/mappings"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    職種マッピング管理
-                  </Link>
-                </li>
-                <li>
-                  <Link
-                    href="/job-boards/destinations"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    送り先一覧
-                  </Link>
-                </li>
-              </ul>
-            </section>
-
-            {/* 設定 */}
-            <section>
-              <h3 className="mb-2 text-lg font-semibold tracking-tight text-neutral-900 sm:text-xl">
-                設定
-              </h3>
-              <ul className="mt-1.5 space-y-1.5">
-                <li>
-                  <Link
-                    href="/job-boards/settings"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    通知設定
-                  </Link>
-                </li>
-                <li>
-                  <Link
-                    href="/job-boards/logins"
-                    className="text-base text-neutral-800 underline-offset-2 hover:underline"
-                  >
-                    ログイン情報の登録
-                  </Link>
-                </li>
-              </ul>
-            </section>
-          </div>
-        </div>
+        <SurfaceCard>
+          <SectionTitle
+            title="主要な機能"
+            description="よく使う画面を用途別にまとめています。"
+          />
+          <ActionGrid
+            items={[
+              {
+                href: "/job-boards/manual",
+                title: "手動実行",
+                description: "対象媒体と条件を指定して、その場で探索を走らせます。",
+                icon: PlayCircle,
+              },
+              {
+                href: "/job-boards/runs",
+                title: "実行状況",
+                description: "集計ジョブの進行や結果を確認します。",
+                icon: ChartSpline,
+              },
+              {
+                href: "/job-boards/manual/history",
+                title: "手動実行履歴",
+                description: "過去の実行と結果ログを見返します。",
+                icon: FileClock,
+              },
+              {
+                href: "/job-boards/mappings",
+                title: "職種マッピング管理",
+                description: "媒体ごとの差分を吸収するマッピングを管理します。",
+                icon: MapPinned,
+              },
+              {
+                href: "/job-boards/settings",
+                title: "通知設定",
+                description: "共有・通知の条件や送り先を調整します。",
+                icon: FileCog,
+              },
+              {
+                href: "/job-boards/logins",
+                title: "ログイン情報",
+                description: "媒体ごとの認証情報を保守します。",
+                icon: ShieldCheck,
+              },
+            ]}
+          />
+        </SurfaceCard>
 
         {/* ====== KPI＋折れ線グラフ ====== */}
-        <section className="rounded-2xl border border-neutral-200 p-4">
+        <section className="rounded-[28px] border border-white/80 bg-white/92 p-5 shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
           {/* KPI */}
           <div className="grid grid-cols-2 gap-4 md:grid-cols-5 mb-3">
             <KpiCard
@@ -753,7 +721,7 @@ export default function JobBoardsPage() {
         </section>
 
         {/* ====== サイト別合計（表） ====== */}
-        <section className="mt-6 rounded-2xl border border-neutral-200 p-4">
+        <section className="mt-6 rounded-[28px] border border-white/80 bg-white/92 p-5 shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
           {/* 表用 KPI */}
           <div className="grid grid-cols-2 gap-4 md:grid-cols-5 mb-3">
             <KpiCard
@@ -1004,7 +972,7 @@ export default function JobBoardsPage() {
             }}
           />
         )}
-      </main>
+      </PageMain>
     </>
   );
 }

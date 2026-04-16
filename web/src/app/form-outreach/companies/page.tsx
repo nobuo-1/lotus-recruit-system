@@ -2,7 +2,13 @@
 "use client";
 import React, { useEffect, useMemo, useState } from "react";
 import AppHeader from "@/components/AppHeader";
-import Link from "next/link";
+import {
+  DataTableCard,
+  PageHero,
+  PageMain,
+  SurfaceCard,
+  StatChip,
+} from "@/components/PageChrome";
 import {
   ChevronLeft,
   ChevronRight,
@@ -279,7 +285,6 @@ export default function CompaniesPage() {
     setSortKey("created_at");
     setSortDir("desc");
     setPage(1);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dataset, colList]);
 
   useEffect(() => {
@@ -344,9 +349,6 @@ export default function CompaniesPage() {
     setPage(1);
     load();
   };
-
-  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-
   const headers: ColumnDef[] = useMemo(
     () => colList.filter((c: ColumnDef) => visibleCols[c.key] || c.required),
     [colList, visibleCols]
@@ -487,51 +489,54 @@ export default function CompaniesPage() {
   return (
     <>
       <AppHeader showBack />
-      <main className="mx-auto max-w-7xl p-6">
-        {/* ヘッダ */}
-        <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <h1 className="text-2xl font-semibold text-neutral-900">
-              企業一覧
-            </h1>
-            <p className="text-sm text-neutral-500">
-              3テーブル切替 / フィルタ / 並び替え / 10件ごとのページネーション /
-              カラム表示切替（社名は必須）
-            </p>
-            <p className="text-xs text-neutral-500 mt-1">
-              テナント: <span className="font-mono">{tenantId ?? "-"}</span>
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <Link
-              href="/form-outreach/companies/fetch"
-              className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
-              title="手動で企業リストを取得"
-            >
-              企業リスト手動取得
-            </Link>
-          </div>
-        </div>
+      <PageMain className="space-y-6">
+        <PageHero
+          eyebrow="Company Lists"
+          title="企業一覧を同じデザイン言語で管理"
+          description="正規企業、不備企業、近似サイトの3系統を切り替えながら、フィルタ、表示列、ページネーションを一つの流れで扱えます。"
+          accent="green"
+          actions={[
+            { href: "/form-outreach/companies/fetch", label: "企業リスト手動取得", variant: "primary" },
+          ]}
+        />
 
-        {/* タブ */}
-        <div className="mb-3 inline-flex rounded-lg border border-neutral-200 overflow-hidden">
+        <SurfaceCard>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+            <StatChip label="テナント" value={tenantId ?? "-"} />
+            <StatChip label="表示タブ" value={tabLabel(dataset)} />
+            <StatChip label="表示件数" value={rows.length} />
+            <StatChip label="総件数" value={total} />
+          </div>
+        </SurfaceCard>
+
+        <SurfaceCard className="p-3">
+          <div className="inline-flex rounded-2xl border border-neutral-200 overflow-hidden bg-white">
           {(["prospects", "rejected", "similar"] as Dataset[]).map((t) => (
             <button
               key={t}
               onClick={() => setDataset(t)}
-              className={`px-3 py-2 text-sm border-r border-neutral-200 last:border-r-0 ${
+              className={`px-4 py-2.5 text-sm border-r border-neutral-200 last:border-r-0 transition ${
                 dataset === t
-                  ? "bg-neutral-100 font-medium"
-                  : "bg-white hover:bg-neutral-50"
+                  ? "bg-neutral-950 font-medium text-white"
+                  : "bg-white hover:bg-neutral-50 text-neutral-700"
               }`}
             >
               {tabLabel(t)}
             </button>
           ))}
-        </div>
+          </div>
+        </SurfaceCard>
 
         {/* フィルタ */}
-        <section className="rounded-2xl border border-neutral-200 p-4 mb-4 bg-white">
+        <SurfaceCard className="space-y-4">
+          <div>
+            <h2 className="text-xl font-semibold tracking-tight text-neutral-950">
+              フィルタ
+            </h2>
+            <p className="mt-1 text-sm text-neutral-500">
+              データセットごとに条件を切り替えながら対象を絞り込みます。
+            </p>
+          </div>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
             <div>
               <label className="block text-xs text-neutral-500 mb-1">
@@ -662,14 +667,14 @@ export default function CompaniesPage() {
                 load();
               }}
               className="rounded-lg border border-neutral-300 px-3 py-2 text-sm hover:bg-neutral-50"
-            >
-              リセット
-            </button>
-          </div>
-        </section>
+              >
+                リセット
+              </button>
+            </div>
+        </SurfaceCard>
 
         {/* カラム表示切替 */}
-        <section className="rounded-2xl border border-neutral-200 p-4 mb-4 bg-white">
+        <SurfaceCard>
           <div className="text-sm font-medium mb-2">表示カラム</div>
           <div className="flex flex-wrap gap-3">
             {colList.map((c: ColumnDef) => {
@@ -698,14 +703,14 @@ export default function CompaniesPage() {
               );
             })}
           </div>
-        </section>
+        </SurfaceCard>
 
         {/* テーブル */}
-        <section className="rounded-2xl border border-neutral-200 overflow-hidden bg-white">
+        <DataTableCard>
           <div className="overflow-x-auto">
             <table className="min-w-[1100px] w-full text-sm">
               {/* ヘッダ色はテンプレートページと同じに統一 */}
-              <thead className="bg-neutral-50 text-neutral-600">
+              <thead className="bg-[linear-gradient(180deg,#fbfbfc_0%,#f3f5f8_100%)] text-neutral-600">
                 <tr>
                   {headers.map((h: ColumnDef) => (
                     <th
@@ -754,13 +759,13 @@ export default function CompaniesPage() {
                       対象がありません
                     </td>
                   </tr>
-                )}
-              </tbody>
-            </table>
+              )}
+            </tbody>
+          </table>
           </div>
 
           {/* ページネーション */}
-          <div className="flex items-center justify-between px-4 py-3 border-t border-neutral-200">
+          <div className="flex items-center justify-between px-4 py-3 border-t border-neutral-200 bg-[linear-gradient(180deg,#ffffff_0%,#fafbfc_100%)]">
             <div className="text-xs text-neutral-500">
               全 {total} 件 / {page} /{" "}
               {Math.max(1, Math.ceil(total / PAGE_SIZE))} ページ（{PAGE_SIZE}
@@ -791,14 +796,14 @@ export default function CompaniesPage() {
               </button>
             </div>
           </div>
-        </section>
+        </DataTableCard>
 
         {msg && (
           <pre className="mt-3 whitespace-pre-wrap text-xs text-red-600">
             {msg}
           </pre>
         )}
-      </main>
+      </PageMain>
     </>
   );
 }

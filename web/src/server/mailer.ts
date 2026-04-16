@@ -1,4 +1,5 @@
 // web/src/server/mailer.ts
+import "@/lib/loadEnv";
 import nodemailer from "nodemailer";
 import type SMTPTransport from "nodemailer/lib/smtp-transport";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
@@ -27,9 +28,15 @@ const requireTLS =
   (process.env.SMTP_REQUIRE_TLS ?? "true").toLowerCase() !== "false";
 
 const fallbackCompany = process.env.COMPANY_NAME ?? "Lotus Recruit System";
-const fallbackAddress = process.env.COMPANY_ADDRESS ?? "";
 const fallbackSupport =
   process.env.SUPPORT_EMAIL ?? "no.no.mu.mu11223@gmail.com";
+
+type SkippedSendResult = {
+  messageId: string;
+  accepted: string[];
+  rejected: string[];
+  response: string;
+};
 
 export type SendArgs = {
   to: string;
@@ -102,7 +109,7 @@ export async function sendMail(args: SendArgs) {
           accepted: [],
           rejected: [],
           response: "SKIPPED_MAIL_CANCELLED",
-        } as any;
+        } satisfies SkippedSendResult;
       }
     } else if (args.deliveryId) {
       const { data } = await admin
@@ -116,7 +123,7 @@ export async function sendMail(args: SendArgs) {
           accepted: [],
           rejected: [],
           response: "SKIPPED_CAMPAIGN_CANCELLED",
-        } as any;
+        } satisfies SkippedSendResult;
       }
     }
   } catch {
@@ -124,7 +131,6 @@ export async function sendMail(args: SendArgs) {
   }
 
   const company = args.brandCompany || fallbackCompany;
-  const address = args.brandAddress || fallbackAddress;
   const support = args.brandSupport || fallbackSupport;
 
   const fromHeader = { name: company, address: defaultFrom };

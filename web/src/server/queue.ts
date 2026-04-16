@@ -1,4 +1,5 @@
 // web/src/server/queue.ts
+import "@/lib/loadEnv";
 import { Queue } from "bullmq";
 import IORedis from "ioredis";
 

@@ -2,9 +2,8 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import AppHeader from "@/components/AppHeader";
-import Link from "next/link";
 import { ChevronLeft, ChevronRight } from "lucide-react";
+import { DataTableCard, PageHero, PageMain, StatChip, SurfaceCard } from "@/components/PageChrome";
 
 type WaitRow = {
   id: string;
@@ -103,7 +102,8 @@ export default function WaitlistPage() {
   const toggleOne = (id: string) => {
     setSelected((prev) => {
       const n = new Set(prev);
-      n.has(id) ? n.delete(id) : n.add(id);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
       return n;
     });
   };
@@ -155,52 +155,48 @@ export default function WaitlistPage() {
   };
 
   return (
-    <>
-      <AppHeader showBack />
-      <main className="mx-auto max-w-7xl p-6">
-        <div className="mb-4 flex items-end justify-between">
-          <div>
-            <h1 className="text-2xl font-semibold text-neutral-900">
-              待機リスト
-            </h1>
-            <p className="text-sm text-neutral-500">
-              フォーム送信待ち・reCAPTCHA検知・エラー再試行待ちなどを表示します。
-            </p>
-            <p className="text-xs text-neutral-500 mt-1">
-              テナント: <span className="font-mono">{tenantId ?? "-"}</span>
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <Link
-              href="/form-outreach/runs/manual"
-              className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
-            >
-              手動送信へ戻る
-            </Link>
-            <button
-              onClick={retrySelected}
-              disabled={selected.size === 0}
-              className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50 disabled:opacity-50"
-            >
-              選択を再試行
-            </button>
-            <button
-              onClick={deleteSelected}
-              disabled={selected.size === 0}
-              className="rounded-lg border border-red-200 text-red-700 px-3 py-2 text-sm hover:bg-red-50 disabled:opacity-50"
-            >
-              選択を削除
-            </button>
-            <button
-              onClick={() => load()}
-              className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
-            >
-              更新
-            </button>
-          </div>
-        </div>
+    <PageMain className="space-y-6">
+      <PageHero
+        eyebrow="Waitlist"
+        title="待機リスト"
+        description="フォーム送信待ち、reCAPTCHA 検知、再試行待ちのデータをまとめています。再試行や削除をこの一覧から直接行えます。"
+        accent="rose"
+        actions={[
+          { href: "/form-outreach/runs/manual", label: "手動送信へ戻る", variant: "secondary" },
+        ]}
+      />
 
-        <section className="rounded-2xl border border-neutral-200 overflow-hidden bg-white">
+      <div className="grid gap-3 md:grid-cols-4">
+        <StatChip label="総件数" value={total} />
+        <StatChip label="選択件数" value={selected.size} />
+        <StatChip label="表示ページ" value={`${page} / ${totalPages}`} />
+        <StatChip label="テナント" value={tenantId ?? "-"} />
+      </div>
+
+      <SurfaceCard className="flex flex-wrap items-center gap-2">
+        <button
+          onClick={retrySelected}
+          disabled={selected.size === 0}
+          className="rounded-2xl border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50 disabled:opacity-50"
+        >
+          選択を再試行
+        </button>
+        <button
+          onClick={deleteSelected}
+          disabled={selected.size === 0}
+          className="rounded-2xl border border-red-200 px-3 py-2 text-sm text-red-700 hover:bg-red-50 disabled:opacity-50"
+        >
+          選択を削除
+        </button>
+        <button
+          onClick={() => load()}
+          className="rounded-2xl border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
+        >
+          更新
+        </button>
+      </SurfaceCard>
+
+      <DataTableCard>
           <div className="overflow-x-auto">
             <table className="min-w-[1100px] w-full text-sm">
               <thead className="bg-neutral-50 text-neutral-600">
@@ -319,14 +315,13 @@ export default function WaitlistPage() {
               </button>
             </div>
           </div>
-        </section>
+      </DataTableCard>
 
-        {msg && (
-          <pre className="mt-3 whitespace-pre-wrap text-xs text-red-600">
-            {msg}
-          </pre>
-        )}
-      </main>
-    </>
+      {msg && (
+        <SurfaceCard>
+          <pre className="whitespace-pre-wrap text-xs text-red-600">{msg}</pre>
+        </SurfaceCard>
+      )}
+    </PageMain>
   );
 }

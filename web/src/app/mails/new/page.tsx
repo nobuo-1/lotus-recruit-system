@@ -1,8 +1,8 @@
 // web/src/app/mails/new/page.tsx
 "use client";
 import React, { useEffect, useState, useRef, DragEvent } from "react";
-import Link from "next/link";
 import { toastSuccess, toastError } from "@/components/AppToast";
+import { PageHero, PageMain, SurfaceCard } from "@/components/PageChrome";
 
 type Settings = { from_email?: string | null };
 
@@ -123,38 +123,28 @@ export default function MailNewPage() {
   };
 
   return (
-    <main className="mx-auto max-w-3xl p-6">
-      {/* ヘッダー：スマホ縦積み */}
-      <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-        <div>
-          <h1 className="whitespace-nowrap text-2xl font-semibold text-neutral-900">
-            メール作成
-          </h1>
-          <p className="text-sm text-neutral-500">
-            プレーンテキストのメールを作成します
-          </p>
-        </div>
-        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
-          <Link
-            href="/email"
-            className="whitespace-nowrap rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
-          >
-            メール配信トップ
-          </Link>
-          <Link
-            href="/mails"
-            className="whitespace-nowrap rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50"
-          >
-            メール一覧
-          </Link>
-        </div>
-      </div>
+    <PageMain className="max-w-5xl space-y-6">
+      <PageHero
+        eyebrow="Mail Composer"
+        title="新規メールを配信基準の UI で作成"
+        description="内部名、件名、差出人、本文、添付を分かりやすく分け、メール配信トップや一覧と同じトーンで揃えています。"
+        accent="blue"
+        actions={[
+          { href: "/mails", label: "メール一覧", variant: "secondary" },
+        ]}
+      />
 
-      <form
-        onSubmit={onSubmit}
-        className="space-y-4 rounded-2xl border border-neutral-200 p-4"
-      >
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+      <form onSubmit={onSubmit} className="space-y-6">
+        <SurfaceCard>
+          <div className="mb-4">
+            <h2 className="text-xl font-semibold tracking-tight text-neutral-950">
+              基本情報
+            </h2>
+            <p className="mt-1 text-sm text-neutral-500">
+              配信対象に見せない管理用情報と送信設定です。
+            </p>
+          </div>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <div>
             <div className="text-sm text-neutral-500">内部名</div>
             <input
@@ -195,8 +185,17 @@ export default function MailNewPage() {
             />
           </div>
         </div>
+        </SurfaceCard>
 
-        <div>
+        <SurfaceCard>
+          <div className="mb-4">
+            <h2 className="text-xl font-semibold tracking-tight text-neutral-950">
+              本文
+            </h2>
+            <p className="mt-1 text-sm text-neutral-500">
+              差し込み変数を使って個別化できます。
+            </p>
+          </div>
           <div className="text-sm text-neutral-500">本文（文章）</div>
           <textarea
             name="body_text"
@@ -213,10 +212,17 @@ export default function MailNewPage() {
             </code>
             （例: <code className="font-mono">{"{{NAME}}"}</code> 様）
           </p>
-        </div>
+        </SurfaceCard>
 
-        {/* 添付：ドロップゾーン + 複数選択 + 追加・削除 */}
-        <div>
+        <SurfaceCard>
+          <div className="mb-4">
+            <h2 className="text-xl font-semibold tracking-tight text-neutral-950">
+              添付ファイル
+            </h2>
+            <p className="mt-1 text-sm text-neutral-500">
+              クリックまたはドラッグ&ドロップで追加できます。
+            </p>
+          </div>
           <div className="text-sm text-neutral-500">添付ファイル</div>
           <div
             ref={dropRef}
@@ -271,12 +277,12 @@ export default function MailNewPage() {
               <div className="text-xs text-neutral-400">選択されていません</div>
             )}
           </div>
-        </div>
+        </SurfaceCard>
 
-        <div className="flex justify-end sm:justify-end">
+        <div className="flex justify-end">
           <button
             type="submit"
-            className="w-full rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 sm:w-auto"
+            className="w-full rounded-2xl bg-neutral-950 px-5 py-3 text-sm font-medium text-white hover:bg-neutral-800 sm:w-auto"
           >
             保存
           </button>
@@ -284,6 +290,6 @@ export default function MailNewPage() {
       </form>
 
       <pre className="mt-3 text-xs text-neutral-500">{msg}</pre>
-    </main>
+    </PageMain>
   );
 }

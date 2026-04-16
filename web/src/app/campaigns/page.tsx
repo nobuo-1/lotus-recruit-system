@@ -4,6 +4,14 @@ export const dynamic = "force-dynamic";
 import Link from "next/link";
 import { supabaseServer } from "@/lib/supabaseServer";
 import { formatJpDateTime } from "@/lib/formatDate";
+import {
+  DataTableCard,
+  PageHero,
+  PageMain,
+  SectionTitle,
+  SurfaceCard,
+  StatChip,
+} from "@/components/PageChrome";
 
 type Schedule = {
   campaign_id: string;
@@ -59,6 +67,13 @@ function nextScheduleText(schedules: Schedule[]) {
   const rest = future.length - 1;
   const when = formatJpDateTime(first.scheduled_at);
   return `${when}${rest > 0 ? `  +${rest}` : ""}`;
+}
+
+function statusClass(status: string) {
+  if (status === "scheduled") return "bg-amber-50 text-amber-700 border-amber-200";
+  if (status === "scheduled/queued") return "bg-sky-50 text-sky-700 border-sky-200";
+  if (status === "queued") return "bg-emerald-50 text-emerald-700 border-emerald-200";
+  return "bg-neutral-100 text-neutral-700 border-neutral-200";
 }
 
 export default async function CampaignsPage() {
@@ -122,40 +137,42 @@ export default async function CampaignsPage() {
   }
 
   return (
-    <main className="mx-auto max-w-6xl p-6">
-      {/* ヘッダー：スマホ縦積み */}
-      <div className="mb-6 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-        <div>
-          <h1 className="whitespace-nowrap text-2xl font-semibold text-neutral-900">
-            キャンペーン一覧
-          </h1>
-          <p className="text-sm text-neutral-500">作成したキャンペーンの一覧</p>
-        </div>
-        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
-          <Link
-            href="/email"
-            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
-          >
-            メール配信トップ
-          </Link>
-          <Link
-            href="/email/schedules"
-            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
-          >
-            キャンペーン予約リスト
-          </Link>
-          <Link
-            href="/campaigns/new"
-            className="inline-flex items-center gap-2 rounded-xl border border-neutral-200 px-4 py-2 hover:bg-neutral-50 whitespace-nowrap"
-          >
-            キャンペーン新規作成
-          </Link>
-        </div>
-      </div>
+    <PageMain className="space-y-6">
+      <PageHero
+        eyebrow="Campaign List"
+        title="キャンペーン施策を一覧で整理"
+        description="予約配信の有無や実行状況を見ながら、個別の詳細・送信画面へ移動できます。"
+        accent="gold"
+        actions={[
+          { href: "/campaigns/new", label: "新規キャンペーン", variant: "primary" },
+          { href: "/email/schedules", label: "予約一覧", variant: "secondary" },
+        ]}
+      />
 
-      <div className="overflow-x-auto rounded-2xl border border-neutral-200">
+      <SurfaceCard>
+        <SectionTitle
+          title="一覧サマリー"
+          description="進行中の施策と予約状況を素早く把握できます。"
+        />
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          <StatChip label="キャンペーン総数" value={rows.length} />
+          <StatChip
+            label="予約あり"
+            value={rows.filter((r) => deriveStatus(r.status, byCamp.get(r.id) ?? []) === "scheduled").length}
+          />
+          <StatChip
+            label="送信待ち/進行中"
+            value={rows.filter((r) => {
+              const status = deriveStatus(r.status, byCamp.get(r.id) ?? []);
+              return status === "queued" || status === "scheduled/queued";
+            }).length}
+          />
+        </div>
+      </SurfaceCard>
+
+      <DataTableCard className="overflow-x-auto">
         <table className="min-w-[1180px] w-full text-sm">
-          <thead className="bg-neutral-50 text-neutral-600">
+          <thead className="bg-[linear-gradient(180deg,#fbfbfc_0%,#f3f5f8_100%)] text-neutral-600">
             <tr>
               <th className="px-3 py-3 text-left">キャンペーン名</th>
               <th className="px-3 py-3 text-left">件名</th>
@@ -172,12 +189,16 @@ export default async function CampaignsPage() {
               const nextText = nextScheduleText(schedules);
               return (
                 <tr key={r.id} className="border-t border-neutral-200">
-                  <td className="px-3 py-3">{r.name ?? ""}</td>
+                  <td className="px-3 py-3 font-medium text-neutral-950">{r.name ?? ""}</td>
                   <td className="px-3 py-3 text-neutral-600">
                     {r.subject ?? ""}
                   </td>
-                  <td className="px-3 py-3">{status}</td>
-                  <td className="px-3 py-3">{nextText}</td>
+                  <td className="px-3 py-3">
+                    <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${statusClass(status)}`}>
+                      {status}
+                    </span>
+                  </td>
+                  <td className="px-3 py-3 text-neutral-600">{nextText}</td>
                   <td className="px-3 py-3">
                     {formatJpDateTime(r.created_at)}
                   </td>
@@ -212,7 +233,7 @@ export default async function CampaignsPage() {
             )}
           </tbody>
         </table>
-      </div>
-    </main>
+      </DataTableCard>
+    </PageMain>
   );
 }
