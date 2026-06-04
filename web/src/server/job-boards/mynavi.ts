@@ -208,6 +208,15 @@ function buildJobPathSegment(
   return withPrefix.join("+");
 }
 
+function splitExternalSmallCodes(externalSmallCode: string | null | undefined) {
+  const raw = externalSmallCode?.trim();
+  if (!raw) return [];
+  return raw
+    .split("+")
+    .map((p) => p.trim())
+    .filter(Boolean);
+}
+
 /** =========================
  * マイナビ件数取得用 型
  * ========================= */
@@ -376,6 +385,20 @@ async function fetchMynaviJobsCountViaFetch(
 
     const httpStatus = res.status;
 
+    if (res.status === 404) {
+      return {
+        total: 0,
+        source: "header",
+        url,
+        prefCode,
+        modalCount: null,
+        headerCount: 0,
+        httpStatus,
+        parseHint: "http:404-as-zero",
+        errorMessage: null,
+      };
+    }
+
     if (!res.ok) {
       const msg = `mynavi list fetch failed: ${res.status} ${res.statusText}`;
       console.error(msg, { url });
@@ -427,8 +450,10 @@ async function fetchMynaviJobsCountViaFetch(
       parseHint: hint,
       errorMessage: null,
     };
-  } catch (err: any) {
-    const msg = `mynavi fetch error: ${err?.message ?? String(err)}`;
+  } catch (err: unknown) {
+    const msg = `mynavi fetch error: ${
+      err instanceof Error ? err.message : String(err)
+    }`;
     console.error("mynavi fetch error", err, { url });
     return {
       total: null,
@@ -446,6 +471,50 @@ async function fetchMynaviJobsCountViaFetch(
   }
 }
 
+async function fetchMynaviJobsCountForCodes(
+  cond: ManualCondition,
+  prefCode: string | null
+): Promise<MynaviJobsCountResult> {
+  const codes = splitExternalSmallCodes(cond.internalSmall);
+  if (codes.length <= 1) {
+    const url = buildMynaviListUrl(cond, prefCode);
+    return fetchMynaviJobsCountViaFetch(url, prefCode);
+  }
+
+  const results = await Promise.all(
+    codes.map((code) =>
+      fetchMynaviJobsCountViaFetch(
+        buildMynaviListUrl({ ...cond, internalSmall: code }, prefCode),
+        prefCode
+      )
+    )
+  );
+  const valid = results.filter(
+    (r) => typeof r.total === "number" && Number.isFinite(r.total)
+  );
+  const total = valid.reduce((sum, r) => sum + (r.total ?? 0), 0);
+  const failed = results.filter((r) => r.total == null);
+
+  return {
+    total: valid.length > 0 ? total : null,
+    source: valid.length > 0 ? "header" : "none",
+    url: results.map((r) => r.url).join(" | "),
+    prefCode,
+    modalCount: null,
+    headerCount: valid.length > 0 ? total : null,
+    httpStatus: failed.length > 0 ? failed[0].httpStatus ?? null : results[0]?.httpStatus ?? null,
+    parseHint:
+      valid.length > 0
+        ? `split-sum:${valid.map((r) => r.parseHint ?? "unknown").join(",")}`
+        : null,
+    errorMessage:
+      valid.length > 0
+        ? null
+        : failed.map((r) => r.errorMessage).filter(Boolean).join("; ") ||
+          "mynavi split fetch failed",
+  };
+}
+
 /** =========================
  * 公開 API: マイナビ件数取得（単一都道府県 or 全国）
  * ========================= */
@@ -454,8 +523,7 @@ export async function fetchMynaviJobsCount(
   cond: ManualCondition
 ): Promise<MynaviJobsCountResult> {
   const prefCode = getMynaviPrefectureCode(cond);
-  const url = buildMynaviListUrl(cond, prefCode);
-  return fetchMynaviJobsCountViaFetch(url, prefCode);
+  return fetchMynaviJobsCountForCodes(cond, prefCode);
 }
 
 /** =========================
@@ -485,8 +553,7 @@ export async function fetchMynaviJobsCountForPrefectures(
   );
   if (stringPrefs.length === 0) {
     // 都道府県指定がない場合は「全国」で 1 回だけ取得する
-    const url = buildMynaviListUrl(condBase, null);
-    const r = await fetchMynaviJobsCountViaFetch(url, null);
+    const r = await fetchMynaviJobsCountForCodes(condBase, null);
     results["全国"] = r;
     return results;
   }
@@ -510,8 +577,7 @@ export async function fetchMynaviJobsCountForPrefectures(
       continue;
     }
 
-    const url = buildMynaviListUrl(condBase, prefCode);
-    const r = await fetchMynaviJobsCountViaFetch(url, prefCode);
+    const r = await fetchMynaviJobsCountForCodes(condBase, prefCode);
     results[prefName] = r;
   }
 

@@ -1,4 +1,3 @@
-// web/src/app/api/form-outreach/runs/route.ts
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -6,12 +5,10 @@ export const maxDuration = 60;
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-/** ========= ENV ========= */
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 const SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
 
-/** ========= Utils ========= */
 function okUuid(s: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
     String(s || "").trim()
@@ -20,20 +17,19 @@ function okUuid(s: string) {
 
 function getAdmin() {
   if (!SUPABASE_URL) throw new Error("NEXT_PUBLIC_SUPABASE_URL is missing");
-  if (SERVICE_ROLE) {
-    return {
-      sb: createClient(SUPABASE_URL, SERVICE_ROLE),
-      usingServiceRole: true,
-    };
-  }
-  if (!ANON_KEY)
+  if (SERVICE_ROLE) return createClient(SUPABASE_URL, SERVICE_ROLE);
+  if (!ANON_KEY) {
     throw new Error(
       "SUPABASE_SERVICE_ROLE_KEY / NEXT_PUBLIC_SUPABASE_ANON_KEY missing"
     );
-  return { sb: createClient(SUPABASE_URL, ANON_KEY), usingServiceRole: false };
+  }
+  return createClient(SUPABASE_URL, ANON_KEY);
 }
 
-/** ========= Handler ========= */
+function sortKey(row: { started_at?: string | null; created_at?: string | null }) {
+  return row.started_at || row.created_at || "";
+}
+
 export async function GET(req: Request) {
   try {
     const tenantId = req.headers.get("x-tenant-id") || "";
@@ -44,84 +40,79 @@ export async function GET(req: Request) {
       );
     }
 
-    const { sb } = getAdmin();
+    const sb = getAdmin();
 
-    // 手動実行（form_outreach_runs）
     const { data: manualRows, error: manualErr } = await sb
-      .from("form_outreach_runs")
+      .from("form_outreach_company_fetch_runs")
       .select(
-        "id, tenant_id, flow, status, error, started_at, finished_at, table_name, mode, meta"
+        "id, tenant_id, status, progress, inserted, want, filters, created_at"
       )
       .eq("tenant_id", tenantId)
-      .order("started_at", { ascending: false })
-      .limit(200);
+      .order("created_at", { ascending: false })
+      .limit(300);
 
     if (manualErr) throw new Error(manualErr.message);
 
-    // 自動実行（form_outreach_auto_runs）
     const { data: autoRows, error: autoErr } = await sb
       .from("form_outreach_auto_runs")
       .select(
         "id, tenant_id, kind, status, started_at, finished_at, last_message, error_text, target_count, new_prospects, new_rejected, new_similar_sites"
       )
       .eq("tenant_id", tenantId)
+      .eq("kind", "auto-company-list")
       .order("started_at", { ascending: false })
-      .limit(200);
+      .limit(300);
 
     if (autoErr) throw new Error(autoErr.message);
 
-    // SchedulesPage が期待する形に正規化
-    type RunRow = {
-      id: string;
-      flow: string | null;
-      status: string | null;
-      error: string | null;
-      started_at: string | null;
-      finished_at: string | null;
-      tenant_id?: string | null;
-    };
-
-    const manualMapped: RunRow[] = (manualRows || []).map((r: any) => ({
-      id: r.id,
-      tenant_id: r.tenant_id,
-      // flow がなければ table_name / mode からそれっぽい文字列を埋める
-      flow:
-        r.flow ||
-        r.table_name ||
-        (r.mode ? `manual-${r.mode}` : "manual-send") ||
-        "manual-send",
-      status: r.status || null,
-      error: r.error || null,
-      started_at: r.started_at,
-      finished_at: r.finished_at,
+    const manualMapped = (manualRows || []).map((row: any) => ({
+      id: row.id,
+      tenant_id: row.tenant_id,
+      source: "manual" as const,
+      flow: "manual-company-fetch",
+      status: row.status || null,
+      error: null,
+      note: row.filters ? JSON.stringify(row.filters) : null,
+      started_at: row.created_at || null,
+      finished_at: null,
+      created_at: row.created_at || null,
+      requested_count: Number(row.want ?? 0) || 0,
+      progress_count: Number(row.progress ?? 0) || 0,
+      inserted_count: Number(row.inserted ?? 0) || 0,
+      new_prospects: null,
+      new_rejected: null,
+      new_similar_sites: null,
     }));
 
-    const autoMapped: RunRow[] = (autoRows || []).map((r: any) => ({
-      id: r.id,
-      tenant_id: r.tenant_id,
-      // kind = "auto-company-list" など
-      flow: r.kind || "auto-company-list",
-      status: r.status || null, // running / completed / error など
-      // error_text があればそれを、無ければ last_message をメモ代わりに表示
-      error:
-        (r.error_text as string | null) ||
-        (r.last_message as string | null) ||
-        null,
-      started_at: r.started_at,
-      finished_at: r.finished_at,
+    const autoMapped = (autoRows || []).map((row: any) => ({
+      id: row.id,
+      tenant_id: row.tenant_id,
+      source: "auto" as const,
+      flow: row.kind || "auto-company-list",
+      status: row.status || null,
+      error: row.error_text || null,
+      note: row.last_message || null,
+      started_at: row.started_at || null,
+      finished_at: row.finished_at || null,
+      created_at: row.started_at || null,
+      requested_count: Number(row.target_count ?? 0) || 0,
+      progress_count: Number(row.new_prospects ?? 0) || 0,
+      inserted_count: Number(row.new_prospects ?? 0) || 0,
+      new_prospects: Number(row.new_prospects ?? 0) || 0,
+      new_rejected: Number(row.new_rejected ?? 0) || 0,
+      new_similar_sites: Number(row.new_similar_sites ?? 0) || 0,
     }));
 
-    const all: RunRow[] = [...manualMapped, ...autoMapped].sort((a, b) => {
-      const sa = a.started_at || "";
-      const sbt = b.started_at || "";
-      if (!sa && !sbt) return 0;
-      if (!sa) return 1;
-      if (!sbt) return -1;
-      // 新しい順
-      return sa < sbt ? 1 : sa > sbt ? -1 : 0;
+    const rows = [...manualMapped, ...autoMapped].sort((a, b) => {
+      const aa = sortKey(a);
+      const bb = sortKey(b);
+      if (!aa && !bb) return 0;
+      if (!aa) return 1;
+      if (!bb) return -1;
+      return aa < bb ? 1 : aa > bb ? -1 : 0;
     });
 
-    return NextResponse.json({ rows: all }, { status: 200 });
+    return NextResponse.json({ rows }, { status: 200 });
   } catch (e: any) {
     return NextResponse.json(
       { error: String(e?.message || e) },

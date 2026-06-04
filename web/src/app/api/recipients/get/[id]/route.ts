@@ -6,9 +6,9 @@ export const revalidate = 0;
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
 
-export async function GET(_: Request, ctx: { params: { id: string } }) {
+export async function GET(_: Request, ctx: { params: Promise<{ id: string }> }) {
   try {
-    const { id } = ctx.params;
+    const { id } = await ctx.params;
 
     const sb = await supabaseServer();
     const { data: u } = await sb.auth.getUser();

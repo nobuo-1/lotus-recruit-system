@@ -1,6 +1,7 @@
 // web/src/app/api/job-boards/runs/route.ts
 import { NextResponse } from "next/server";
-import { supabaseServer } from "@/lib/supabaseServer";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { SHARED_RESEARCH_TENANT_ID } from "@/server/job-boards/sharedResearch";
 
 export const dynamic = "force-dynamic";
 
@@ -10,10 +11,11 @@ export async function GET(req: Request) {
   const limit = 40;
   const offset = (page - 1) * limit;
 
-  const sb = await supabaseServer();
+  const sb = supabaseAdmin();
   const { data, error } = await sb
     .from("job_board_runs")
     .select("id, site, status, started_at, finished_at, error")
+    .eq("tenant_id", SHARED_RESEARCH_TENANT_ID)
     .order("started_at", { ascending: false })
     .range(offset, offset + limit - 1);
 

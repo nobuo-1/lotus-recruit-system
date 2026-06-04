@@ -5,13 +5,21 @@ export const runtime = "edge";
 
 // 置き換えのデモ値（必要ならフロントから上書き可能）
 const DEFAULT_VARS = {
+  sender_type: "法人",
   sender_company: "ロートス株式会社",
+  sender_company_kana: "ろーとすかぶしきがいしゃ",
+  sender_department: "営業部",
+  sender_position: "マネージャー",
   sender_name: "山田 太郎",
+  sender_name_kana: "やまだ たろう",
   recipient_company: "○○株式会社",
   website: "https://example.com",
   recipient_name: "採用ご担当者様",
   sender_phone: "03-1234-5678",
   sender_email: "sales@example.com",
+  sender_postal_code: "123-4567",
+  sender_prefecture: "東京都",
+  sender_address: "千代田区1-2-3",
 };
 
 type PreviewReq = {

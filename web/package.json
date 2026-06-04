@@ -9,6 +9,7 @@
     "lint": "eslint",
     "worker": "tsx src/worker/email.worker.ts",
     "worker:email": "tsx src/worker/email.worker.ts",
+    "worker:form-outreach": "tsx src/worker/formOutreachAutomation.worker.ts",
     "worker:dev": "tsx src/worker/email.worker.ts",
     "worker:prod": "node --import=tsx/loader src/worker/email.worker.ts",
     "generate:nta-towns:postal": "tsx scripts/generate-nta-town-seeds-from-postal.ts",

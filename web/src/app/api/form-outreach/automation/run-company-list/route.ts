@@ -309,12 +309,14 @@ export async function POST(req: Request) {
     const body = (await req.json().catch(() => ({}))) as {
       max_new_prospects?: number;
       triggered_by?: string; // "cron" | "progress" | "manual" など
+      force?: boolean;
     };
     const maxNewFromBody =
       body && typeof body.max_new_prospects === "number"
         ? body.max_new_prospects
         : undefined;
     const triggeredBy = body?.triggered_by || "system";
+    const forceRun = body?.force === true || triggeredBy === "manual";
 
     if (await hasRunningAuto(sb, tenantId)) {
       return NextResponse.json(
@@ -361,7 +363,7 @@ export async function POST(req: Request) {
     }
 
     // ====== 週次 / 月次の「実行日」かどうか判定 ======
-    if (settings.company_schedule === "weekly") {
+    if (!forceRun && settings.company_schedule === "weekly") {
       const dow = now.getDay();
       const todayAs1to7 = dow === 0 ? 7 : dow;
       const scheduledDow = settings.company_weekday ?? 1;
@@ -381,7 +383,7 @@ export async function POST(req: Request) {
           { status: 200 }
         );
       }
-    } else {
+    } else if (!forceRun) {
       const todayDate = now.getDate();
       const scheduledDay = settings.company_month_day ?? 1;
 
@@ -443,6 +445,7 @@ export async function POST(req: Request) {
             currentAutoCount_before: currentAutoCount,
             period_from: periodFrom.toISOString(),
             triggered_by: triggeredBy,
+            force: forceRun,
           },
         },
       ])

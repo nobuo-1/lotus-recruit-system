@@ -173,7 +173,7 @@ export default function FormOutreachLanding() {
           accent="green"
           actions={[
             { href: "/form-outreach/companies/fetch", label: "企業リストを取得", variant: "primary" },
-            { href: "/form-outreach/runs/manual", label: "手動送信", variant: "secondary" },
+            { href: "/form-outreach/settings/filters", label: "取得フィルタ設定", variant: "secondary" },
           ]}
         />
 
@@ -197,6 +197,12 @@ export default function FormOutreachLanding() {
                 icon: Boxes,
               },
               {
+                href: "/form-outreach/form-send",
+                title: "フォーム・メール一斉送信",
+                description: "企業を手動選択して、フォームまたはメールへ一斉送信します。",
+                icon: Send,
+              },
+              {
                 href: "/form-outreach/templates",
                 title: "テンプレート管理",
                 description: "差し込み文面や営業文をまとめて整備します。",
@@ -205,7 +211,7 @@ export default function FormOutreachLanding() {
               {
                 href: "/form-outreach/schedules",
                 title: "実行ログ",
-                description: "送信実行の結果や予約状態を追跡します。",
+                description: "自動・手動のフォーム情報取得ログを確認します。",
                 icon: FileClock,
               },
               {

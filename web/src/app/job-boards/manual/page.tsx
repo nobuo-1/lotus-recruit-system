@@ -272,8 +272,6 @@ const SITE_LABEL_MAP: Record<string, string> = SITE_OPTIONS.reduce((acc, s) => {
   return acc;
 }, {} as Record<string, string>);
 
-const LS_SCOUT_URLS = "job_boards_manual_scout_urls";
-
 /** ===== UUID / Tenant ユーティリティ ===== */
 function isValidUuid(v: string | null | undefined): v is string {
   if (!v) return false;
@@ -352,7 +350,10 @@ function isAbortError(err: any) {
 
 type ConditionModalProps = {
   open: boolean;
+  action: "jobs" | "candidates" | null;
+  running: boolean;
   onClose: () => void;
+  onExecute: () => void;
   sites: string[];
   setSites: (s: string[]) => void;
   large: string[];
@@ -364,7 +365,10 @@ type ConditionModalProps = {
 
 const ConditionModal: React.FC<ConditionModalProps> = ({
   open,
+  action,
+  running,
   onClose,
+  onExecute,
   sites,
   setSites,
   large,
@@ -375,6 +379,7 @@ const ConditionModal: React.FC<ConditionModalProps> = ({
 }) => {
   if (!open) return null;
 
+  const actionLabel = action === "candidates" ? "求職者数" : "求人件数";
   const toggleSite = (value: string) => {
     setSites(
       sites.includes(value)
@@ -389,7 +394,14 @@ const ConditionModal: React.FC<ConditionModalProps> = ({
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40">
       <div className="w-[720px] max-w-[96vw] rounded-2xl bg-white shadow-xl border border-neutral-200 overflow-hidden">
         <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200">
-          <div className="font-semibold text-sm">実行条件の設定</div>
+          <div>
+            <div className="font-semibold text-sm">
+              {actionLabel}取得の条件設定
+            </div>
+            <div className="mt-1 text-xs text-neutral-500">
+              対象サイト、職種、都道府県を確認してから実行します。
+            </div>
+          </div>
         </div>
 
         <div className="p-4 space-y-4 text-sm">
@@ -482,9 +494,37 @@ const ConditionModal: React.FC<ConditionModalProps> = ({
         <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-neutral-200">
           <button
             onClick={onClose}
+            disabled={running}
             className="rounded-lg px-3 py-1 border border-neutral-300 text-xs hover:bg-neutral-50"
           >
             閉じる
+          </button>
+          <button
+            type="button"
+            onClick={onExecute}
+            disabled={running || sites.length === 0}
+            className="inline-flex items-center gap-2 rounded-lg border border-neutral-900 bg-neutral-950 px-4 py-2 text-xs font-medium text-white hover:bg-indigo-900 disabled:opacity-50 disabled:hover:bg-neutral-950"
+          >
+            {running && (
+              <svg className="h-3 w-3 animate-spin" viewBox="0 0 24 24">
+                <circle
+                  cx="12"
+                  cy="12"
+                  r="10"
+                  stroke="currentColor"
+                  strokeWidth="3"
+                  fill="none"
+                  opacity="0.25"
+                />
+                <path
+                  d="M22 12a10 10 0 00-10-10"
+                  stroke="currentColor"
+                  strokeWidth="3"
+                  fill="none"
+                />
+              </svg>
+            )}
+            この条件で{actionLabel}を取得する
           </button>
         </div>
       </div>
@@ -493,21 +533,30 @@ const ConditionModal: React.FC<ConditionModalProps> = ({
 };
 
 /** =========================
- * 条件ごとの結果 → 1つの集計にまとめる（合計件数のみ）
+ * 条件ごとの結果 → 1つの集計にまとめる
  * ========================= */
 
 function aggregateManualRows(rows: ManualResultRow[]): ManualResultRow | null {
   if (!rows || rows.length === 0) return null;
 
-  const { total, hasAny } = rows.reduce(
+  const { jobsTotal, hasJobs, candidatesTotal, hasCandidates } = rows.reduce(
     (acc, r) => {
       if (typeof r.jobs_total === "number") {
-        acc.total += r.jobs_total;
-        acc.hasAny = true;
+        acc.jobsTotal += r.jobs_total;
+        acc.hasJobs = true;
+      }
+      if (typeof r.candidates_total === "number") {
+        acc.candidatesTotal += r.candidates_total;
+        acc.hasCandidates = true;
       }
       return acc;
     },
-    { total: 0, hasAny: false }
+    {
+      jobsTotal: 0,
+      hasJobs: false,
+      candidatesTotal: 0,
+      hasCandidates: false,
+    }
   );
 
   return {
@@ -515,7 +564,8 @@ function aggregateManualRows(rows: ManualResultRow[]): ManualResultRow | null {
     internal_large: null,
     internal_small: null,
     prefecture: null,
-    jobs_total: hasAny ? total : null,
+    jobs_total: hasJobs ? jobsTotal : null,
+    candidates_total: hasCandidates ? candidatesTotal : null,
   } as ManualResultRow;
 }
 
@@ -612,6 +662,9 @@ const DetailedResultTable: React.FC<{ rows: ManualResultRow[] }> = ({
               <th className="px-3 py-2 text-right font-medium text-neutral-600 whitespace-nowrap">
                 求人件数
               </th>
+              <th className="px-3 py-2 text-right font-medium text-neutral-600 whitespace-nowrap">
+                求職者数
+              </th>
               <th className="px-3 py-2 text-left font-medium text-neutral-600 whitespace-nowrap">
                 取得できなかった理由
               </th>
@@ -644,10 +697,27 @@ const DetailedResultTable: React.FC<{ rows: ManualResultRow[] }> = ({
               const hasJobs = typeof jobsTotal === "number";
               const jobsValue = hasJobs
                 ? `${jobsTotal.toLocaleString()}件`
-                : "取得失敗"; // null は「取得失敗」と明示
-              const reasonText = hasJobs
-                ? "-"
-                : r.error_reason || "取得失敗";
+                : r.error_reason
+                  ? "取得失敗"
+                  : "-";
+              const candidatesTotal = r.candidates_total;
+              const hasCandidates = typeof candidatesTotal === "number";
+              const candidatesValue = hasCandidates
+                ? `${candidatesTotal.toLocaleString()}名`
+                : r.candidates_error_reason
+                  ? "取得失敗"
+                  : "-";
+              const reasonParts = [
+                hasJobs || !r.error_reason
+                  ? null
+                  : `求人: ${r.error_reason}`,
+                hasCandidates || !r.candidates_error_reason
+                  ? null
+                  : `求職者: ${r.candidates_error_reason}`,
+              ].filter(Boolean);
+              const reasonText = reasonParts.length
+                ? reasonParts.join(" / ")
+                : "-";
 
               return (
                 <tr
@@ -668,6 +738,9 @@ const DetailedResultTable: React.FC<{ rows: ManualResultRow[] }> = ({
                   </td>
                   <td className="px-3 py-1.5 text-right tabular-nums">
                     {jobsValue}
+                  </td>
+                  <td className="px-3 py-1.5 text-right tabular-nums">
+                    {candidatesValue}
                   </td>
                   <td className="px-3 py-1.5 text-neutral-600">
                     {reasonText}
@@ -696,7 +769,9 @@ export default function JobBoardsManualPage() {
 
   const [openCat, setOpenCat] = useState(false);
   const [openPref, setOpenPref] = useState(false);
-  const [openConditionModal, setOpenConditionModal] = useState(false);
+  const [conditionAction, setConditionAction] = useState<
+    "jobs" | "candidates" | null
+  >(null);
 
   const [running, setRunning] = useState(false);
   const [runningAction, setRunningAction] = useState<
@@ -706,7 +781,6 @@ export default function JobBoardsManualPage() {
   const [rows, setRows] = useState<ManualResultRow[]>([]);
   const abortRef = useRef<AbortController | null>(null);
   const cancelRef = useRef(false);
-  const [scoutUrls, setScoutUrls] = useState<Record<string, string>>({});
 
   // 進捗表示用
   const [progressTotal, setProgressTotal] = useState(0);
@@ -718,32 +792,6 @@ export default function JobBoardsManualPage() {
       await ensureTenantId();
     })();
   }, []);
-
-  // 求職者数取得URLの復元
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(LS_SCOUT_URLS);
-      if (!raw) return;
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === "object") {
-        setScoutUrls(parsed as Record<string, string>);
-      }
-    } catch {
-      /* noop */
-    }
-  }, []);
-
-  const updateScoutUrl = (siteKey: string, value: string) => {
-    setScoutUrls((prev) => {
-      const next = { ...prev, [siteKey]: value };
-      try {
-        localStorage.setItem(LS_SCOUT_URLS, JSON.stringify(next));
-      } catch {
-        /* noop */
-      }
-      return next;
-    });
-  };
 
   // 疑似プログレス
   useEffect(() => {
@@ -815,15 +863,9 @@ export default function JobBoardsManualPage() {
 
       setRows((j?.preview as ManualResultRow[]) ?? []);
 
-      // note + debugLogs をまとめて表示
-      let text =
+      const text =
         j?.note ||
         (j?.history_id ? `履歴に保存しました（ID: ${j.history_id}）` : "");
-
-      if (Array.isArray(j?.debugLogs) && j.debugLogs.length > 0) {
-        text += (text ? "\n\n" : "") + "デバッグログ（求人件数取得）:\n";
-        text += j.debugLogs.join("\n");
-      }
 
       setMsg(text);
 
@@ -848,7 +890,6 @@ export default function JobBoardsManualPage() {
     setRunning(true);
     setRunningAction("candidates");
 
-    // 求職者取得は件数テーブルには影響させず、ログだけ出す想定
     setProgressTotal(0);
     setProgressDisplay(0);
     cancelRef.current = false;
@@ -879,7 +920,7 @@ export default function JobBoardsManualPage() {
           large,
           small,
           pref: prefs,
-          scoutUrls,
+          scoutUrls: {},
         }),
         signal,
       });
@@ -902,6 +943,20 @@ export default function JobBoardsManualPage() {
       }
 
       if (Array.isArray(j?.results) && j.results.length > 0) {
+        const nextRows: ManualResultRow[] = j.results.map((r: any) => ({
+          site_key: r.siteKey,
+          internal_large: r.internalLarge ?? null,
+          internal_small: r.internalSmall ?? null,
+          prefecture: r.prefecture ?? null,
+          jobs_total: null,
+          candidates_total:
+            typeof r.total === "number" && Number.isFinite(r.total)
+              ? r.total
+              : null,
+          candidates_error_reason: r.errorMessage ?? null,
+        }));
+        setRows(nextRows);
+
         text += "\n\nサイト別結果:\n";
         for (const r of j.results) {
           const label = SITE_LABEL_MAP[r.siteKey] || r.siteKey;
@@ -911,14 +966,6 @@ export default function JobBoardsManualPage() {
             text += `- ${label}: 取得失敗（${r.errorMessage || "unknown"}）\n`;
           }
         }
-      }
-
-      const debugLogs = Array.isArray(j?.results)
-        ? j.results.flatMap((r: any) => r?.debugLogs ?? [])
-        : [];
-      if (debugLogs.length > 0) {
-        text += "\nデバッグログ（求職者取得）:\n";
-        text += debugLogs.join("\n");
       }
 
       setMsg((prev) => (prev ? `${prev}\n\n${text}` : text));
@@ -951,6 +998,17 @@ export default function JobBoardsManualPage() {
         ? `${prev}\n\n${label}を中止しています…`
         : `${label}を中止しています…`
     );
+  };
+
+  const executeConditionAction = () => {
+    const action = conditionAction;
+    if (!action) return;
+    setConditionAction(null);
+    if (action === "candidates") {
+      void fetchCandidates();
+      return;
+    }
+    void run();
   };
 
   const currentConditionSummary = useMemo(() => {
@@ -1034,7 +1092,7 @@ export default function JobBoardsManualPage() {
               <span>
                 {running
                   ? "処理を実行中です…"
-                  : "前回の求人件数取得が完了しました。"}
+                  : "求人件数取得が完了しました。"}
               </span>
             </div>
             <div className="tabular-nums">{progressText}</div>
@@ -1059,46 +1117,19 @@ export default function JobBoardsManualPage() {
               </div>
             </div>
             <div className="flex flex-col items-end gap-2">
-              <button
-                className="rounded-lg border border-neutral-300 px-3 py-2 text-xs hover:bg-neutral-50"
-                onClick={() => setOpenConditionModal(true)}
-              >
-                実行条件の設定
-              </button>
               <div className="flex items-center gap-2">
-                {/* 求人件数ボタン（ホバー紺色） */}
                 <button
-                  onClick={run}
-                  disabled={running || sites.length === 0}
+                  onClick={() => setConditionAction("jobs")}
+                  disabled={running}
                   className="inline-flex items-center gap-2 rounded-lg border border-neutral-800 px-4 py-2 text-xs font-medium text-neutral-900 hover:bg-indigo-900 hover:text-white disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-neutral-900"
                 >
-                  {running && (
-                    <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
-                      <circle
-                        cx="12"
-                        cy="12"
-                        r="10"
-                        stroke="currentColor"
-                        strokeWidth="3"
-                        fill="none"
-                        opacity="0.25"
-                      />
-                      <path
-                        d="M22 12a10 10 0 00-10-10"
-                        stroke="currentColor"
-                        strokeWidth="3"
-                        fill="none"
-                      />
-                    </svg>
-                  )}
                   求人件数を取得する
                 </button>
 
-                {/* 求職者数ボタン（デザインを揃える） */}
                 <button
                   type="button"
-                  onClick={fetchCandidates}
-                  disabled={running || sites.length === 0}
+                  onClick={() => setConditionAction("candidates")}
+                  disabled={running}
                   className="inline-flex items-center gap-2 rounded-lg border border-neutral-800 px-4 py-2 text-xs font-medium text-neutral-900 hover:bg-indigo-900 hover:text-white disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-neutral-900"
                 >
                   求職者数を取得する
@@ -1118,40 +1149,8 @@ export default function JobBoardsManualPage() {
           </div>
 
           {msg && (
-            <pre className="whitespace-pre-wrap text-xs text-neutral-600 border-t border-neutral-200 pt-3 mt-2">
+            <div className="whitespace-pre-line border-t border-neutral-200 pt-3 mt-2 text-xs text-neutral-600">
               {msg}
-            </pre>
-          )}
-        </SurfaceCard>
-
-        {/* 求職者数取得URL */}
-        <SurfaceCard className="space-y-3">
-          <div className="text-sm font-semibold text-neutral-800">
-            求職者数取得の設定
-          </div>
-          <p className="text-xs text-neutral-500">
-            各サイトのスカウト検索URLを貼り付けてください（ローカル保存）。
-            未設定のサイトは取得をスキップします。
-          </p>
-          {sites.length === 0 ? (
-            <div className="text-xs text-neutral-400">
-              先に対象サイトを選択してください。
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 gap-3">
-              {sites.map((siteKey) => (
-                <div key={siteKey} className="grid gap-1">
-                  <div className="text-xs font-medium text-neutral-600">
-                    {SITE_LABEL_MAP[siteKey] || siteKey}
-                  </div>
-                  <input
-                    value={scoutUrls[siteKey] ?? ""}
-                    onChange={(e) => updateScoutUrl(siteKey, e.target.value)}
-                    placeholder="https://... スカウト検索URL"
-                    className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-xs"
-                  />
-                </div>
-              ))}
             </div>
           )}
         </SurfaceCard>
@@ -1162,7 +1161,7 @@ export default function JobBoardsManualPage() {
 
           {!hasResults ? (
             <div className="px-4 py-10 text-center text-neutral-400 text-sm">
-              まだ結果がありません。「求人件数を取得する」を実行してください。
+              まだ結果がありません。取得ボタンから条件を指定して実行してください。
             </div>
           ) : (
             <>
@@ -1205,14 +1204,26 @@ export default function JobBoardsManualPage() {
                           </div>
                         </div>
 
-                        <div className="text-right">
-                          <div className="text-xs text-neutral-500">
-                            {site.label} 合計
+                        <div className="grid grid-cols-2 gap-4 text-right">
+                          <div>
+                            <div className="text-xs text-neutral-500">
+                              求人件数
+                            </div>
+                            <div className="text-lg font-semibold tabular-nums">
+                              {typeof site.summary.jobs_total === "number"
+                                ? `${site.summary.jobs_total.toLocaleString()}件`
+                                : "-"}
+                            </div>
                           </div>
-                          <div className="text-lg font-semibold tabular-nums">
-                            {typeof site.summary.jobs_total === "number"
-                              ? `${site.summary.jobs_total.toLocaleString()}件`
-                              : "-"}
+                          <div>
+                            <div className="text-xs text-neutral-500">
+                              求職者数
+                            </div>
+                            <div className="text-lg font-semibold tabular-nums">
+                              {typeof site.summary.candidates_total === "number"
+                                ? `${site.summary.candidates_total.toLocaleString()}名`
+                                : "-"}
+                            </div>
                           </div>
                         </div>
                       </div>
@@ -1224,48 +1235,6 @@ export default function JobBoardsManualPage() {
               {/* 条件別テーブル */}
               <DetailedResultTable rows={rows} />
 
-              {/* デバッグ用の要約（画面側で把握しやすく）*/}
-              <section className="mt-4 rounded-lg border border-dashed border-neutral-300 bg-neutral-50 px-3 py-2 text-[11px] text-neutral-600">
-                <div className="font-semibold mb-1">デバッグ情報（画面側）</div>
-                <ul className="list-disc pl-4 space-y-0.5">
-                  <li>
-                    職種（大分類）
-                    {large.length
-                      ? `: ${large.length}件（ID: ${large.join(", ")}）`
-                      : ": 未指定（すべて）"}
-                  </li>
-                  <li>
-                    職種（小分類）
-                    {small.length
-                      ? `: ${small.length}件（ID: ${small.join(", ")}）`
-                      : ": 未指定（すべて）"}
-                  </li>
-                  <li>
-                    都道府県
-                    {prefs.length
-                      ? `: ${prefs.length}件（${prefs.join(" / ")}）`
-                      : ": 未指定（全国）"}
-                  </li>
-                  <li>
-                    件数の取得方法（マイナビ）: external_small_code を用いて
-                    「https://tenshoku.mynavi.jp/list/pXX/（または
-                    p01+…+p47）/oコード…」
-                    の検索ページを開き、ページ内の「条件に合う求人{" "}
-                    <span className="font-mono">js__searchRecruit--count</span>
-                    」に表示される件数を取得します。
-                  </li>
-                  <li>
-                    件数の取得方法（doda）:
-                    検索結果画面上部などに表示される件数を取得（サーバー側ロジックに依存）。
-                  </li>
-                  <li>
-                    求職者の取得処理: /api/job-boards/manual/fetch-candidates
-                    を呼び出し、サーバー側で
-                    Mynaviログイン・候補者一覧取得処理（mynaviLogin /
-                    mynaviCandidates）を実行します（詳細はサーバーログおよびデバッグログを参照）。
-                  </li>
-                </ul>
-              </section>
             </>
           )}
         </SurfaceCard>
@@ -1273,8 +1242,11 @@ export default function JobBoardsManualPage() {
 
       {/* 条件設定モーダル */}
       <ConditionModal
-        open={openConditionModal}
-        onClose={() => setOpenConditionModal(false)}
+        open={conditionAction !== null}
+        action={conditionAction}
+        running={running}
+        onClose={() => setConditionAction(null)}
+        onExecute={executeConditionAction}
         sites={sites}
         setSites={setSites}
         large={large}

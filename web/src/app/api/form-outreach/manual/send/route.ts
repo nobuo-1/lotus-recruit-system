@@ -13,6 +13,7 @@ import {
 import type { FormPlan } from "@/server/formOutreachFormSender";
 
 export const runtime = "nodejs";
+export const maxDuration = 300;
 
 /* ========= Supabase REST ========= */
 const REST_URL = process.env.NEXT_PUBLIC_SUPABASE_URL
@@ -35,8 +36,13 @@ function authHeaders() {
 /* ========= Types ========= */
 type SenderRow = {
   id: string;
+  sender_type?: "corporate" | "individual" | null;
   sender_company: string | null; // 会社名（{{sender_company}})
+  sender_company_kana?: string | null;
+  sender_department?: string | null;
+  sender_position?: string | null;
   from_name: string | null; // 個人名/担当者名（{{sender_name}})
+  sender_name_kana?: string | null;
   from_header_name: string | null; // From: 表示名
   from_email: string | null;
   reply_to: string | null;
@@ -51,6 +57,8 @@ type SenderRow = {
   sender_address?: string | null;
   sender_last_name?: string | null;
   sender_first_name?: string | null;
+  sender_last_name_kana?: string | null;
+  sender_first_name_kana?: string | null;
 };
 
 type TemplateRow = {
@@ -91,6 +99,17 @@ type ProspectSimilar = ProspectBase & {
 };
 
 type AnyRow = ProspectProspects | ProspectRejected | ProspectSimilar;
+
+type RunProgress = {
+  kind: "manual-send-progress";
+  channel: "email" | "form";
+  total: number;
+  processed: number;
+  ok: number;
+  queued: number;
+  failed: number;
+  updated_at: string;
+};
 
 /* ========= Helpers ========= */
 function escapeHtml(s: string) {
@@ -245,7 +264,7 @@ async function loadTemplate(tenantId: string, templateId: string) {
 async function loadSender(tenantId: string): Promise<SenderRow | null> {
   if (CAN_USE_REST) {
     const url =
-      `${REST_URL}/form_outreach_senders?select=id,sender_company,from_name,from_header_name,from_email,reply_to,phone,website,signature,is_default,postal_code,sender_prefecture,sender_address,sender_last_name,sender_first_name` +
+      `${REST_URL}/form_outreach_senders?select=id,sender_type,sender_company,sender_company_kana,sender_department,sender_position,from_name,sender_name_kana,from_header_name,from_email,reply_to,phone,website,signature,is_default,postal_code,sender_prefecture,sender_address,sender_last_name,sender_first_name,sender_last_name_kana,sender_first_name_kana` +
       `&tenant_id=eq.${tenantId}&is_default=is.true&limit=1`;
     const r = await fetch(url, { headers: authHeaders(), cache: "no-store" });
     if (!r.ok) return null;
@@ -256,7 +275,7 @@ async function loadSender(tenantId: string): Promise<SenderRow | null> {
     const { data, error } = await sb
       .from("form_outreach_senders")
       .select(
-        "id,sender_company,from_name,from_header_name,from_email,reply_to,phone,website,signature,is_default,postal_code,sender_prefecture,sender_address,sender_last_name,sender_first_name"
+        "id,sender_type,sender_company,sender_company_kana,sender_department,sender_position,from_name,sender_name_kana,from_header_name,from_email,reply_to,phone,website,signature,is_default,postal_code,sender_prefecture,sender_address,sender_last_name,sender_first_name,sender_last_name_kana,sender_first_name_kana"
       )
       .eq("tenant_id", tenantId)
       .eq("is_default", true)
@@ -399,6 +418,27 @@ async function updateRun(
   }
 }
 
+function buildProgress(args: {
+  channel: "email" | "form";
+  total: number;
+  processed: number;
+  ok: number;
+  queued: number;
+  failed: number;
+}): string {
+  const progress: RunProgress = {
+    kind: "manual-send-progress",
+    channel: args.channel,
+    total: args.total,
+    processed: args.processed,
+    ok: args.ok,
+    queued: args.queued,
+    failed: args.failed,
+    updated_at: new Date().toISOString(),
+  };
+  return JSON.stringify(progress);
+}
+
 /* ========= Queue ========= */
 async function enqueueDirectEmail(args: {
   to: string;
@@ -476,6 +516,7 @@ export async function POST(req: NextRequest) {
       unknown_placeholder = "メッセージをご確認ください",
       mode,
       channel: bodyChannel,
+      run_id,
     } = body || {};
 
     // フロントからは mode: "email" | "form" が来る想定だが、
@@ -494,11 +535,13 @@ export async function POST(req: NextRequest) {
         { status: 400 }
       );
 
-    const run = await insertRun(tenantId, {
-      flow: `manual-send/${channel}`,
-      status: "running",
-      started_at: nowIso,
-    });
+    const run = run_id
+      ? { id: String(run_id) }
+      : await insertRun(tenantId, {
+          flow: `manual-send/${channel}`,
+          status: "running",
+          started_at: nowIso,
+        });
 
     const [tpl, sender, targets] = await Promise.all([
       loadTemplate(tenantId, String(template_id)),
@@ -522,12 +565,24 @@ export async function POST(req: NextRequest) {
 
     // ★ 送信元差し込み：署名は自動でくっつけず、{{signature}} を書いた時だけ反映
     const senderDict: Record<string, string> = {
+      "{{sender_type}}": sender?.sender_type === "individual" ? "個人" : "法人",
       "{{sender_company}}": senderCompany || brandCompany,
+      "{{sender_company_kana}}": sender?.sender_company_kana || "",
+      "{{sender_department}}": sender?.sender_department || "",
+      "{{sender_position}}": sender?.sender_position || "",
       "{{sender_name}}": senderName || brandCompany,
+      "{{sender_name_kana}}": sender?.sender_name_kana || "",
+      "{{sender_last_name}}": sender?.sender_last_name || "",
+      "{{sender_first_name}}": sender?.sender_first_name || "",
+      "{{sender_last_name_kana}}": sender?.sender_last_name_kana || "",
+      "{{sender_first_name_kana}}": sender?.sender_first_name_kana || "",
       "{{sender_email}}": sender?.from_email || "",
       "{{sender_reply_to}}": sender?.reply_to || "",
       "{{sender_phone}}": sender?.phone || "",
       "{{sender_website}}": sender?.website || "",
+      "{{sender_postal_code}}": sender?.postal_code || "",
+      "{{sender_prefecture}}": sender?.sender_prefecture || "",
+      "{{sender_address}}": sender?.sender_address || "",
       "{{signature}}": signature || "",
       "{{today}}": nowIso.slice(0, 10),
     };
@@ -535,9 +590,27 @@ export async function POST(req: NextRequest) {
     const ok: string[] = [];
     const queued: string[] = [];
     const failed: string[] = [];
+    let processed = 0;
+
+    const publishProgress = async (status = "running") => {
+      if (!run?.id) return;
+      await updateRun(run.id, {
+        status,
+        error: buildProgress({
+          channel,
+          total: targets.length,
+          processed,
+          ok: ok.length,
+          queued: queued.length,
+          failed: failed.length,
+        }),
+      });
+    };
 
     // ★ prospect_id ごとのフォーム送信デバッグ情報
     const debugByProspect: Record<string, any> = {};
+
+    await publishProgress();
 
     for (const r of targets) {
       try {
@@ -744,11 +817,17 @@ export async function POST(req: NextRequest) {
                 sender: {
                   company:
                     sender?.sender_company || senderCompany || brandCompany,
+                  company_kana: sender?.sender_company_kana || "",
+                  department: sender?.sender_department || "",
+                  position: sender?.sender_position || "",
                   postal_code: sender?.postal_code || "",
                   prefecture: sender?.sender_prefecture || "",
                   address: sender?.sender_address || "",
                   last_name: sender?.sender_last_name || senderName || "",
                   first_name: sender?.sender_first_name || "",
+                  name_kana: sender?.sender_name_kana || "",
+                  last_name_kana: sender?.sender_last_name_kana || "",
+                  first_name_kana: sender?.sender_first_name_kana || "",
                   email: sender?.from_email || "",
                   phone: sender?.phone || "",
                   website: sender?.website || "",
@@ -769,7 +848,25 @@ export async function POST(req: NextRequest) {
             }
 
             // 3. 実際にフォーム送信（★ plan が null でも Playwright のヒューリスティックのみで送信を試す）
-            const result = await submitFormPlan(formUrl, plan, cookieHeader);
+            const result = await submitFormPlan(formUrl, plan, cookieHeader, {
+              company: senderCompany || brandCompany,
+              companyKana: sender?.sender_company_kana || "",
+              department: sender?.sender_department || "",
+              position: sender?.sender_position || "",
+              fullName: senderName || brandCompany,
+              fullNameKana: sender?.sender_name_kana || "",
+              lastName: sender?.sender_last_name || senderName || brandCompany,
+              firstName: sender?.sender_first_name || "",
+              lastNameKana: sender?.sender_last_name_kana || "",
+              firstNameKana: sender?.sender_first_name_kana || "",
+              email: sender?.from_email || "",
+              phone: sender?.phone || "",
+              postal: sender?.postal_code || "",
+              prefecture: sender?.sender_prefecture || "",
+              address: sender?.sender_address || "",
+              subject,
+              message: messageText,
+            });
 
             if (result.debug) {
               const d = result.debug as any;
@@ -867,6 +964,9 @@ export async function POST(req: NextRequest) {
         }
       } catch (e) {
         failed.push(String((r as any).id));
+      } finally {
+        processed++;
+        await publishProgress();
       }
     }
 
@@ -884,13 +984,16 @@ export async function POST(req: NextRequest) {
         status = "failed";
       }
 
-      const errParts: string[] = [];
-      if (queued.length) errParts.push(`queued:${queued.length}`);
-      if (failed.length) errParts.push(`failed:${failed.length}`);
-
       await updateRun(run.id, {
         status,
-        error: errParts.length ? errParts.join(", ") : null,
+        error: buildProgress({
+          channel,
+          total: targets.length,
+          processed,
+          ok: ok.length,
+          queued: queued.length,
+          failed: failed.length,
+        }),
         finished_at: new Date().toISOString(),
       });
     }

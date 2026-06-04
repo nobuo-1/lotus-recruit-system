@@ -28,8 +28,13 @@ import {
   fetchWomanTypeJobsCount,
   type WomanTypeJobsCountResult,
 } from "@/server/job-boards/womantype";
+import {
+  fetchCandidateCountForCondition,
+  type CandidateCountResult,
+  type CandidateFetchContext,
+} from "@/server/job-boards/candidates";
 
-import { supabaseServer } from "@/lib/supabaseServer";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import {
   saveJobBoardManualHistory,
   type ManualHistoryStatus,
@@ -45,6 +50,18 @@ type RequestBody = {
   pref?: string[];
   want?: number;
   saveMode?: string;
+  includeCandidates?: boolean;
+  candidateGranularity?: "large" | "small";
+  skipJobs?: boolean;
+};
+
+type JobBoardBatchResult = {
+  ok: true;
+  preview: ManualResultRow[];
+  note: string;
+  debugLogs: string[];
+  history_id: string | null;
+  history_error: string | null;
 };
 
 type BaseCondition = {
@@ -57,6 +74,8 @@ type BaseCondition = {
 /** サイトごとの統計値（年齢・雇用形態・年収帯は使わない） */
 type SiteStats = {
   jobsTotal: number | null;
+  candidatesTotal?: number | null;
+  candidatesErrorReason?: string | null;
   /** サイト固有のデバッグ情報（任意） */
   debugInfo?: {
     lines: string[];
@@ -160,7 +179,7 @@ async function loadJobBoardMappings(
   }
 
   try {
-    const sb = await supabaseServer();
+    const sb = supabaseAdmin();
 
     let query = sb
       .from("job_board_mappings")
@@ -169,10 +188,13 @@ async function loadJobBoardMappings(
       )
       .in("site_key", sites);
 
-    if (internalLarges.length > 0) {
+    const shouldNarrowMappings =
+      internalLarges.length + internalSmalls.length <= 80;
+
+    if (shouldNarrowMappings && internalLarges.length > 0) {
       query = query.in("internal_large", internalLarges);
     }
-    if (internalSmalls.length > 0) {
+    if (shouldNarrowMappings && internalSmalls.length > 0) {
       // internal_small が null の行はここでは対象外（small 未指定ケースは large 側のマッチで拾う）
       query = query.in("internal_small", internalSmalls);
     }
@@ -574,26 +596,72 @@ async function fetchStatsForSite(cond: ManualCondition): Promise<SiteStats> {
   }
 }
 
-/** ========== handler ========== */
+async function fetchCandidatesForBase(
+  base: BaseCondition,
+  context: CandidateFetchContext,
+  enabled: boolean,
+  cache: Map<string, CandidateCountResult>,
+  granularity: "large" | "small"
+) {
+  if (!enabled) {
+    return {
+      candidatesTotal: null,
+      candidatesErrorReason: null,
+      debugLine: null,
+    };
+  }
 
-export async function POST(req: Request) {
-  try {
-    const body = (await req.json()) as RequestBody;
+  const cond =
+    granularity === "large"
+      ? toManualCondition({ ...base, internalSmall: null })
+      : toManualCondition(base);
+  const cacheKey = [
+    cond.siteKey,
+    cond.internalLarge ?? "",
+    cond.internalSmall ?? "",
+    cond.prefecture ?? "",
+  ].join("||");
+  const cached = cache.get(cacheKey);
+  const result =
+    cached ??
+    (await fetchCandidateCountForCondition(
+      cond,
+      context
+    ));
+  if (!cached) cache.set(cacheKey, result);
 
+  return {
+    candidatesTotal:
+      typeof result.total === "number" && Number.isFinite(result.total)
+        ? result.total
+        : null,
+    candidatesErrorReason: result.errorMessage ?? null,
+    debugLine: [
+      "candidate-detail",
+      `site=${base.siteKey}`,
+      `granularity=${granularity}`,
+      `url=${result.url ?? "（未設定）"}`,
+      `prefecture=${base.prefecture ?? "（指定なし）"}`,
+      `total=${result.total ?? "null"}`,
+      `httpStatus=${result.httpStatus ?? "n/a"}`,
+      `parseHint=${result.parseHint ?? "unknown"}`,
+      `error=${result.errorMessage ?? "none"}`,
+    ].join(" / "),
+  };
+}
+
+async function runJobBoardBatch(
+  req: Request,
+  body: RequestBody
+): Promise<JobBoardBatchResult> {
     const rawSites = (body.sites ?? []).filter(isValidSiteKey);
     if (rawSites.length === 0) {
-      return NextResponse.json(
-        { ok: false, error: "サイトが選択されていません。" },
-        { status: 400 }
-      );
+      throw new Error("サイトが選択されていません。");
     }
 
     const baseConditions = buildBaseConditions(rawSites, body);
     if (baseConditions.length === 0) {
-      return NextResponse.json(
-        { ok: false, error: "条件の組み合わせがありません。" },
-        { status: 400 }
-      );
+      throw new Error("条件の組み合わせがありません。");
     }
 
     // デバッグログを蓄積する配列
@@ -626,6 +694,115 @@ export async function POST(req: Request) {
     );
 
     const preview: ManualResultRow[] = [];
+    const includeCandidates = body.includeCandidates === true;
+    const candidateGranularity =
+      body.candidateGranularity === "large" ? "large" : "small";
+    const candidateContext: CandidateFetchContext = {};
+    const candidateCache = new Map<string, CandidateCountResult>();
+    const skipJobs = body.skipJobs === true;
+
+    if (skipJobs) {
+      debugLogs.push("#workflow: candidate-only start");
+
+      for (const base of baseConditions) {
+        const candidateInfo = await fetchCandidatesForBase(
+          base,
+          candidateContext,
+          true,
+          candidateCache,
+          candidateGranularity
+        );
+        if (candidateInfo.debugLine) {
+          debugLogs.push(`[${base.siteKey}] ${candidateInfo.debugLine}`);
+        }
+        preview.push({
+          site_key: base.siteKey,
+          internal_large: base.internalLarge,
+          internal_small: base.internalSmall,
+          prefecture: base.prefecture,
+          jobs_total: null,
+          candidates_total: candidateInfo.candidatesTotal,
+          candidates_error_reason: candidateInfo.candidatesErrorReason,
+        });
+      }
+
+      const successCount = preview.filter(
+        (row) =>
+          typeof row.candidates_total === "number" &&
+          !Number.isNaN(row.candidates_total)
+      ).length;
+      const failureCount = Math.max(0, preview.length - successCount);
+      const totalCandidates = preview.reduce((sum, row) => {
+        if (
+          typeof row.candidates_total !== "number" ||
+          Number.isNaN(row.candidates_total)
+        ) {
+          return sum;
+        }
+        return sum + row.candidates_total;
+      }, 0);
+      const historyStatus: ManualHistoryStatus =
+        successCount === 0
+          ? "failed"
+          : failureCount > 0
+            ? "partial"
+            : "success";
+
+      let historyId: string | null = null;
+      let historyError: string | null = null;
+
+      if (body.saveMode === "history") {
+        try {
+          const saved = await saveJobBoardManualHistory({
+            req,
+            body,
+            params: {
+              action_type: "candidates",
+              status: historyStatus,
+              sites: rawSites,
+              large: body.large ?? [],
+              small: body.small ?? [],
+              pref: body.pref ?? [],
+              fetched_count: totalCandidates,
+              success_count: successCount,
+              failure_count: failureCount,
+              preview_count: preview.length,
+              note:
+                historyStatus === "failed"
+                  ? "求職者数の取得に失敗しました。"
+                  : historyStatus === "partial"
+                    ? "一部失敗ありで求職者数を取得しました。"
+                    : "求職者数を取得しました。",
+              debug_logs: debugLogs,
+            },
+            results: preview,
+            resultCount: totalCandidates,
+          });
+          historyId = saved.id;
+        } catch (err: unknown) {
+          historyError = err instanceof Error ? err.message : String(err);
+          console.error("manual candidate-only history save error", err);
+        }
+      }
+
+      debugLogs.push("#workflow: candidate-only done");
+
+      return {
+        ok: true,
+        preview,
+        note:
+          body.saveMode === "history"
+            ? historyId
+              ? `履歴に保存しました（ID: ${historyId}）`
+              : historyError
+                ? `履歴保存に失敗しました: ${historyError}`
+                : "履歴保存を試行しました。"
+            : "プレビューのみ実行しました。",
+        debugLogs,
+        history_id: historyId,
+        history_error: historyError,
+      };
+    }
 
     /** ===== 1. マイナビ：複数都道府県バッチ処理 ===== */
 
@@ -679,13 +856,25 @@ export async function POST(req: Request) {
           ].join(" / ")
         );
         for (const prefName of prefList) {
+          const candidateInfo = await fetchCandidatesForBase(
+            { ...base, prefecture: prefName },
+            candidateContext,
+            includeCandidates,
+            candidateCache,
+            candidateGranularity
+          );
+          if (candidateInfo.debugLine) {
+            debugLogs.push(`[mynavi] ${candidateInfo.debugLine}`);
+          }
           preview.push({
             site_key: base.siteKey,
             internal_large: base.internalLarge,
             internal_small: base.internalSmall,
             prefecture: prefName,
             jobs_total: null,
+            candidates_total: candidateInfo.candidatesTotal,
             error_reason: missingReason,
+            candidates_error_reason: candidateInfo.candidatesErrorReason,
           });
         }
         continue;
@@ -723,12 +912,22 @@ export async function POST(req: Request) {
       // 都道府県指定がない（全国のみ）の場合は単発で取得
       if (stringPrefs.length === 0) {
         const stats = await fetchMynaviStats(condBase);
+        const candidateInfo = await fetchCandidatesForBase(
+          base,
+          candidateContext,
+          includeCandidates,
+          candidateCache,
+          candidateGranularity
+        );
 
         debugLogs.push(
           `${baseInfoPrefix} / prefecture=（指定なし） / jobs_total=${String(
             stats.jobsTotal
           )}`
         );
+        if (candidateInfo.debugLine) {
+          debugLogs.push(`[mynavi] ${candidateInfo.debugLine}`);
+        }
         if (stats.debugInfo?.lines?.length) {
           for (const line of stats.debugInfo.lines) {
             debugLogs.push(`[mynavi] primary-detail ${line}`);
@@ -741,6 +940,8 @@ export async function POST(req: Request) {
           internal_small: base.internalSmall,
           prefecture: null,
           jobs_total: stats.jobsTotal,
+          candidates_total: candidateInfo.candidatesTotal,
+          candidates_error_reason: candidateInfo.candidatesErrorReason,
         });
 
         continue;
@@ -781,6 +982,16 @@ export async function POST(req: Request) {
             ].join(" / ")
           );
         }
+        const candidateInfo = await fetchCandidatesForBase(
+          { ...base, prefecture: prefName },
+          candidateContext,
+          includeCandidates,
+          candidateCache,
+          candidateGranularity
+        );
+        if (candidateInfo.debugLine) {
+          debugLogs.push(`[mynavi] ${candidateInfo.debugLine}`);
+        }
 
         preview.push({
           site_key: base.siteKey,
@@ -788,6 +999,8 @@ export async function POST(req: Request) {
           internal_small: base.internalSmall,
           prefecture: prefName,
           jobs_total: jobsTotal,
+          candidates_total: candidateInfo.candidatesTotal,
+          candidates_error_reason: candidateInfo.candidatesErrorReason,
         });
       }
     }
@@ -816,13 +1029,25 @@ export async function POST(req: Request) {
             `reason=${missingReason}`,
           ].join(" / ")
         );
+        const candidateInfo = await fetchCandidatesForBase(
+          base,
+          candidateContext,
+          includeCandidates,
+          candidateCache,
+          candidateGranularity
+        );
+        if (candidateInfo.debugLine) {
+          debugLogs.push(`[${base.siteKey}] ${candidateInfo.debugLine}`);
+        }
         preview.push({
           site_key: base.siteKey,
           internal_large: base.internalLarge,
           internal_small: base.internalSmall,
           prefecture: base.prefecture,
           jobs_total: null,
+          candidates_total: candidateInfo.candidatesTotal,
           error_reason: missingReason,
+          candidates_error_reason: candidateInfo.candidatesErrorReason,
         });
         continue;
       }
@@ -882,13 +1107,26 @@ export async function POST(req: Request) {
         pushDebugInfo("primary-detail", stats);
       }
 
+      const candidateInfo = await fetchCandidatesForBase(
+        base,
+        candidateContext,
+        includeCandidates,
+        candidateCache,
+        candidateGranularity
+      );
+      if (candidateInfo.debugLine) {
+        debugLogs.push(`[${base.siteKey}] ${candidateInfo.debugLine}`);
+      }
+
       preview.push({
         site_key: base.siteKey,
         internal_large: base.internalLarge,
         internal_small: base.internalSmall,
         prefecture: base.prefecture,
         jobs_total: stats.jobsTotal,
+        candidates_total: candidateInfo.candidatesTotal,
         error_reason: stats.jobsTotal == null ? "取得に失敗しました" : null,
+        candidates_error_reason: candidateInfo.candidatesErrorReason,
       });
     }
 
@@ -958,14 +1196,23 @@ export async function POST(req: Request) {
 
     debugLogs.push("#workflow: done");
 
-    return NextResponse.json({
+    return {
       ok: true,
       preview,
       note,
       debugLogs,
       history_id: historyId,
       history_error: historyError,
-    });
+    };
+}
+
+/** ========== handler ========== */
+
+export async function POST(req: Request) {
+  try {
+    const body = (await req.json()) as RequestBody;
+    const result = await runJobBoardBatch(req, body);
+    return NextResponse.json(result);
   } catch (e: unknown) {
     console.error("manual run-batch error", e);
     return NextResponse.json(

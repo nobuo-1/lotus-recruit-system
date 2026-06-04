@@ -1,5 +1,5 @@
 // web/src/server/job-boards/mynaviLogin.ts
-import { supabaseServer } from "@/lib/supabaseServer";
+import { loadJobBoardLoginCredentials } from "./loginCredentials";
 
 /**
  * マイナビ ログインセッション情報
@@ -22,28 +22,7 @@ async function loadMynaviLoginFromDb(): Promise<{
   username: string;
   password: string;
 } | null> {
-  const sb = await supabaseServer();
-
-  const { data, error } = await sb
-    .from("job_board_logins")
-    .select("username,password")
-    .eq("site_key", "mynavi")
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (error) {
-    console.error("loadMynaviLoginFromDb error", error);
-    return null;
-  }
-  if (!data?.username || !data?.password) {
-    return null;
-  }
-
-  return {
-    username: data.username,
-    password: data.password,
-  };
+  return loadJobBoardLoginCredentials("mynavi");
 }
 
 /**
@@ -154,7 +133,7 @@ export async function createMynaviLoginSession(): Promise<{
     return { session: null, debugLogs };
   }
 
-  debugLogs.push(`Cookie ヘッダ取得: ${cookieHeader}`);
+  debugLogs.push("Cookie ヘッダを取得しました。");
 
   return {
     session: {

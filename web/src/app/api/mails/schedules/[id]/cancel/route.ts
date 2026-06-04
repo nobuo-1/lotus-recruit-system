@@ -7,7 +7,7 @@ import { supabaseServer } from "@/lib/supabaseServer";
 
 export async function POST(
   _req: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const sb = await supabaseServer();
@@ -15,7 +15,7 @@ export async function POST(
     if (!u?.user)
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
-    const schedId = params.id;
+    const { id: schedId } = await params;
     // 予約取得
     const { data: sched, error: se } = await sb
       .from("mail_schedules")

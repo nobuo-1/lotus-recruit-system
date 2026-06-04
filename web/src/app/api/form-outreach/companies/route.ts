@@ -110,8 +110,31 @@ export async function GET(req: NextRequest) {
     const dateFrom = url.searchParams.get("date_from") || "";
     const dateTo = url.searchParams.get("date_to") || "";
     const matchedAddr = url.searchParams.get("matched_addr") || ""; // similar only
+    const excludeWaitlist =
+      url.searchParams.get("exclude_waitlist") === "true";
 
     const sb = await supabaseServer();
+
+    let excludedWaitlistIds: string[] = [];
+    if (excludeWaitlist) {
+      const { data: waitRows, error: waitErr } = await sb
+        .from("form_outreach_waitlist")
+        .select("prospect_id")
+        .eq("tenant_id", tenantId)
+        .eq("table_name", table)
+        .not("prospect_id", "is", null)
+        .limit(5000);
+      if (waitErr) {
+        return NextResponse.json({ error: waitErr.message }, { status: 500 });
+      }
+      excludedWaitlistIds = Array.from(
+        new Set(
+          (waitRows || [])
+            .map((row: any) => String(row.prospect_id || "").trim())
+            .filter(Boolean)
+        )
+      );
+    }
 
     /** テーブルごとに存在する列だけフィルタを当てる */
     const hasCol = (col: string) => {
@@ -174,6 +197,10 @@ export async function GET(req: NextRequest) {
     /** 同じフィルタをクエリへ適用（.or()に空を渡さない） */
     const applyFilters = (qry: any) => {
       let base = qry.eq("tenant_id", tenantId);
+
+      if (excludedWaitlistIds.length) {
+        base = base.not("id", "in", `(${excludedWaitlistIds.join(",")})`);
+      }
 
       // キーワード
       if (q) {
@@ -295,6 +322,7 @@ export async function GET(req: NextRequest) {
       table_resolved: table,
       rows: data ?? [],
       total: total ?? 0,
+      excluded_waitlist_count: excludedWaitlistIds.length,
     });
   } catch (e: any) {
     return NextResponse.json(

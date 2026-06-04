@@ -37,23 +37,41 @@ export async function GET(req: NextRequest) {
       PAGE_MAX
     );
     const offset = (page - 1) * limit;
+    const reason = (url.searchParams.get("reason") || "").trim();
+    const status = (url.searchParams.get("status") || "").trim();
+    const q = (url.searchParams.get("q") || "").trim();
 
     const sb = await supabaseServer();
 
+    const applyFilters = (query: any) => {
+      let next = query.eq("tenant_id", tenantId);
+      if (reason) next = next.eq("reason", reason);
+      if (status) next = next.eq("status", status);
+      if (q) {
+        const like = `%${q}%`;
+        next = next.or(
+          `table_name.ilike.${like},prospect_id.ilike.${like},reason.ilike.${like},last_error.ilike.${like}`
+        );
+      }
+      return next;
+    };
+
     // 件数
-    const { count: total, error: countErr } = await sb
+    let countQuery = sb
       .from("form_outreach_waitlist")
-      .select("id", { count: "exact", head: true } as any)
-      .eq("tenant_id", tenantId);
+      .select("id", { count: "exact", head: true } as any);
+    countQuery = applyFilters(countQuery);
+    const { count: total, error: countErr } = await countQuery;
     if (countErr) {
       return NextResponse.json({ error: countErr.message }, { status: 500 });
     }
 
     // データ
-    const { data, error } = await sb
+    let dataQuery = sb
       .from("form_outreach_waitlist")
-      .select("*")
-      .eq("tenant_id", tenantId)
+      .select("*");
+    dataQuery = applyFilters(dataQuery);
+    const { data, error } = await dataQuery
       .order("created_at", { ascending: false })
       .range(offset, offset + limit - 1);
 

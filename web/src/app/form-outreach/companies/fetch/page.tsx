@@ -576,7 +576,6 @@ export default function ManualFetch() {
         accent="rose"
         actions={[
           { href: "/form-outreach/companies", label: "企業一覧へ", variant: "secondary" },
-          { href: "/form-outreach/runs/manual", label: "メッセージ手動送信へ", variant: "secondary" },
         ]}
       />
 
@@ -605,10 +604,10 @@ export default function ManualFetch() {
               企業一覧へ
             </Link>
             <Link
-              href="/form-outreach/runs/manual"
+              href="/form-outreach/settings/filters"
               className="rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
             >
-              メッセージ手動送信へ
+              取得フィルタ設定へ
             </Link>
             <button
               onClick={handleRunButton}
@@ -674,16 +673,10 @@ export default function ManualFetch() {
 
       <SurfaceCard>
         <section className="rounded-2xl border border-neutral-200 p-4">
-          <div className="mb-3 flex items-center justify-between">
+          <div className="mb-3">
             <div className="text-sm font-medium text-neutral-800">
               Phase A: NTAクロール → キャッシュ保存
             </div>
-            <Link
-              href="/form-outreach/settings/filters"
-              className="rounded-lg border border-neutral-200 px-3 py-2 text-xs hover:bg-neutral-50"
-            >
-              取得フィルタ設定へ
-            </Link>
           </div>
 
           <div className="grid grid-cols-1 gap-3 md:grid-cols-3 lg:grid-cols-5">

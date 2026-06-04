@@ -9,11 +9,17 @@ export type FormSenderContext = {
   message: string; // 問い合わせ本文（テンプレートから作られた最終テキスト）
   sender: {
     company?: string | null;
+    company_kana?: string | null;
+    department?: string | null;
+    position?: string | null;
     postal_code?: string | null;
     prefecture?: string | null;
     address?: string | null;
     last_name?: string | null;
     first_name?: string | null;
+    name_kana?: string | null;
+    last_name_kana?: string | null;
+    first_name_kana?: string | null;
     email?: string | null;
     phone?: string | null;
     website?: string | null;
@@ -315,12 +321,19 @@ async function collectFilledStatsForForm(formRoot: Locator): Promise<{
 function guessFieldKind(
   name: string | null,
   placeholder: string | null,
-  type: string | null
+  type: string | null,
+  label: string | null = null
 ):
   | "company"
+  | "companyKana"
+  | "department"
+  | "position"
   | "fullName"
+  | "fullNameKana"
   | "lastName"
   | "firstName"
+  | "lastNameKana"
+  | "firstNameKana"
   | "email"
   | "phone"
   | "postal"
@@ -332,14 +345,21 @@ function guessFieldKind(
   const n = (name || "").toLowerCase();
   const p = (placeholder || "").toLowerCase();
   const t = (type || "").toLowerCase();
-  const text = n + " " + p;
+  const l = (label || "").toLowerCase();
+  const text = `${n} ${p} ${l}`;
 
   if (t === "email" || /mail|e-?mail/.test(text)) return "email";
   if (t === "tel" || /tel|phone|電話/.test(text)) return "phone";
   if (/zip|postal|郵便/.test(text)) return "postal";
   if (/pref|都道府県/.test(text)) return "prefecture";
   if (/住所|address/.test(text)) return "address";
+  if (/部署|department|section|division/.test(text)) return "department";
+  if (/役職|position|title/.test(text)) return "position";
+  if (/会社.*(ふりがな|フリガナ|かな|カナ|kana)|corporate.*kana|company.*kana/.test(text)) return "companyKana";
   if (/会社|corporate|corp|company/.test(text)) return "company";
+  if (/姓.*(ふりがな|フリガナ|かな|カナ|kana)|last.*kana/.test(text)) return "lastNameKana";
+  if (/名.*(ふりがな|フリガナ|かな|カナ|kana)|first.*kana/.test(text)) return "firstNameKana";
+  if (/(お名前|氏名|name).*(ふりがな|フリガナ|かな|カナ|kana)|kana/.test(text)) return "fullNameKana";
   if (/姓|last/.test(text)) return "lastName";
   if (/名|first/.test(text)) return "firstName";
   if (/お名前|氏名|name/.test(text)) return "fullName";
@@ -349,11 +369,63 @@ function guessFieldKind(
   return "other";
 }
 
+async function getControlLabel(el: Locator): Promise<string> {
+  return el
+    .evaluate((node: Element) => {
+      const parts: string[] = [];
+      const id = node.getAttribute("id");
+      const name = node.getAttribute("name");
+      const aria = node.getAttribute("aria-label");
+      const title = node.getAttribute("title");
+      if (id) parts.push(id);
+      if (name) parts.push(name);
+      if (aria) parts.push(aria);
+      if (title) parts.push(title);
+
+      if (id) {
+        const explicit = node.ownerDocument.querySelector(`label[for="${CSS.escape(id)}"]`);
+        if (explicit?.textContent) parts.push(explicit.textContent);
+      }
+
+      const wrapped = node.closest("label");
+      if (wrapped?.textContent) parts.push(wrapped.textContent);
+
+      const parent = node.parentElement;
+      if (parent?.textContent && parent.textContent.length < 160) {
+        parts.push(parent.textContent);
+      }
+
+      return parts.join(" ").replace(/\s+/g, " ").trim();
+    })
+    .catch(() => "");
+}
+
+function isTextLikeInput(type: string) {
+  return (
+    !type ||
+    [
+      "text",
+      "email",
+      "tel",
+      "url",
+      "search",
+      "number",
+      "password",
+    ].includes(type)
+  );
+}
+
 type AutoFillProfile = {
   company: string;
+  companyKana: string;
+  department: string;
+  position: string;
   fullName: string;
+  fullNameKana: string;
   lastName: string;
   firstName: string;
+  lastNameKana: string;
+  firstNameKana: string;
   email: string;
   phone: string;
   postal: string;
@@ -378,11 +450,11 @@ async function autoFillForm(
     if (!count) continue;
 
     const first = locator.first();
-    const tagName = await first.evaluate((node: any) =>
+    const tagName = await first.evaluate((node: Element) =>
       String(node.tagName || "").toLowerCase()
     );
     const typeAttr = await first.evaluate(
-      (node: any) => node.getAttribute && node.getAttribute("type")
+      (node: Element) => node.getAttribute("type")
     );
     const type = String(typeAttr || "").toLowerCase();
 
@@ -416,20 +488,29 @@ async function autoFillForm(
   for (let i = 0; i < total; i++) {
     const el = controls.nth(i);
     const tag = (
-      await el.evaluate((node: any) => String(node.tagName || "").toLowerCase())
+      await el.evaluate((node: Element) =>
+        String(node.tagName || "").toLowerCase()
+      )
     ).toLowerCase();
 
     const nameAttr = await el.getAttribute("name").catch(() => null);
     const typeAttr = await el.getAttribute("type").catch(() => null);
+    const required = await el.evaluate((node: Element) => {
+      if (node instanceof HTMLInputElement) return node.required;
+      if (node instanceof HTMLTextAreaElement) return node.required;
+      if (node instanceof HTMLSelectElement) return node.required;
+      return false;
+    }).catch(() => false);
     const placeholderAttr = await el
       .getAttribute("placeholder")
       .catch(() => null);
+    const labelText = await getControlLabel(el);
 
     const type = (typeAttr || "").toLowerCase();
 
     // すでに値が入っていればスキップ
     try {
-      const isFilled = await el.evaluate((node: any) => {
+      const isFilled = await el.evaluate((node: Element) => {
         const tagName = (node.tagName || "").toLowerCase();
         if (tagName === "textarea") {
           return !!(node as HTMLTextAreaElement).value;
@@ -452,7 +533,8 @@ async function autoFillForm(
 
     if (tag === "select") {
       try {
-        const options = (await el.evaluate((node: any) => {
+        const kind = guessFieldKind(nameAttr, placeholderAttr, typeAttr, labelText);
+        const options = (await el.evaluate((node: Element) => {
           const sel = node as HTMLSelectElement;
           return Array.from(sel.options).map((o) => ({
             value: o.value,
@@ -460,11 +542,14 @@ async function autoFillForm(
           }));
         })) as { value: string; label: string }[];
 
-        let targetValue = "";
-        if (options.length > 1 && options[0].value === "") {
-          targetValue = options[1].value;
-        } else if (options.length > 0) {
-          targetValue = options[0].value;
+        const normalizedPref = profile.prefecture.replace(/[都道府県]$/, "");
+        const matchedPref = kind === "prefecture"
+          ? options.find((option) => option.label.includes(profile.prefecture) || option.label.includes(normalizedPref))
+          : null;
+        let targetValue = matchedPref?.value || "";
+        if (!targetValue && required) {
+          const option = options.find((item) => item.value && !/選択|choose|select/i.test(item.label));
+          targetValue = option?.value || "";
         }
         if (targetValue) {
           await el.selectOption({ value: targetValue }).catch(() => {});
@@ -475,22 +560,40 @@ async function autoFillForm(
       continue;
     }
 
-    if (tag === "textarea" || (tag === "input" && type === "text")) {
-      const kind = guessFieldKind(nameAttr, placeholderAttr, typeAttr);
+    if (tag === "textarea" || (tag === "input" && isTextLikeInput(type))) {
+      const kind = guessFieldKind(nameAttr, placeholderAttr, typeAttr, labelText);
       let value = "";
 
       switch (kind) {
         case "company":
           value = profile.company;
           break;
+        case "companyKana":
+          value = profile.companyKana;
+          break;
+        case "department":
+          value = profile.department;
+          break;
+        case "position":
+          value = profile.position;
+          break;
         case "fullName":
           value = profile.fullName;
+          break;
+        case "fullNameKana":
+          value = profile.fullNameKana;
           break;
         case "lastName":
           value = profile.lastName || profile.fullName;
           break;
         case "firstName":
           value = profile.firstName || profile.fullName;
+          break;
+        case "lastNameKana":
+          value = profile.lastNameKana || profile.fullNameKana;
+          break;
+        case "firstNameKana":
+          value = profile.firstNameKana || profile.fullNameKana;
           break;
         case "email":
           value = profile.email;
@@ -515,16 +618,18 @@ async function autoFillForm(
           break;
         case "other":
         default:
-          value = profile.company || profile.fullName || "お問い合わせ";
+          if (tag === "textarea") value = profile.message;
+          else if (required) value = profile.company || profile.fullName;
+          else value = "";
           break;
       }
 
-      await el.fill(value).catch(() => {});
+      if (value) await el.fill(value).catch(() => {});
       continue;
     }
 
     if (tag === "input" && (type === "email" || type === "tel")) {
-      const kind = guessFieldKind(nameAttr, placeholderAttr, typeAttr);
+      const kind = guessFieldKind(nameAttr, placeholderAttr, typeAttr, labelText);
       const value =
         kind === "phone"
           ? profile.phone
@@ -645,7 +750,8 @@ async function clickConfirmAndSubmitButtons(
 export async function submitFormPlan(
   targetUrl: string,
   plan: FormPlan | null,
-  _cookieHeader?: string
+  _cookieHeader?: string,
+  profileOverride?: Partial<AutoFillProfile>
 ): Promise<{
   ok: boolean;
   status: number;
@@ -653,8 +759,7 @@ export async function submitFormPlan(
   html: string;
   debug: FormSubmitDebug;
 }> {
-  const pw = await import("playwright");
-  const chromium = (pw as any).chromium as typeof import("playwright").chromium;
+  const { chromium } = await import("playwright");
 
   const browser = await chromium.launch({ headless: true });
 
@@ -682,9 +787,15 @@ export async function submitFormPlan(
 
   const profile: AutoFillProfile = {
     company: "株式会社LOTUS",
+    companyKana: "",
+    department: "",
+    position: "",
     fullName: "山田 太郎",
+    fullNameKana: "",
     lastName: "山田",
     firstName: "太郎",
+    lastNameKana: "",
+    firstNameKana: "",
     email: "info@example.com",
     phone: "090-1234-5678",
     postal: "123-4567",
@@ -692,6 +803,7 @@ export async function submitFormPlan(
     address: "大阪市北区◯◯1-2-3",
     subject: "お問い合わせの件",
     message: "お問い合わせさせていただきます。こちらは自動送信テストです。",
+    ...profileOverride,
   };
 
   try {
@@ -815,8 +927,7 @@ export async function submitFormPlan(
 export async function collectFormDebugOnly(
   targetUrl: string
 ): Promise<FormSubmitDebug> {
-  const pw = await import("playwright");
-  const chromium = (pw as any).chromium as typeof import("playwright").chromium;
+  const { chromium } = await import("playwright");
 
   const browser = await chromium.launch({ headless: true });
 

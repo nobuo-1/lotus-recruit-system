@@ -18,5 +18,7 @@ export type ManualResultRow = {
   internal_small: string | null;
   prefecture: string | null;
   jobs_total: number | null;
+  candidates_total?: number | null;
   error_reason?: string | null;
+  candidates_error_reason?: string | null;
 };

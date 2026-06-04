@@ -110,9 +110,9 @@ function deriveStatus(schedules: ScheduleRow[], deliveries: DeliveryRow[]) {
 export default async function MailDetailPage({
   params,
 }: {
-  params: { id: string };
+  params: Promise<{ id: string }>;
 }) {
-  const { id } = params;
+  const { id } = await params;
   const supabase = await supabaseServer();
 
   const { data: u } = await supabase.auth.getUser();

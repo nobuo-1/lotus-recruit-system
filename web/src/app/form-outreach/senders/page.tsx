@@ -6,9 +6,14 @@ import { PageHero, PageMain, SectionTitle, SurfaceCard } from "@/components/Page
 
 type Sender = {
   id?: string;
+  sender_type?: "corporate" | "individual";
   sender_company?: string | null; // 会社名（{{sender_company}})
+  sender_company_kana?: string | null;
+  sender_department?: string | null;
+  sender_position?: string | null;
   from_header_name?: string | null; // From: に表示する名前
   from_name: string; // 担当者名など（{{sender_name}})
+  sender_name_kana?: string | null;
   from_email: string;
   reply_to?: string | null;
   phone?: string | null;
@@ -22,12 +27,19 @@ type Sender = {
   sender_address?: string | null;
   sender_last_name?: string | null;
   sender_first_name?: string | null;
+  sender_last_name_kana?: string | null;
+  sender_first_name_kana?: string | null;
 };
 
 const defaultSender: Sender = {
+  sender_type: "corporate",
   sender_company: "",
+  sender_company_kana: "",
+  sender_department: "",
+  sender_position: "",
   from_header_name: "",
   from_name: "",
+  sender_name_kana: "",
   from_email: "",
   reply_to: "",
   phone: "",
@@ -39,6 +51,8 @@ const defaultSender: Sender = {
   sender_address: "",
   sender_last_name: "",
   sender_first_name: "",
+  sender_last_name_kana: "",
+  sender_first_name_kana: "",
 };
 
 export default function SenderSettings() {
@@ -51,6 +65,9 @@ export default function SenderSettings() {
     });
     const j = await res.json();
     if (!res.ok) return setMsg(j?.error || "fetch failed");
+    if (j?.needs_migration) {
+      setMsg("DBカラム追加が未適用のため、新しい送信元項目はまだ保存できません。");
+    }
     setS(j.row ?? defaultSender);
   };
 
@@ -66,6 +83,11 @@ export default function SenderSettings() {
     });
     const j = await res.json();
     if (!res.ok) return setMsg(j?.error || "save failed");
+    if (j?.needs_migration) {
+      return setMsg(
+        "基本項目は保存しました。新しい送信元項目を保存するにはDBマイグレーションを適用してください。"
+      );
+    }
     setMsg("保存しました");
   };
 
@@ -102,15 +124,88 @@ export default function SenderSettings() {
                 メール送信時に使う項目
               </div>
               <div className="space-y-3">
-                <Field label="会社名（{{sender_company}} 用）">
-                  <input
-                    className="w-full rounded-2xl border border-neutral-200 bg-white px-3 py-2.5 text-sm"
-                    value={s.sender_company ?? ""}
-                    onChange={(e) =>
-                      setS({ ...s, sender_company: e.target.value || "" })
-                    }
-                  />
+                <Field label="送信者区分">
+                  <div className="inline-flex rounded-2xl border border-neutral-200 bg-white p-1">
+                    {[
+                      ["corporate", "法人"],
+                      ["individual", "個人"],
+                    ].map(([value, label]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() =>
+                          setS({
+                            ...s,
+                            sender_type: value as Sender["sender_type"],
+                          })
+                        }
+                        className={`rounded-xl px-4 py-2 text-sm ${
+                          s.sender_type === value
+                            ? "bg-neutral-950 text-white"
+                            : "text-neutral-600 hover:bg-neutral-50"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
                 </Field>
+
+                {s.sender_type !== "individual" && (
+                  <>
+                    <Field label="法人名（{{sender_company}} 用）">
+                      <input
+                        className="w-full rounded-2xl border border-neutral-200 bg-white px-3 py-2.5 text-sm"
+                        value={s.sender_company ?? ""}
+                        onChange={(e) =>
+                          setS({ ...s, sender_company: e.target.value || "" })
+                        }
+                      />
+                    </Field>
+
+                    <Field label="法人名ふりがな（{{sender_company_kana}} 用）">
+                      <input
+                        className="w-full rounded-2xl border border-neutral-200 bg-white px-3 py-2.5 text-sm"
+                        value={s.sender_company_kana ?? ""}
+                        onChange={(e) =>
+                          setS({
+                            ...s,
+                            sender_company_kana: e.target.value || "",
+                          })
+                        }
+                      />
+                    </Field>
+
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                      <Field label="部署名（{{sender_department}} 用）">
+                        <input
+                          className="w-full rounded-2xl border border-neutral-200 bg-white px-3 py-2.5 text-sm"
+                          placeholder="例）営業部"
+                          value={s.sender_department ?? ""}
+                          onChange={(e) =>
+                            setS({
+                              ...s,
+                              sender_department: e.target.value || "",
+                            })
+                          }
+                        />
+                      </Field>
+                      <Field label="役職（{{sender_position}} 用）">
+                        <input
+                          className="w-full rounded-2xl border border-neutral-200 bg-white px-3 py-2.5 text-sm"
+                          placeholder="例）マネージャー"
+                          value={s.sender_position ?? ""}
+                          onChange={(e) =>
+                            setS({
+                              ...s,
+                              sender_position: e.target.value || "",
+                            })
+                          }
+                        />
+                      </Field>
+                    </div>
+                  </>
+                )}
 
                 <Field label="From 表示名（メールの差出人に表示）">
                   <input
@@ -132,6 +227,16 @@ export default function SenderSettings() {
                     className="w-full rounded-2xl border border-neutral-200 bg-white px-3 py-2.5 text-sm"
                     value={s.from_name ?? ""}
                     onChange={(e) => setS({ ...s, from_name: e.target.value })}
+                  />
+                </Field>
+
+                <Field label="送信者名ふりがな（{{sender_name_kana}} 用）">
+                  <input
+                    className="w-full rounded-2xl border border-neutral-200 bg-white px-3 py-2.5 text-sm"
+                    value={s.sender_name_kana ?? ""}
+                    onChange={(e) =>
+                      setS({ ...s, sender_name_kana: e.target.value })
+                    }
                   />
                 </Field>
 
@@ -235,6 +340,27 @@ export default function SenderSettings() {
                     />
                   </Field>
                 </div>
+
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <Field label="姓ふりがな（フォーム用）">
+                    <input
+                      className="w-full rounded-2xl border border-neutral-200 bg-white px-3 py-2.5 text-sm"
+                      value={s.sender_last_name_kana ?? ""}
+                      onChange={(e) =>
+                        setS({ ...s, sender_last_name_kana: e.target.value })
+                      }
+                    />
+                  </Field>
+                  <Field label="名ふりがな（フォーム用）">
+                    <input
+                      className="w-full rounded-2xl border border-neutral-200 bg-white px-3 py-2.5 text-sm"
+                      value={s.sender_first_name_kana ?? ""}
+                      onChange={(e) =>
+                        setS({ ...s, sender_first_name_kana: e.target.value })
+                      }
+                    />
+                  </Field>
+                </div>
               </div>
             </div>
           </div>
@@ -245,7 +371,7 @@ export default function SenderSettings() {
             </div>
             <div className="mt-3 space-y-3 text-sm leading-6 text-neutral-600">
               <p>メール送信時の差出人表示、返信先、署名に使われます。</p>
-              <p>フォーム営業では住所、姓・名、電話番号などの自動入力にも使われます。</p>
+              <p>フォーム営業では法人/個人、法人名、ふりがな、部署名、役職、住所、姓・名、電話番号などの自動入力にも使われます。</p>
               <p>テンプレートの差し込み変数と整合するよう、保存前に不足項目を確認してください。</p>
             </div>
           </div>

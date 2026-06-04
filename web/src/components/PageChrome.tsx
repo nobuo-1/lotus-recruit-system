@@ -76,7 +76,7 @@ export function PageHero({
           <div className="flex flex-wrap gap-3">
             {actions.map((action) => (
               <Link
-                key={action.href}
+                key={`${action.href}:${action.label}`}
                 href={action.href}
                 className={clsx(
                   "inline-flex items-center gap-2 rounded-2xl px-4 py-3 text-sm font-medium transition",
@@ -164,7 +164,7 @@ export function ActionGrid({
         const Icon = item.icon;
         return (
           <Link
-            key={item.href}
+            key={`${item.href}:${item.title}`}
             href={item.href}
             className="group rounded-[24px] border border-neutral-200 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(247,249,252,0.95))] p-5 transition hover:-translate-y-0.5 hover:border-neutral-300 hover:shadow-[0_16px_38px_rgba(15,23,42,0.08)]"
           >

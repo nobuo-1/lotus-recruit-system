@@ -55,6 +55,9 @@ export default function WaitlistPage() {
   const [page, setPage] = useState(1);
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(false);
+  const [q, setQ] = useState("");
+  const [reasonFilter, setReasonFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const allChecked = rows.length > 0 && rows.every((r) => selected.has(r.id));
@@ -73,6 +76,9 @@ export default function WaitlistPage() {
       const qs = new URLSearchParams();
       qs.set("limit", String(PAGE_SIZE));
       qs.set("page", String(page));
+      if (q.trim()) qs.set("q", q.trim());
+      if (reasonFilter) qs.set("reason", reasonFilter);
+      if (statusFilter) qs.set("status", statusFilter);
       const r = await fetch(`/api/form-outreach/waitlist?${qs.toString()}`, {
         headers: { "x-tenant-id": tenantId },
         cache: "no-store",
@@ -154,15 +160,37 @@ export default function WaitlistPage() {
     }
   };
 
+  const applyFilters = () => {
+    setPage(1);
+    load();
+  };
+
+  const reasonLabel = (reason: string | null | undefined) => {
+    if (reason === "recaptcha") return "手動入力が必要";
+    if (reason === "queue_form") return "自動判定不可";
+    if (reason === "no_form") return "フォームURLなし";
+    if (reason === "no_email") return "メールなし";
+    return reason || "-";
+  };
+
+  const actionLabel = (reason: string | null | undefined) => {
+    if (reason === "recaptcha") return "フォームを開いて手動送信";
+    if (reason === "queue_form") return "内容確認後に再試行または手動送信";
+    if (reason === "no_form") return "企業URLからフォームを確認";
+    if (reason === "no_email") return "メールアドレス確認";
+    return "確認";
+  };
+
   return (
     <PageMain className="space-y-6">
       <PageHero
         eyebrow="Waitlist"
-        title="待機リスト"
-        description="フォーム送信待ち、reCAPTCHA 検知、再試行待ちのデータをまとめています。再試行や削除をこの一覧から直接行えます。"
+        title="手動対応リスト"
+        description="reCAPTCHA などの自動送信バリア、送信判定が不明なフォーム、フォームURL不足の対象を仕分けして確認できます。"
         accent="rose"
         actions={[
-          { href: "/form-outreach/runs/manual", label: "手動送信へ戻る", variant: "secondary" },
+          { href: "/form-outreach/form-send", label: "フォーム一斉送信", variant: "secondary" },
+          { href: "/form-outreach/companies/fetch", label: "企業リスト手動取得へ", variant: "secondary" },
         ]}
       />
 
@@ -174,6 +202,39 @@ export default function WaitlistPage() {
       </div>
 
       <SurfaceCard className="flex flex-wrap items-center gap-2">
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="会社名 / ID / エラー"
+          className="w-56 rounded-2xl border border-neutral-200 px-3 py-2 text-sm"
+        />
+        <select
+          value={reasonFilter}
+          onChange={(e) => setReasonFilter(e.target.value)}
+          className="rounded-2xl border border-neutral-200 px-3 py-2 text-sm"
+        >
+          <option value="">理由すべて</option>
+          <option value="recaptcha">手動入力が必要</option>
+          <option value="queue_form">自動判定不可</option>
+          <option value="no_form">フォームURLなし</option>
+          <option value="no_email">メールなし</option>
+        </select>
+        <select
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value)}
+          className="rounded-2xl border border-neutral-200 px-3 py-2 text-sm"
+        >
+          <option value="">状態すべて</option>
+          <option value="waiting">waiting</option>
+          <option value="failed">failed</option>
+          <option value="done">done</option>
+        </select>
+        <button
+          onClick={applyFilters}
+          className="rounded-2xl border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50"
+        >
+          絞り込み
+        </button>
         <button
           onClick={retrySelected}
           disabled={selected.size === 0}
@@ -214,6 +275,7 @@ export default function WaitlistPage() {
                   <th className="px-3 py-3 text-left">会社名</th>
                   <th className="px-3 py-3 text-left">フォームURL</th>
                   <th className="px-3 py-3 text-left">理由</th>
+                  <th className="px-3 py-3 text-left">対応方針</th>
                   <th className="px-3 py-3 text-left">状態</th>
                   <th className="px-3 py-3 text-left">試行/エラー</th>
                 </tr>
@@ -261,7 +323,24 @@ export default function WaitlistPage() {
                           "-"
                         )}
                       </td>
-                      <td className="px-3 py-2">{w.reason || "-"}</td>
+                      <td className="px-3 py-2">{reasonLabel(w.reason)}</td>
+                      <td className="px-3 py-2">
+                        <div className="text-xs text-neutral-700">
+                          {actionLabel(w.reason)}
+                          {formUrl && formUrl !== "-" && (
+                            <>
+                              <br />
+                              <a
+                                href={formUrl}
+                                target="_blank"
+                                className="text-indigo-700 hover:underline"
+                              >
+                                フォームを開く
+                              </a>
+                            </>
+                          )}
+                        </div>
+                      </td>
                       <td className="px-3 py-2">{st}</td>
                       <td className="px-3 py-2">
                         <div className="text-xs">
@@ -280,7 +359,7 @@ export default function WaitlistPage() {
                 {rows.length === 0 && (
                   <tr>
                     <td
-                      colSpan={9}
+                      colSpan={10}
                       className="px-4 py-10 text-center text-neutral-400"
                     >
                       待機中のデータはありません

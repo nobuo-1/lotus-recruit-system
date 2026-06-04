@@ -1,7 +1,7 @@
 // web/src/app/form-outreach/automation/page.tsx
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { DataTableCard, PageHero, PageMain, StatChip, SurfaceCard } from "@/components/PageChrome";
 
 type Settings = {
@@ -116,6 +116,7 @@ export default function AutomationPage() {
   // 自動実行の進捗
   const [progress, setProgress] = useState<AutomationProgress | null>(null);
   const [progressLoading, setProgressLoading] = useState(false);
+  const [runNowLoading, setRunNowLoading] = useState(false);
 
   // ▼ テナントID取得
   useEffect(() => {
@@ -166,8 +167,13 @@ export default function AutomationPage() {
             (j as any)?.updated_at ||
             s.updated_at ||
             null;
-          setSettings((prev) => ({ ...prev, ...s, updated_at: updated }));
-          setDraft((prev) => ({ ...prev, ...s, updated_at: updated }));
+          const next = {
+            ...s,
+            auto_send_messages: false,
+            updated_at: updated,
+          };
+          setSettings((prev) => ({ ...prev, ...next }));
+          setDraft((prev) => ({ ...prev, ...next }));
         }
 
         const rc = await fetch("/api/form-outreach/conflicts", {
@@ -188,82 +194,94 @@ export default function AutomationPage() {
     load();
   }, [tenantId]);
 
+  const refreshProgress = useCallback(async () => {
+    if (!tenantId) return;
+    try {
+      setProgressLoading(true);
+      const res = await fetch("/api/form-outreach/automation/progress", {
+        headers: { "x-tenant-id": tenantId },
+        cache: "no-store",
+      });
+
+      if (!res.ok) {
+        setProgress(null);
+        return;
+      }
+
+      const j = await res.json().catch(() => ({}));
+      const p = (j?.progress ?? j) as Partial<AutomationProgress>;
+
+      setProgress((prev) => ({
+        status: p.status ?? prev?.status ?? "idle",
+        label: p.label ?? prev?.label ?? null,
+        last_run_started_at:
+          p.last_run_started_at ?? prev?.last_run_started_at ?? null,
+        last_run_finished_at:
+          p.last_run_finished_at ?? prev?.last_run_finished_at ?? null,
+        today_target_count:
+          p.today_target_count ?? prev?.today_target_count ?? null,
+        today_processed_count:
+          p.today_processed_count ?? prev?.today_processed_count ?? null,
+        today_new_prospects:
+          p.today_new_prospects ?? prev?.today_new_prospects ?? null,
+        today_new_rejected:
+          p.today_new_rejected ?? prev?.today_new_rejected ?? null,
+        today_new_similar_sites:
+          p.today_new_similar_sites ?? prev?.today_new_similar_sites ?? null,
+        queue_size: p.queue_size ?? prev?.queue_size ?? null,
+        error_message: p.error_message ?? prev?.error_message ?? null,
+      }));
+    } catch (e) {
+      console.error("Failed to load automation progress:", e);
+    } finally {
+      setProgressLoading(false);
+    }
+  }, [tenantId]);
+
   // ▼ 自動実行の進捗ロード & ポーリング
   useEffect(() => {
     if (!tenantId) return;
-
-    const fetchProgress = async () => {
-      try {
-        setProgressLoading(true);
-
-        // ★ 1) まずサーバー側の自動実行トリガーを叩く
-        //    - run-company-list 側で「週次 / 月次」「取得件数上限」「filters」を判定してくれる
-        //    - 条件を満たさないときは skipped:true で軽く返るだけ
-        try {
-          await fetch("/api/form-outreach/automation/run-company-list", {
-            method: "POST",
-            headers: {
-              "x-tenant-id": tenantId,
-              "content-type": "application/json",
-            },
-            body: JSON.stringify({ triggered_by: "progress" }),
-          });
-        } catch (e) {
-          console.error("auto run trigger failed:", e);
-        }
-
-        // ★ 2) その後で最新の進捗を取得
-        const res = await fetch("/api/form-outreach/automation/progress", {
-          headers: { "x-tenant-id": tenantId },
-          cache: "no-store",
-        });
-
-        if (!res.ok) {
-          // 404などの場合は進捗表示を非表示にするだけ
-          setProgress(null);
-          return;
-        }
-
-        const j = await res.json().catch(() => ({}));
-        const p = (j?.progress ?? j) as Partial<AutomationProgress>;
-
-        setProgress((prev) => ({
-          status: p.status ?? prev?.status ?? "idle",
-          label: p.label ?? prev?.label ?? null,
-          last_run_started_at:
-            p.last_run_started_at ?? prev?.last_run_started_at ?? null,
-          last_run_finished_at:
-            p.last_run_finished_at ?? prev?.last_run_finished_at ?? null,
-          today_target_count:
-            p.today_target_count ?? prev?.today_target_count ?? null,
-          today_processed_count:
-            p.today_processed_count ?? prev?.today_processed_count ?? null,
-
-          // ▼ 追加: 正規 / 不備 / 近似サイト
-          today_new_prospects:
-            p.today_new_prospects ?? prev?.today_new_prospects ?? null,
-          today_new_rejected:
-            p.today_new_rejected ?? prev?.today_new_rejected ?? null,
-          today_new_similar_sites:
-            p.today_new_similar_sites ?? prev?.today_new_similar_sites ?? null,
-
-          queue_size: p.queue_size ?? prev?.queue_size ?? null,
-          error_message: p.error_message ?? prev?.error_message ?? null,
-        }));
-      } catch (e) {
-        console.error("Failed to load automation progress:", e);
-      } finally {
-        setProgressLoading(false);
-      }
-    };
-
-    fetchProgress();
-    const timer = setInterval(fetchProgress, 10_000); // 10秒ごとに更新
+    refreshProgress();
+    const timer = setInterval(refreshProgress, 10_000);
 
     return () => {
       clearInterval(timer);
     };
-  }, [tenantId]);
+  }, [tenantId, refreshProgress]);
+
+  const runNow = async () => {
+    if (runNowLoading) return;
+    if (!tenantId) {
+      setMsg(
+        "テナントIDが取得できませんでした。ログイン状態や x-tenant-id クッキーを確認してください。"
+      );
+      return;
+    }
+    setRunNowLoading(true);
+    setMsg("");
+    try {
+      const res = await fetch("/api/form-outreach/automation/run-company-list", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-tenant-id": tenantId,
+        },
+        body: JSON.stringify({ triggered_by: "manual", force: true }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.error || "run failed");
+      if (json?.skipped) {
+        setMsg(`自動実行は開始されませんでした: ${json.reason || "-"}`);
+      } else {
+        setMsg(`自動実行を実行しました（run_id: ${json.run_id || "-"}）`);
+      }
+      await refreshProgress();
+    } catch (e: any) {
+      setMsg(String(e?.message || e));
+    } finally {
+      setRunNowLoading(false);
+    }
+  };
 
   const openModal = () => {
     setDraft(settings); // 現在設定を引き継ぐ
@@ -288,7 +306,9 @@ export default function AutomationPage() {
           "content-type": "application/json",
           "x-tenant-id": tenantId,
         },
-        body: JSON.stringify({ settings: draft }),
+        body: JSON.stringify({
+          settings: { ...draft, auto_send_messages: false },
+        }),
       });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error((j as any)?.error || "save failed");
@@ -299,7 +319,7 @@ export default function AutomationPage() {
         new Date().toISOString();
 
       // 画面の現在設定を更新（即時反映）
-      setSettings({ ...draft, updated_at: updated });
+      setSettings({ ...draft, auto_send_messages: false, updated_at: updated });
       setMsg(`更新しました（${formatTsJST(updated)}）`);
 
       // モーダルを自動で閉じる
@@ -325,20 +345,6 @@ export default function AutomationPage() {
     } else {
       chips.push("法人リスト: 自動化しない");
     }
-    if (settings.auto_send_messages) {
-      chips.push(
-        `送信: 自動（優先=${
-          settings.dual_channel_priority === "form" ? "フォーム" : "メール"
-        }）`
-      );
-      chips.push(
-        settings.confirm_by_email
-          ? `承認: メール確認（${settings.confirm_email_address || "-"}）`
-          : "承認: なし（即時実行）"
-      );
-    } else {
-      chips.push("送信: 自動化しない");
-    }
     return chips;
   }, [settings]);
 
@@ -353,20 +359,6 @@ export default function AutomationPage() {
       parts.push(`件数=${settings.company_limit ?? "-"}`);
     } else {
       parts.push("法人リスト=自動化なし");
-    }
-    if (settings.auto_send_messages) {
-      parts.push(
-        `送信=自動(優先=${
-          settings.dual_channel_priority === "form" ? "フォーム" : "メール"
-        })`
-      );
-      parts.push(
-        settings.confirm_by_email
-          ? `承認=メール(${settings.confirm_email_address || "-"})`
-          : "承認=なし"
-      );
-    } else {
-      parts.push("送信=自動化なし");
     }
     return parts.join(" / ");
   }, [settings]);
@@ -406,14 +398,13 @@ export default function AutomationPage() {
       <PageHero
         eyebrow="Automation"
         title="自動実行設定"
-        description="法人リスト作成とメッセージ送信の自動化ルールをまとめて管理します。進捗、承認方法、スケジュール、件数上限まで同じトーンで確認できます。"
+        description="フォーム情報取得の自動実行ルールを管理します。スケジュール、件数上限、進捗、実行結果を同じ画面で確認できます。"
         accent="rose"
       />
 
-      <div className="grid gap-3 md:grid-cols-4">
+      <div className="grid gap-3 md:grid-cols-3">
         <StatChip label="最終更新" value={formatTsJST(settings.updated_at)} />
-        <StatChip label="法人リスト" value={settings.auto_company_list ? "自動化オン" : "停止中"} />
-        <StatChip label="送信" value={settings.auto_send_messages ? "自動化オン" : "停止中"} />
+        <StatChip label="フォーム情報取得" value={settings.auto_company_list ? "自動化オン" : "停止中"} />
         <StatChip label="進捗" value={statusLabel.replace("状態: ", "")} />
       </div>
 
@@ -453,9 +444,8 @@ export default function AutomationPage() {
               {summaryInline}
             </div>
 
-            <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+            <div className="mt-3 grid grid-cols-1 gap-3">
               <BlockA settings={settings} />
-              <BlockB settings={settings} />
             </div>
           </div>
       </SurfaceCard>
@@ -471,9 +461,18 @@ export default function AutomationPage() {
                   週次・月次の設定に応じた「現在の期間」での自動処理の状況を表示します。
                 </p>
               </div>
-              {progressLoading && (
-                <span className="text-[11px] text-neutral-400">更新中…</span>
-              )}
+              <div className="flex items-center gap-2">
+                {progressLoading && (
+                  <span className="text-[11px] text-neutral-400">更新中…</span>
+                )}
+                <button
+                  onClick={runNow}
+                  disabled={runNowLoading || !settings.auto_company_list}
+                  className="rounded-2xl border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50 disabled:opacity-50"
+                >
+                  {runNowLoading ? "実行中…" : "今すぐ実行"}
+                </button>
+              </div>
             </div>
 
             {progress ? (
@@ -790,106 +789,6 @@ export default function AutomationPage() {
                 )}
               </div>
 
-              <hr className="my-4 border-neutral-200" />
-
-              {/* メッセージ送信自動化 */}
-              <div className="mb-2">
-                <label className="flex items-center gap-2 text-sm text-neutral-800">
-                  <input
-                    type="checkbox"
-                    checked={draft.auto_send_messages}
-                    onChange={(e) =>
-                      setDraft((s) => ({
-                        ...s,
-                        auto_send_messages: e.target.checked,
-                      }))
-                    }
-                  />
-                  メッセージの送信を自動で行う
-                </label>
-
-                {draft.auto_send_messages && (
-                  <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
-                    <div>
-                      <div className="mb-1 text-xs text-neutral-600">
-                        優先チャンネル
-                      </div>
-                      <div className="flex items-center gap-4 text-sm">
-                        <label className="flex items-center gap-1">
-                          <input
-                            type="radio"
-                            name="prio"
-                            checked={draft.dual_channel_priority === "form"}
-                            onChange={() =>
-                              setDraft((s) => ({
-                                ...s,
-                                dual_channel_priority: "form",
-                              }))
-                            }
-                          />
-                          フォーム
-                        </label>
-                        <label className="flex items-center gap-1">
-                          <input
-                            type="radio"
-                            name="prio"
-                            checked={draft.dual_channel_priority === "email"}
-                            onChange={() =>
-                              setDraft((s) => ({
-                                ...s,
-                                dual_channel_priority: "email",
-                              }))
-                            }
-                          />
-                          メール
-                        </label>
-                      </div>
-                    </div>
-
-                    <div>
-                      <div className="mb-1 text-xs text-neutral-600">
-                        送信前確認
-                      </div>
-                      <label className="flex items-center gap-2 text-sm text-neutral-800">
-                        <input
-                          type="checkbox"
-                          checked={!!draft.confirm_by_email}
-                          onChange={(e) =>
-                            setDraft((s) => ({
-                              ...s,
-                              confirm_by_email: e.target.checked,
-                            }))
-                          }
-                        />
-                        メールで承認する
-                      </label>
-                    </div>
-
-                    {draft.confirm_by_email && (
-                      <div>
-                        <div className="mb-1 text-xs text-neutral-600">
-                          確認用メールアドレス
-                        </div>
-                        <input
-                          type="email"
-                          className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"
-                          placeholder="example@yourdomain.jp"
-                          value={draft.confirm_email_address ?? ""}
-                          onChange={(e) =>
-                            setDraft((s) => ({
-                              ...s,
-                              confirm_email_address: e.target.value.trim(),
-                            }))
-                          }
-                        />
-                        <p className="mt-1 text-[11px] text-neutral-500">
-                          送信予定リストがこのアドレスへ届き、メール上の「実行」ボタン押下で送信されます。
-                        </p>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
             </section>
 
             <div className="mt-3 flex justify-end gap-2">
@@ -935,34 +834,6 @@ function BlockA({ settings }: { settings: Settings }) {
 
         <dt className="col-span-1 text-neutral-500">取得件数</dt>
         <dd className="col-span-2">{settings.company_limit ?? "-"}</dd>
-      </dl>
-    </div>
-  );
-}
-
-function BlockB({ settings }: { settings: Settings }) {
-  return (
-    <div className="rounded-xl border border-neutral-200 bg-white p-3 shadow-sm">
-      <div className="mb-1 text-sm font-semibold text-neutral-800">
-        メッセージ送信自動化
-      </div>
-      <dl className="grid grid-cols-3 gap-x-3 gap-y-1 text-xs text-neutral-700">
-        <dt className="col-span-1 text-neutral-500">状態</dt>
-        <dd className="col-span-2">
-          {settings.auto_send_messages ? "自動化オン" : "自動化なし"}
-        </dd>
-
-        <dt className="col-span-1 text-neutral-500">優先</dt>
-        <dd className="col-span-2">
-          {settings.dual_channel_priority === "form" ? "フォーム" : "メール"}
-        </dd>
-
-        <dt className="col-span-1 text-neutral-500">承認</dt>
-        <dd className="col-span-2">
-          {settings.confirm_by_email
-            ? `メール確認（${settings.confirm_email_address || "-"}）`
-            : "なし（即時実行）"}
-        </dd>
       </dl>
     </div>
   );

@@ -7,7 +7,7 @@ import { supabaseServer } from "@/lib/supabaseServer";
 
 export async function POST(
   _req: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const sb = await supabaseServer();
@@ -15,7 +15,7 @@ export async function POST(
     if (!u?.user)
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
-    const schedId = params.id;
+    const { id: schedId } = await params;
 
     // まず campaign_schedules がある前提で取ってみる（無い環境でもOK）
     let campaignId: string | null = null;

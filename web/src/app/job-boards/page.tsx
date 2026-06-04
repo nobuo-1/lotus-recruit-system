@@ -322,6 +322,10 @@ type ApiRow = {
   prefecture?: string | null;
   jobs_count: number | null;
   candidates_count: number | null;
+  condition_count?: number | null;
+  unclassified_condition_count?: number | null;
+  unclassified_jobs_count?: number | null;
+  unclassified_candidates_count?: number | null;
 };
 
 type SeriesPoint = { date: string; [site: string]: number | string };
@@ -337,7 +341,7 @@ export default function JobBoardsPage() {
   // ===== グラフ側フィルタ =====
   const [modeChart, setModeChart] = useState<Mode>("weekly");
   const [rangeChart, setRangeChart] = useState<RangeW | RangeM>("26w");
-  const [metricChart, setMetricChart] = useState<Metric>("jobs");
+  const [metricChart, setMetricChart] = useState<Metric>("candidates");
   const [sitesChart, setSitesChart] = useState<string[]>(
     SITE_OPTIONS.map((s) => s.value)
   );
@@ -348,25 +352,10 @@ export default function JobBoardsPage() {
   const [openChartCat, setOpenChartCat] = useState(false);
   const [openChartPref, setOpenChartPref] = useState(false);
 
-  // ===== 表側フィルタ =====
-  const [modeTable, setModeTable] = useState<Mode>("weekly");
-  const [rangeTable, setRangeTable] = useState<RangeW | RangeM>("26w");
-  const [metricTable, setMetricTable] = useState<Metric>("jobs");
-  const [sitesTable, setSitesTable] = useState<string[]>(
-    SITE_OPTIONS.map((s) => s.value)
-  );
-  const [largeTable, setLargeTable] = useState<string[]>([]);
-  const [smallTable, setSmallTable] = useState<string[]>([]); // ★合成キー
-  const [prefTable, setPrefTable] = useState<string[]>([]);
-  const [showTableFilters, setShowTableFilters] = useState(true);
-  const [openTableCat, setOpenTableCat] = useState(false);
-  const [openTablePref, setOpenTablePref] = useState(false);
-
   // ===== データ =====
   const [rowsChart, setRowsChart] = useState<ApiRow[]>([]);
-  const [rowsTable, setRowsTable] = useState<ApiRow[]>([]);
   const [msgChart, setMsgChart] = useState("");
-  const [msgTable, setMsgTable] = useState("");
+  const [loadingChart, setLoadingChart] = useState(false);
 
   // 共通Chip
   const Chip: React.FC<{
@@ -388,11 +377,14 @@ export default function JobBoardsPage() {
 
   // API フェッチ（グラフ）
   useEffect(() => {
+    const controller = new AbortController();
     (async () => {
+      setLoadingChart(true);
       try {
         const resp = await fetch("/api/job-boards/metrics", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
           body: JSON.stringify({
             mode: modeChart,
             metric: metricChart,
@@ -409,10 +401,15 @@ export default function JobBoardsPage() {
         setRowsChart(j.rows ?? []);
         setMsgChart("");
       } catch (e: any) {
+        if (e?.name === "AbortError") return;
         setRowsChart([]);
         setMsgChart(String(e?.message || e));
+      } finally {
+        if (!controller.signal.aborted) setLoadingChart(false);
       }
     })();
+
+    return () => controller.abort();
   }, [
     modeChart,
     metricChart,
@@ -421,42 +418,6 @@ export default function JobBoardsPage() {
     largeChart.join(","),
     smallChart.join(","), // ★
     prefChart.join(","),
-  ]);
-
-  // API フェッチ（表）
-  useEffect(() => {
-    (async () => {
-      try {
-        const resp = await fetch("/api/job-boards/metrics", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            mode: modeTable,
-            metric: metricTable,
-            sites: sitesTable,
-            large: largeTable,
-            small: decodeSmallKeysToNames(smallTable), // ★
-            pref: prefTable,
-            range: rangeTable,
-          }),
-        });
-        const j = await resp.json();
-        if (!resp.ok) throw new Error(j?.error || "fetch error");
-        setRowsTable(j.rows ?? []);
-        setMsgTable("");
-      } catch (e: any) {
-        setRowsTable([]);
-        setMsgTable(String(e?.message || e));
-      }
-    })();
-  }, [
-    modeTable,
-    metricTable,
-    rangeTable,
-    sitesTable.join(","),
-    largeTable.join(","),
-    smallTable.join(","), // ★
-    prefTable.join(","),
   ]);
 
   // 折れ線グラフ用シリーズ
@@ -482,6 +443,54 @@ export default function JobBoardsPage() {
     });
   }, [rowsChart, dateKeyChart, metricChart]);
 
+  const siteTotals = useMemo(() => {
+    const metricKey =
+      metricChart === "jobs" ? "jobs_count" : "candidates_count";
+    const unclassifiedMetricKey =
+      metricChart === "jobs"
+        ? "unclassified_jobs_count"
+        : "unclassified_candidates_count";
+    const bySite: Record<string, number> = {};
+    const unclassifiedBySite: Record<string, number> = {};
+    const unclassifiedConditionsBySite: Record<string, number> = {};
+    for (const r of rowsChart) {
+      const key = r.site_key;
+      const val = Number((r as any)[metricKey] ?? 0);
+      bySite[key] = (bySite[key] ?? 0) + (Number.isFinite(val) ? val : 0);
+      const unclassifiedVal = Number((r as any)[unclassifiedMetricKey] ?? 0);
+      unclassifiedBySite[key] =
+        (unclassifiedBySite[key] ?? 0) +
+        (Number.isFinite(unclassifiedVal) ? unclassifiedVal : 0);
+      const unclassifiedConditionCount = Number(
+        r.unclassified_condition_count ?? 0
+      );
+      unclassifiedConditionsBySite[key] =
+        (unclassifiedConditionsBySite[key] ?? 0) +
+        (Number.isFinite(unclassifiedConditionCount)
+          ? unclassifiedConditionCount
+          : 0);
+    }
+    return SITE_OPTIONS.filter((s) => sitesChart.includes(s.value))
+      .map((s) => ({
+        site: s.label,
+        key: s.value,
+        total: bySite[s.value] ?? 0,
+        unclassifiedTotal: unclassifiedBySite[s.value] ?? 0,
+        unclassifiedConditionCount:
+          unclassifiedConditionsBySite[s.value] ?? 0,
+      }))
+      .sort((a, b) => b.total - a.total);
+  }, [rowsChart, metricChart, sitesChart]);
+
+  const LoadingOverlay = () => (
+    <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/70 backdrop-blur-[1px]">
+      <div className="flex items-center gap-3 rounded-full border border-neutral-200 bg-white px-4 py-2 text-xs font-medium text-neutral-600 shadow-sm">
+        <span className="h-4 w-4 animate-spin rounded-full border-2 border-neutral-300 border-t-indigo-600" />
+        読み込み中です…
+      </div>
+    </div>
+  );
+
   return (
     <>
       <AppHeader />
@@ -493,7 +502,7 @@ export default function JobBoardsPage() {
           accent="gold"
           actions={[
             { href: "/job-boards/manual", label: "手動実行", variant: "primary" },
-            { href: "/job-boards/runs", label: "実行状況", variant: "secondary" },
+            { href: "/job-boards/runs", label: "自動実行履歴", variant: "secondary" },
           ]}
         />
 
@@ -512,9 +521,15 @@ export default function JobBoardsPage() {
               },
               {
                 href: "/job-boards/runs",
-                title: "実行状況",
-                description: "集計ジョブの進行や結果を確認します。",
+                title: "自動実行履歴",
+                description: "毎月1日の自動取得結果を確認します。",
                 icon: ChartSpline,
+              },
+              {
+                href: "/job-boards/runs/settings",
+                title: "自動実行設定",
+                description: "完了メールの送信先と取得対象を管理します。",
+                icon: FileCog,
               },
               {
                 href: "/job-boards/manual/history",
@@ -689,7 +704,8 @@ export default function JobBoardsPage() {
           )}
 
           {/* 折れ線グラフ */}
-          <div className="h-64 mt-3">
+          <div className="relative h-64 mt-3">
+            {loadingChart && <LoadingOverlay />}
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={seriesChart}>
                 <CartesianGrid strokeDasharray="3 3" />
@@ -713,216 +729,57 @@ export default function JobBoardsPage() {
               </LineChart>
             </ResponsiveContainer>
           </div>
-          {msgChart && (
-            <pre className="mt-2 whitespace-pre-wrap text-xs text-red-600">
-              {msgChart}
-            </pre>
-          )}
-        </section>
-
-        {/* ====== サイト別合計（表） ====== */}
-        <section className="mt-6 rounded-[28px] border border-white/80 bg-white/92 p-5 shadow-[0_14px_40px_rgba(15,23,42,0.05)]">
-          {/* 表用 KPI */}
-          <div className="grid grid-cols-2 gap-4 md:grid-cols-5 mb-3">
-            <KpiCard
-              label="対象サイト（表）"
-              value={allLabel(sitesTable.length, SITE_OPTIONS.length)}
-            />
-            <KpiCard
-              label="職種（大・表）"
-              value={allLabel(largeTable.length || 0, JOB_LARGE.length)}
-            />
-            <KpiCard
-              label="職種（小・表）"
-              value={smallTable.length ? String(smallTable.length) : "すべて"} // ★
-            />
-            <KpiCard
-              label="都道府県（表）"
-              value={prefTable.length ? String(prefTable.length) : "全国"}
-            />
-            <KpiCard label="ビュー（表）" value={labelOfMode(modeTable)} />
-          </div>
-
-          {/* フィルタのトグル */}
-          <div className="mb-2 flex flex-wrap items-center gap-2">
-            <button
-              className="text-xs rounded-lg border border-neutral-300 px-2 py-1 hover:bg-neutral-50"
-              onClick={() => setShowTableFilters((v) => !v)}
-            >
-              {showTableFilters ? "フィルタを隠す" : "フィルタを表示"}
-            </button>
-          </div>
-
-          {showTableFilters && (
-            <>
-              <div className="mb-2 flex flex-wrap items-center">
-                {(["weekly", "monthly"] as const).map((m) => (
-                  <Chip
-                    key={m}
-                    label={m === "weekly" ? "週次" : "月次"}
-                    active={modeTable === m}
-                    onClick={() => {
-                      setModeTable(m);
-                      setRangeTable(m === "weekly" ? "26w" : "12m");
-                    }}
-                  />
-                ))}
-                {(modeTable === "weekly"
-                  ? (["12w", "26w", "52w"] as const)
-                  : (["12m", "36m"] as const)
-                ).map((r) => (
-                  <Chip
-                    key={r}
-                    label={r}
-                    active={rangeTable === r}
-                    onClick={() => setRangeTable(r)}
-                  />
-                ))}
-                {(["jobs", "candidates"] as const).map((k) => (
-                  <Chip
-                    key={k}
-                    label={k === "jobs" ? "求人数" : "求職者数"}
-                    active={metricTable === k}
-                    onClick={() => setMetricTable(k)}
-                  />
-                ))}
-              </div>
-
-              <div className="rounded-xl border border-neutral-200 p-3 bg-neutral-50/40">
-                {/* サイト */}
-                <div className="mb-2">
-                  <div className="mb-1 text-xs font-medium text-neutral-600">
-                    サイト
-                  </div>
-                  <div className="flex flex-wrap">
-                    <Chip
-                      active={sitesTable.length === SITE_OPTIONS.length}
-                      label="すべて"
-                      onClick={() =>
-                        setSitesTable(SITE_OPTIONS.map((s) => s.value))
-                      }
-                    />
-                    <Chip
-                      active={sitesTable.length === 0}
-                      label="解除"
-                      onClick={() => setSitesTable([])}
-                    />
-                    {SITE_OPTIONS.map((o) => (
-                      <Chip
-                        key={o.value}
-                        label={o.label}
-                        active={sitesTable.includes(o.value)}
-                        onClick={() =>
-                          setSitesTable(
-                            sitesTable.includes(o.value)
-                              ? sitesTable.filter((x) => x !== o.value)
-                              : [...sitesTable, o.value]
-                          )
-                        }
-                      />
-                    ))}
-                  </div>
-                </div>
-
-                {/* 職種（モーダル） */}
-                <div className="mb-2">
-                  <div className="mb-1 text-xs font-medium text-neutral-600">
-                    職種
-                  </div>
-                  <button
-                    className="px-2 py-1 text-xs rounded-lg border border-neutral-300 hover:bg-neutral-50"
-                    onClick={() => setOpenTableCat(true)}
-                  >
-                    選択（大:{largeTable.length || "すべて"} / 小:
-                    {smallTable.length || "すべて"}）
-                  </button>
-                </div>
-
-                {/* 都道府県（モーダル） */}
-                <div className="mb-2">
-                  <div className="mb-1 text-xs font-medium text-neutral-600">
-                    都道府県
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      className="px-2 py-1 text-xs rounded-lg border border-neutral-300 hover:bg-neutral-50"
-                      onClick={() => setOpenTablePref(true)}
-                    >
-                      選択（
-                      {prefTable.length ? `${prefTable.length}件` : "全国"}）
-                    </button>
-                    {prefTable.length > 0 && (
-                      <button
-                        className="px-2 py-1 text-xs rounded-lg border border-neutral-300 hover:bg-neutral-50"
-                        onClick={() => setPrefTable([])}
-                      >
-                        クリア
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-              </div>
-            </>
-          )}
 
           {/* 表（サイト別合計） */}
-          <div className="overflow-x-auto rounded-xl border border-neutral-200 mt-3">
+          <div className="relative overflow-x-auto rounded-xl border border-neutral-200 mt-5">
+            {loadingChart && <LoadingOverlay />}
             <table className="min-w-[760px] w-full text-sm">
               <thead className="bg-neutral-50 text-neutral-600">
                 <tr>
                   <th className="px-3 py-3 text-left">サイト</th>
                   <th className="px-3 py-3 text-left">
-                    合計（{metricTable === "jobs" ? "求人数" : "求職者数"}）
+                    合計（{metricChart === "jobs" ? "求人数" : "求職者数"}）
                   </th>
+                  <th className="px-3 py-3 text-left">職種未分類</th>
                 </tr>
               </thead>
               <tbody>
-                {(() => {
-                  const metricKey =
-                    metricTable === "jobs" ? "jobs_count" : "candidates_count";
-                  const bySite: Record<string, number> = {};
-                  for (const r of rowsTable) {
-                    const key = r.site_key;
-                    const val = Number((r as any)[metricKey] ?? 0);
-                    bySite[key] =
-                      (bySite[key] ?? 0) + (Number.isFinite(val) ? val : 0);
-                  }
-                  const sorted = SITE_OPTIONS.filter((s) =>
-                    sitesTable.includes(s.value)
-                  )
-                    .map((s) => ({
-                      site: s.label,
-                      key: s.value,
-                      total: bySite[s.value] ?? 0,
-                    }))
-                    .sort((a, b) => b.total - a.total);
-
-                  if (sorted.length === 0) {
-                    return (
-                      <tr>
-                        <td
-                          colSpan={2}
-                          className="px-4 py-8 text-center text-neutral-400"
-                        >
-                          データがありません
-                        </td>
-                      </tr>
-                    );
-                  }
-                  return sorted.map((r) => (
+                {siteTotals.length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan={3}
+                      className="px-4 py-8 text-center text-neutral-400"
+                    >
+                      データがありません
+                    </td>
+                  </tr>
+                ) : (
+                  siteTotals.map((r) => (
                     <tr key={r.key} className="border-t border-neutral-200">
                       <td className="px-3 py-3">{r.site}</td>
-                      <td className="px-3 py-3">{r.total}</td>
+                      <td className="px-3 py-3 tabular-nums">
+                        {r.total.toLocaleString()}
+                      </td>
+                      <td className="px-3 py-3">
+                        {r.unclassifiedConditionCount > 0 ? (
+                          <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800">
+                            {r.unclassifiedConditionCount.toLocaleString()}条件 /{" "}
+                            {r.unclassifiedTotal.toLocaleString()}
+                            {metricChart === "jobs" ? "件" : "名"}
+                          </span>
+                        ) : (
+                          <span className="text-neutral-400">なし</span>
+                        )}
+                      </td>
                     </tr>
-                  ));
-                })()}
+                  ))
+                )}
               </tbody>
             </table>
           </div>
-          {msgTable && (
+          {msgChart && (
             <pre className="mt-2 whitespace-pre-wrap text-xs text-red-600">
-              {msgTable}
+              {msgChart}
             </pre>
           )}
         </section>
@@ -940,18 +797,6 @@ export default function JobBoardsPage() {
             }}
           />
         )}
-        {openTableCat && (
-          <JobCategoryModal
-            large={largeTable}
-            small={smallTable} // ★
-            onCloseAction={() => setOpenTableCat(false)}
-            onApplyAction={(L, S) => {
-              setLargeTable(L);
-              setSmallTable(S); // ★
-              setOpenTableCat(false);
-            }}
-          />
-        )}
         {openChartPref && (
           <PrefectureModal
             selected={prefChart}
@@ -959,16 +804,6 @@ export default function JobBoardsPage() {
             onApplyAction={(pref) => {
               setPrefChart(pref);
               setOpenChartPref(false);
-            }}
-          />
-        )}
-        {openTablePref && (
-          <PrefectureModal
-            selected={prefTable}
-            onCloseAction={() => setOpenTablePref(false)}
-            onApplyAction={(pref) => {
-              setPrefTable(pref);
-              setOpenTablePref(false);
             }}
           />
         )}

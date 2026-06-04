@@ -3,8 +3,12 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import type { SiteKey } from "@/server/job-boards/types";
-import { createMynaviLoginSession } from "@/server/job-boards/mynaviLogin";
-import { fetchMynaviScoutCount } from "@/server/job-boards/mynaviCandidates";
+import {
+  fetchCandidateCountForCondition,
+  fetchCandidateCountFromUrl,
+  type CandidateCountResult,
+  type CandidateFetchContext,
+} from "@/server/job-boards/candidates";
 import {
   saveJobBoardManualHistory,
   type ManualHistoryStatus,
@@ -29,13 +33,11 @@ type RequestBody = {
   pref?: string[];
 };
 
-type CandidateResult = {
+type CandidateResult = CandidateCountResult & {
   siteKey: SiteKey;
-  url: string | null;
-  total: number | null;
-  httpStatus?: number | null;
-  parseHint?: string | null;
-  errorMessage?: string | null;
+  internalLarge?: string | null;
+  internalSmall?: string | null;
+  prefecture?: string | null;
   debugLogs?: string[];
 };
 
@@ -48,130 +50,8 @@ function isValidSiteKey(siteKey: string): siteKey is SiteKey {
   );
 }
 
-function safeParseCount(raw: string | undefined | null): number | null {
-  if (!raw) return null;
-  const n = Number(raw.replace(/,/g, ""));
-  if (Number.isNaN(n)) return null;
-  return n;
-}
-
-function parseCandidateCount(html: string): { count: number | null; hint: string | null } {
-  const patterns: Array<{ re: RegExp; hint: string }> = [
-    { re: /該当(?:会員|求職者|候補者|人材)[\s　]*([\d,]+)\s*(?:名|人)/g, hint: "text:該当◯◯○名" },
-    { re: /条件に合う(?:会員|求職者|候補者)[\s　]*([\d,]+)\s*(?:名|人)/g, hint: "text:条件に合う○名" },
-    { re: /(?:求職者|候補者|会員|登録者)[\s　]*([\d,]+)\s*(?:名|人)/g, hint: "text:求職者/候補者/会員" },
-    { re: /検索対象[\s　]*([\d,]+)\s*(?:名|人)/g, hint: "text:検索対象○名" },
-    { re: /対象(?:人数|者数)?[\s　]*([\d,]+)\s*(?:名|人)/g, hint: "text:対象○名" },
-  ];
-
-  let best: number | null = null;
-  let bestHint: string | null = null;
-
-  for (const { re, hint } of patterns) {
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(html)) !== null) {
-      const n = safeParseCount(m?.[1]);
-      if (n == null) continue;
-      if (best == null || n > best) {
-        best = n;
-        bestHint = hint;
-      }
-    }
-  }
-
-  const jsonRe =
-    /["']?(?:candidateCount|memberCount|resumeCount|personCount|userCount|targetCount)["']?\s*:\s*([0-9]{1,7})/g;
-  let jm: RegExpExecArray | null;
-  while ((jm = jsonRe.exec(html)) !== null) {
-    const n = safeParseCount(jm?.[1]);
-    if (n == null) continue;
-    if (best == null || n > best) {
-      best = n;
-      bestHint = "json:*Count(max)";
-    }
-  }
-
-  return { count: best, hint: bestHint };
-}
-
-async function fetchCandidateCountViaDirectFetch(
-  siteKey: SiteKey,
-  url: string
-): Promise<CandidateResult> {
-  const controller = new AbortController();
-  const timeoutMs = 15000;
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const refererMap: Record<SiteKey, string> = {
-    mynavi: "https://tenshoku.mynavi.jp/",
-    doda: "https://doda.jp/",
-    type: "https://type.jp/",
-    womantype: "https://woman-type.jp/",
-  };
-
-  try {
-    const res = await fetch(url, {
-      method: "GET",
-      headers: {
-        "user-agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
-        "accept-language": "ja-JP,ja;q=0.9,en;q=0.8",
-        accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        referer: refererMap[siteKey],
-      },
-      cache: "no-store",
-      signal: controller.signal,
-    });
-
-    const httpStatus = res.status;
-    if (!res.ok) {
-      return {
-        siteKey,
-        url,
-        total: null,
-        httpStatus,
-        parseHint: null,
-        errorMessage: `fetch failed: ${res.status} ${res.statusText}`,
-      };
-    }
-
-    const html = await res.text();
-    const { count, hint } = parseCandidateCount(html);
-    if (count == null) {
-      return {
-        siteKey,
-        url,
-        total: null,
-        httpStatus,
-        parseHint: hint,
-        errorMessage: "候補者数をページからパースできませんでした。",
-      };
-    }
-
-    return {
-      siteKey,
-      url,
-      total: count,
-      httpStatus,
-      parseHint: hint,
-      errorMessage: null,
-    };
-  } catch (err: unknown) {
-    const msg =
-      err instanceof Error && err.name === "AbortError"
-        ? "fetch aborted (timeout)"
-        : `fetch error: ${err instanceof Error ? err.message : String(err)}`;
-    return {
-      siteKey,
-      url,
-      total: null,
-      httpStatus: null,
-      parseHint: null,
-      errorMessage: msg,
-    };
-  } finally {
-    clearTimeout(timer);
-  }
+function listOrNull(values: string[] | undefined) {
+  return Array.isArray(values) && values.length > 0 ? values : [null];
 }
 
 export async function POST(req: Request) {
@@ -202,53 +82,47 @@ export async function POST(req: Request) {
 
     const results: CandidateResult[] = [];
 
-    let mynaviSession: Awaited<ReturnType<typeof createMynaviLoginSession>> | null =
-      null;
+    const context: CandidateFetchContext = {};
 
     for (const siteKey of sites) {
       const url = scoutUrls[siteKey];
-      if (!url) {
+      if (url) {
+        const result = await fetchCandidateCountFromUrl(siteKey, url, context);
         results.push({
+          ...result,
           siteKey,
-          url: null,
-          total: null,
-          errorMessage: "スカウト検索URLが未設定です。",
+          debugLogs:
+            siteKey === "mynavi" ? (context.mynaviDebugLogs ?? []) : undefined,
         });
         continue;
       }
 
-      if (siteKey === "mynavi") {
-        if (!mynaviSession) {
-          mynaviSession = await createMynaviLoginSession();
+      for (const internalLarge of listOrNull(body.large)) {
+        for (const internalSmall of listOrNull(body.small)) {
+          for (const prefecture of listOrNull(body.pref)) {
+            const result = await fetchCandidateCountForCondition(
+              {
+                siteKey,
+                internalLarge,
+                internalSmall,
+                prefecture,
+              },
+              context
+            );
+            results.push({
+              ...result,
+              siteKey,
+              internalLarge,
+              internalSmall,
+              prefecture,
+              debugLogs:
+                siteKey === "mynavi"
+                  ? (context.mynaviDebugLogs ?? [])
+                  : undefined,
+            });
+          }
         }
-        const { session, debugLogs } = mynaviSession;
-        if (!session) {
-          results.push({
-            siteKey,
-            url,
-            total: null,
-            errorMessage:
-              "マイナビへのログインに失敗しました。ログイン情報や reCAPTCHA の状態を確認してください。",
-            debugLogs,
-          });
-          continue;
-        }
-
-        const result = await fetchMynaviScoutCount(session, url);
-        results.push({
-          siteKey,
-          url: result.url,
-          total: result.total,
-          httpStatus: result.httpStatus ?? null,
-          parseHint: result.parseHint ?? null,
-          errorMessage: result.errorMessage ?? null,
-          debugLogs,
-        });
-        continue;
       }
-
-      const direct = await fetchCandidateCountViaDirectFetch(siteKey, url);
-      results.push(direct);
     }
 
     const fetchedCount = results.reduce((sum, r) => {

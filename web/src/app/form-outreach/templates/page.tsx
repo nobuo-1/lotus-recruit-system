@@ -235,7 +235,7 @@ export default function TemplatesPage() {
   };
 
   const placeholdersLine =
-    "{{sender_company}}, {{sender_name}}, {{sender_email}}, {{sender_reply_to}}, {{sender_phone}}, {{sender_website}}, {{recipient_company}}, {{recipient_prefecture}}, {{recipient_industry}}, {{website}}, {{signature}}, {{today}}";
+    "{{sender_type}}, {{sender_company}}, {{sender_company_kana}}, {{sender_department}}, {{sender_position}}, {{sender_name}}, {{sender_name_kana}}, {{sender_email}}, {{sender_reply_to}}, {{sender_phone}}, {{sender_website}}, {{sender_postal_code}}, {{sender_prefecture}}, {{sender_address}}, {{recipient_company}}, {{recipient_prefecture}}, {{recipient_industry}}, {{website}}, {{signature}}, {{today}}";
 
   const PlaceholderHelp = () => (
     <div className="mt-2 rounded-lg border border-neutral-200 bg-neutral-50 p-2 text-[11px] leading-5 text-neutral-700">
@@ -246,7 +246,22 @@ export default function TemplatesPage() {
           ：送信者の会社名（送信元設定の sender_company）
         </li>
         <li>
+          <code>{"{{sender_type}}"}</code>：送信者区分（法人 / 個人）
+        </li>
+        <li>
+          <code>{"{{sender_company_kana}}"}</code>：法人名ふりがな
+        </li>
+        <li>
+          <code>{"{{sender_department}}"}</code>：部署名
+        </li>
+        <li>
+          <code>{"{{sender_position}}"}</code>：役職
+        </li>
+        <li>
           <code>{"{{sender_name}}"}</code>：送信者名（送信元設定の from_name）
+        </li>
+        <li>
+          <code>{"{{sender_name_kana}}"}</code>：送信者名ふりがな
         </li>
         <li>
           <code>{"{{sender_email}}"}</code>：送信メール（送信元設定）
@@ -259,6 +274,15 @@ export default function TemplatesPage() {
         </li>
         <li>
           <code>{"{{sender_website}}"}</code>：WebサイトURL（送信元設定）
+        </li>
+        <li>
+          <code>{"{{sender_postal_code}}"}</code>：郵便番号
+        </li>
+        <li>
+          <code>{"{{sender_prefecture}}"}</code>：送信元都道府県
+        </li>
+        <li>
+          <code>{"{{sender_address}}"}</code>：送信元住所
         </li>
         <li>
           <code>{"{{signature}}"}</code>

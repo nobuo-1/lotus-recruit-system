@@ -4,23 +4,11 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 import { NextResponse } from "next/server";
-import { supabaseServer } from "@/lib/supabaseServer";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { SHARED_RESEARCH_TENANT_ID } from "@/server/job-boards/sharedResearch";
 
 export async function GET() {
   try {
-    const sb = await supabaseServer();
-    const { data: u } = await sb.auth.getUser();
-    if (!u?.user)
-      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-
-    const { data: prof } = await sb
-      .from("profiles")
-      .select("tenant_id")
-      .eq("id", u.user.id)
-      .maybeSingle();
-    const tenantId = prof?.tenant_id as string | undefined;
-
     const admin = supabaseAdmin();
 
     // 30日内の KPI
@@ -30,8 +18,8 @@ export async function GET() {
 
     const { data: runs } = await admin
       .from("job_board_runs")
-      .select("id, site, status, started_at, finished_at, note")
-      .eq("tenant_id", tenantId ?? null)
+      .select("id, site, status, started_at, finished_at, error")
+      .eq("tenant_id", SHARED_RESEARCH_TENANT_ID)
       .gte("started_at", sinceIso)
       .order("started_at", { ascending: false });
 
@@ -49,8 +37,8 @@ export async function GET() {
     // 直近20件
     const { data: latest } = await admin
       .from("job_board_runs")
-      .select("id, site, status, started_at, finished_at, note")
-      .eq("tenant_id", tenantId ?? null)
+      .select("id, site, status, started_at, finished_at, error")
+      .eq("tenant_id", SHARED_RESEARCH_TENANT_ID)
       .order("started_at", { ascending: false })
       .limit(20);
 

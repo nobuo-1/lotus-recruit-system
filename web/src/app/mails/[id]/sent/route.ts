@@ -14,14 +14,18 @@ function supabaseAdmin() {
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
-export async function GET(_: Request, { params }: { params: { id: string } }) {
+export async function GET(
+  _: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
   try {
     const supabase = supabaseAdmin();
+    const { id } = await params;
 
     const { data, error } = await supabase
       .from("mail_deliveries")
       .select("recipient_id")
-      .eq("mail_id", params.id);
+      .eq("mail_id", id);
 
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 });

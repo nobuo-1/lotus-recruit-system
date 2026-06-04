@@ -4,19 +4,58 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 const SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
 const CRON_SECRET = process.env.FORM_OUTREACH_CRON_SECRET || "";
 
+type ScheduleType = "weekly" | "monthly";
+
+type AutoSettingsRow = {
+  tenant_id?: string | null;
+  auto_company_list?: boolean | null;
+  company_schedule?: ScheduleType | null;
+  company_weekday?: number | null;
+  company_month_day?: number | null;
+  company_limit?: number | null;
+  enabled?: boolean | null;
+  timezone?: string | null;
+};
+
+type PeriodRunRow = {
+  new_prospects?: number | null;
+};
+
+type RunCompanyListResponse = {
+  error?: string | null;
+  skipped?: boolean;
+  reason?: string | null;
+  run_id?: string | null;
+  new_prospects?: number | null;
+  [key: string]: unknown;
+};
+
+type CronTenantResult = {
+  tenantId: string;
+  skipped?: string;
+  triggered?: boolean;
+  remaining?: number;
+  already?: number;
+  limit?: number;
+  status?: number;
+  error?: string;
+  run_id?: string | null;
+  new_prospects?: number | null;
+};
+
 /** ====== Supabase Admin ====== */
-function getAdmin(): { sb: any; usingServiceRole: boolean } {
+function getAdmin(): { sb: SupabaseClient; usingServiceRole: boolean } {
   if (!SUPABASE_URL) throw new Error("NEXT_PUBLIC_SUPABASE_URL is missing");
   if (SERVICE_ROLE) {
     return {
-      sb: createClient(SUPABASE_URL, SERVICE_ROLE) as any,
+      sb: createClient(SUPABASE_URL, SERVICE_ROLE),
       usingServiceRole: true,
     };
   }
@@ -25,9 +64,13 @@ function getAdmin(): { sb: any; usingServiceRole: boolean } {
       "SUPABASE_SERVICE_ROLE_KEY / NEXT_PUBLIC_SUPABASE_ANON_KEY missing"
     );
   return {
-    sb: createClient(SUPABASE_URL, ANON_KEY) as any,
+    sb: createClient(SUPABASE_URL, ANON_KEY),
     usingServiceRole: false,
   };
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /** ====== Utils (JST / 週次・月次の期間計算) ====== */
@@ -104,10 +147,10 @@ function getMonthlyRange(
 
 /** 指定テナントの今期（週 or 月）の new_prospects 合計 */
 async function loadPeriodNewProspects(
-  sb: any,
+  sb: SupabaseClient,
   tenantId: string,
   params: {
-    schedule: "weekly" | "monthly";
+    schedule: ScheduleType;
     weekday?: number | null;
     monthDay?: number | null;
     timezone?: string | null;
@@ -142,8 +185,8 @@ async function loadPeriodNewProspects(
   if (error) throw new Error(error.message);
 
   let sum = 0;
-  for (const row of data || []) {
-    const v = Number((row as any).new_prospects ?? 0) || 0;
+  for (const row of ((data ?? []) as PeriodRunRow[])) {
+    const v = Number(row.new_prospects ?? 0) || 0;
     sum += v;
   }
   return sum;
@@ -151,22 +194,113 @@ async function loadPeriodNewProspects(
 
 /** あるテナントで今このタイミングで自動取得を走らせるべきか？ */
 async function shouldTriggerAutoRun(
-  sb: any,
+  sb: SupabaseClient,
   tenantId: string
-): Promise<boolean> {
+): Promise<{ canRun: boolean; activeRunning: number; staleRunning: number }> {
   // すでに running のジョブがあれば起動しない
   const { data: running, error: runningErr } = await sb
     .from("form_outreach_auto_runs")
-    .select("id")
+    .select("id, started_at")
     .eq("tenant_id", tenantId)
     .eq("kind", "auto-company-list")
-    .eq("status", "running")
-    .limit(1);
+    .eq("status", "running");
 
   if (runningErr) throw new Error(runningErr.message);
-  if ((running || []).length > 0) return false;
+  const rows = (running ?? []) as Array<{ id: string; started_at?: string | null }>;
+  if (rows.length === 0) {
+    return { canRun: true, activeRunning: 0, staleRunning: 0 };
+  }
 
-  return true;
+  const staleBefore = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  const active = rows.filter((row) => {
+    if (!row.started_at) return true;
+    const started = new Date(row.started_at);
+    return Number.isNaN(started.getTime()) || started >= staleBefore;
+  });
+  const stale = rows.filter((row) => !active.some((a) => a.id === row.id));
+
+  if (stale.length > 0) {
+    const now = new Date().toISOString();
+    const { error: staleErr } = await sb
+      .from("form_outreach_auto_runs")
+      .update({
+        status: "error",
+        finished_at: now,
+        last_message: "auto company list run marked stale by cron",
+        last_progress_at: now,
+        error_text:
+          "runningのまま2時間以上更新されなかったため、cronが失敗扱いにしました。",
+      })
+      .in(
+        "id",
+        stale.map((row) => row.id)
+      );
+    if (staleErr) throw new Error(staleErr.message);
+  }
+
+  return {
+    canRun: active.length === 0,
+    activeRunning: active.length,
+    staleRunning: stale.length,
+  };
+}
+
+async function insertCronRunLog(
+  sb: SupabaseClient,
+  args: {
+    tenantId: string;
+    status: "skipped" | "error";
+    targetCount?: number;
+    message: string;
+    errorText?: string | null;
+    meta?: Record<string, unknown>;
+    dedupeMinutes?: number;
+  }
+) {
+  const dedupeMinutes = args.dedupeMinutes ?? 60;
+  const since = new Date(Date.now() - dedupeMinutes * 60 * 1000).toISOString();
+
+  const { data: existing, error: existingErr } = await sb
+    .from("form_outreach_auto_runs")
+    .select("id")
+    .eq("tenant_id", args.tenantId)
+    .eq("kind", "auto-company-list")
+    .eq("status", args.status)
+    .eq("last_message", args.message)
+    .gte("started_at", since)
+    .limit(1);
+
+  if (existingErr) {
+    console.error("cron log dedupe failed:", existingErr.message);
+  }
+  if (Array.isArray(existing) && existing.length > 0) return existing[0]?.id;
+
+  const now = new Date().toISOString();
+  const { data, error } = await sb
+    .from("form_outreach_auto_runs")
+    .insert({
+      tenant_id: args.tenantId,
+      kind: "auto-company-list",
+      status: args.status,
+      target_count: args.targetCount ?? 0,
+      started_at: now,
+      finished_at: now,
+      last_message: args.message,
+      new_prospects: 0,
+      new_rejected: 0,
+      new_similar_sites: 0,
+      last_progress_at: now,
+      error_text: args.errorText ?? null,
+      meta: args.meta ?? {},
+    })
+    .select("id")
+    .maybeSingle();
+
+  if (error) {
+    console.error("cron log insert failed:", error.message);
+    return null;
+  }
+  return data?.id ?? null;
 }
 
 /** ========= Handler ========= */
@@ -204,19 +338,17 @@ export async function GET(req: Request) {
       `${url.protocol}//${url.host}` ||
       "http://localhost:3000";
 
-    const results: any[] = [];
+    const results: CronTenantResult[] = [];
 
-    for (const r of rows || []) {
-      const tenantId = (r as any).tenant_id as string;
-      const autoCompanyList = !!(r as any).auto_company_list;
-      const enabled = (r as any).enabled;
-      const schedule = ((r as any).company_schedule || "weekly") as
-        | "weekly"
-        | "monthly";
-      const weekday = (r as any).company_weekday as number | null;
-      const monthDay = (r as any).company_month_day as number | null;
-      const limit = Number((r as any).company_limit ?? 0) || 0;
-      const tz = ((r as any).timezone || "Asia/Tokyo") as string;
+    for (const r of (rows ?? []) as AutoSettingsRow[]) {
+      const tenantId = r.tenant_id || "";
+      const autoCompanyList = !!r.auto_company_list;
+      const enabled = r.enabled;
+      const schedule: ScheduleType = r.company_schedule || "weekly";
+      const weekday = r.company_weekday ?? null;
+      const monthDay = r.company_month_day ?? null;
+      const limit = Number(r.company_limit ?? 0) || 0;
+      const tz = r.timezone || "Asia/Tokyo";
 
       if (!tenantId || !autoCompanyList || !limit) {
         continue;
@@ -271,11 +403,12 @@ export async function GET(req: Request) {
       }
 
       // 既に running があれば起動しない
-      const canRun = await shouldTriggerAutoRun(sb, tenantId);
-      if (!canRun) {
+      const runState = await shouldTriggerAutoRun(sb, tenantId);
+      if (!runState.canRun) {
         results.push({
           tenantId,
           skipped: "already_running",
+          already: runState.activeRunning,
         });
         continue;
       }
@@ -285,29 +418,112 @@ export async function GET(req: Request) {
 
       try {
         // 各テナントごとに run-company-list を叩く
-        await fetch(`${base}/api/form-outreach/automation/run-company-list`, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-tenant-id": tenantId,
-          },
-          body: JSON.stringify({
-            max_new_prospects: remaining,
-            triggered_by: "cron",
-            schedule: schedule,
-          }),
-        });
+        const runRes = await fetch(
+          `${base}/api/form-outreach/automation/run-company-list`,
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-tenant-id": tenantId,
+            },
+            body: JSON.stringify({
+              max_new_prospects: remaining,
+              triggered_by: "cron",
+              schedule: schedule,
+            }),
+          }
+        );
+        const runJson = (await runRes
+          .json()
+          .catch(() => ({}))) as RunCompanyListResponse;
+        if (!runRes.ok) {
+          await insertCronRunLog(sb, {
+            tenantId,
+            status: "error",
+            targetCount: remaining,
+            message: "auto company list cron failed before run creation",
+            errorText: JSON.stringify({
+              status: runRes.status,
+              error: runJson?.error ?? null,
+              response: runJson,
+            }).slice(0, 2000),
+            meta: {
+              schedule,
+              weekday,
+              monthDay,
+              limit,
+              already,
+              remaining,
+              triggered_by: "cron",
+            },
+            dedupeMinutes: 30,
+          });
+          results.push({
+            tenantId,
+            triggered: false,
+            status: runRes.status,
+            error: runJson?.error || "run-company-list failed",
+          });
+          continue;
+        }
+        if (runJson?.skipped) {
+          await insertCronRunLog(sb, {
+            tenantId,
+            status: "skipped",
+            targetCount: remaining,
+            message: `auto company list cron skipped: ${
+              runJson?.reason || "unknown"
+            }`,
+            meta: {
+              schedule,
+              weekday,
+              monthDay,
+              limit,
+              already,
+              remaining,
+              response: runJson,
+              triggered_by: "cron",
+            },
+            dedupeMinutes: 12 * 60,
+          });
+          results.push({
+            tenantId,
+            triggered: false,
+            skipped: runJson?.reason || "unknown",
+            remaining,
+          });
+          continue;
+        }
         results.push({
           tenantId,
           triggered: true,
           remaining,
+          run_id: runJson?.run_id ?? null,
+          new_prospects: runJson?.new_prospects ?? null,
         });
-      } catch (e: any) {
+      } catch (e: unknown) {
         console.error("cron -> run-company-list failed:", e);
+        await insertCronRunLog(sb, {
+          tenantId,
+          status: "error",
+          targetCount: remaining,
+          message: "auto company list cron request failed",
+          errorText: errorMessage(e).slice(0, 2000),
+          meta: {
+            schedule,
+            weekday,
+            monthDay,
+            limit,
+            already,
+            remaining,
+            triggered_by: "cron",
+          },
+          dedupeMinutes: 30,
+        });
         results.push({
           tenantId,
           triggered: false,
-          error: String(e?.message || e),
+          error: errorMessage(e),
         });
       }
     }
@@ -319,12 +535,9 @@ export async function GET(req: Request) {
       },
       { status: 200 }
     );
-  } catch (e: any) {
+  } catch (e: unknown) {
     console.error("automation cron error:", e);
-    return NextResponse.json(
-      { error: String(e?.message || e) },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: errorMessage(e) }, { status: 500 });
   }
 }
 

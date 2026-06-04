@@ -5,11 +5,11 @@ import { supabaseServer } from "@/lib/supabaseServer";
 /** GET /api/form-outreach/templates/:id */
 export async function GET(
   req: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const tenantId = req.headers.get("x-tenant-id") || "";
-    const id = params.id;
+    const { id } = await params;
     if (!tenantId) {
       return NextResponse.json(
         { error: "x-tenant-id required" },
@@ -47,11 +47,11 @@ export async function GET(
 /** PATCH /api/form-outreach/templates/:id */
 export async function PATCH(
   req: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const tenantId = req.headers.get("x-tenant-id") || "";
-    const id = params.id;
+    const { id } = await params;
     if (!tenantId) {
       return NextResponse.json(
         { error: "x-tenant-id required" },
@@ -91,11 +91,11 @@ export async function PATCH(
 /** DELETE /api/form-outreach/templates/:id */
 export async function DELETE(
   req: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const tenantId = req.headers.get("x-tenant-id") || "";
-    const id = params.id;
+    const { id } = await params;
     if (!tenantId) {
       return NextResponse.json(
         { error: "x-tenant-id required" },
